@@ -3,7 +3,7 @@
 #include "ops.h"
 
 #include "../../core/formula.h"
-#include "../../core/proof.h"
+#include "stack.h"
 #include "../../parser/parser.h"
 #include "../../util/error.h"
 

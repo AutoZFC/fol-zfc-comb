@@ -10,6 +10,23 @@ cc_library(
     ],
 )
 
+# ND-specific proof-stack scaffolding (ScopeDeps, AssumptionScope,
+# FixVarScope, ProofStack, ClassicalProofStack). Lived in src/core/proof
+# during the pre-multi-system era; moved here so each proof system owns
+# its own data structures.
+cc_library(
+    name = "stack",
+    srcs = ["stack.cpp"],
+    hdrs = ["stack.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/core:scope_utils",
+        "//src/util:error",
+        "//src/util:registry",
+    ],
+)
+
 cc_library(
     name = "verifier",
     srcs = ["verifier.cpp"],
@@ -17,8 +34,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":ops",
+        ":stack",
         "//src/core:formula",
-        "//src/core:proof",
         "//src/parser",
         "//src/proof:ir",
         "//src/proof:proof_value",

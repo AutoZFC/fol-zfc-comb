@@ -93,7 +93,7 @@ proof nat_is_transitive:
     # Case 2: eq(z1, x1) -> elem(z1, n) because x1 in n
     h_c2 = assume eq(z1, x1)
     h_z1_in_n_c2 = eq_subst h_c2, h_x1_in_n
-    esym = use eq_sym
+    esym = use eq_symmetric
     esym1 = forall_elim esym, z1
     esym2 = forall_elim esym1, x1
     h_eq_x1z1 = implies_elim esym2, h_c2
@@ -247,7 +247,7 @@ proof nat_subset_elem:
 
     # Precompute shared tools
     sdef = use subset_def
-    esym = use eq_sym
+    esym = use eq_symmetric
 
     # ---- Part A: subset(wS, n) ----
     fix y0
@@ -568,7 +568,7 @@ proof nat_trichotomy:
     h_S = exists_elim sep1, wS
 
     sdef = use subset_def
-    esym = use eq_sym
+    esym = use eq_symmetric
 
     # ---- Part A: subset(wS, n) ----
     fix y0
@@ -621,7 +621,7 @@ proof nat_trichotomy:
     h_tri_base_c1 = or_intro_r d_left_base, h_e0_in_a1
     h_base_c1_impl = implies_intro h_tri_base_c1
 
-    # Case eq(e0, a1): eq_sym → eq(a1, e0) → second disjunct
+    # Case eq(e0, a1): eq_symmetric → eq(a1, e0) → second disjunct
     h_eq_e0_a1 = assume eq(e0, a1)
     esym_e01 = forall_elim esym, e0
     esym_e0a1 = forall_elim esym_e01, a1
@@ -775,7 +775,7 @@ proof nat_trichotomy:
     h_tri_C1 = or_intro_r d_left_C1, h_s1_in_a2_C
     h_C1_impl = implies_intro h_tri_C1
 
-    # Sub-case eq(s1, a2): eq_sym → eq(a2, s1) → second disjunct
+    # Sub-case eq(s1, a2): eq_symmetric → eq(a2, s1) → second disjunct
     h_eq_s1_a2_C = assume eq(s1, a2)
     esym_s1a = forall_elim esym, s1
     esym_s1a2 = forall_elim esym_s1a, a2

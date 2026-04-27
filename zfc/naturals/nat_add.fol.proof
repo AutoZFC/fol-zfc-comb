@@ -65,7 +65,7 @@ proof add_zero:
     fdef = use function_def
     fd1 = forall_elim fdef, wf
 
-    esym = use eq_sym
+    esym = use eq_symmetric
     pi = use pair_injective
 
     fix a0
@@ -130,7 +130,7 @@ proof add_zero:
     h_eq_c0_a_closed = exists_intro h_eq_c0_a
 
     # eq(b0, a) & eq(c0, a) -> eq(b0, c0)
-    # eq(a, c0) via eq_sym, then eq_trans
+    # eq(a, c0) via eq_symmetric, then eq_trans
     esym_c = forall_elim esym, c0
     esym_ca = forall_elim esym_c, a
     h_eq_a_c0 = implies_elim esym_ca, h_eq_c0_a_closed

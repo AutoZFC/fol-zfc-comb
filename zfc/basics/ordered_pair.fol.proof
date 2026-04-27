@@ -16,9 +16,9 @@ proof eq_refl:
     h8 = forall_intro h7
     qed h8
 
-# Proof of eq_sym: from eq(x,y), extract membership biconditional,
+# Proof of eq_symmetric: from eq(x,y), extract membership biconditional,
 # swap directions, re-apply extensionality to get eq(y,x).
-proof eq_sym:
+proof eq_symmetric:
     fix x
     fix y
     h_eq = assume eq(x, y)
@@ -244,7 +244,7 @@ proof singleton_eq_doubleton:
     ddef3 = forall_elim ddef2, d
     h_t_mem = iff_elim_l ddef3, h_doub
     # Get eq(t, s) for reverse membership transfer
-    sym = use eq_sym
+    sym = use eq_symmetric
     sym1 = forall_elim sym, s
     sym2 = forall_elim sym1, t
     h_eq_ts = implies_elim sym2, h_eq_st
@@ -313,7 +313,7 @@ proof doubleton_eq:
     h_t_mem = iff_elim_l ddef_t3, h_doub_t
     # Utilities
     refl = use eq_refl
-    sym = use eq_sym
+    sym = use eq_symmetric
     eq_er = use eq_elem_r
     # eq(t, s) for reverse transfer
     sym_s1 = forall_elim sym, s
@@ -570,7 +570,7 @@ proof pair_first_eq:
         h_sd2 = and_intro h_sd, refl_sa
         h_ca_da = implies_elim sed5, h_sd2
         h_ca = and_elim_l h_ca_da
-        sym = use eq_sym
+        sym = use eq_symmetric
         sym1 = forall_elim sym, c
         sym2 = forall_elim sym1, a
         h_ac2 = implies_elim sym2, h_ca
@@ -612,7 +612,7 @@ proof pair_second_neq:
     pfe5 = forall_elim pfe4, p
     pfe6 = forall_elim pfe5, q
     h_ac = implies_elim pfe6, h
-    sym = use eq_sym
+    sym = use eq_symmetric
     sym_ac1 = forall_elim sym, a
     sym_ac2 = forall_elim sym_ac1, c
     h_ca = implies_elim sym_ac2, h_ac
@@ -657,7 +657,7 @@ proof pair_second_neq:
     eq_trans_thm = use eq_trans
     # Case D1: singleton(sab, c) with doubleton(sab, a, b)
     # singleton_eq_doubleton gives eq(a,c) & eq(b,c)
-    # eq_trans(eq(b,c), eq(c,a)) = eq(b,a) -> eq_sym -> eq(a,b) -> contradiction
+    # eq_trans(eq(b,c), eq(c,a)) = eq(b,a) -> eq_symmetric -> eq(a,b) -> contradiction
     case_d1 = assume forall w. (elem(w, sab) <-> eq(w, c))
         sdef = use singleton_def
         sdc1 = forall_elim sdef, sab
@@ -753,7 +753,7 @@ proof pair_second_degenerate:
     h_pair_q = and_elim_r h_pq
     h_eq_ab = assume eq(a, b)
     # Get eq(q, p) for reverse transfer
-    sym = use eq_sym
+    sym = use eq_symmetric
     sym_pq1 = forall_elim sym, p
     sym_pq2 = forall_elim sym_pq1, q
     h_eq_qp = implies_elim sym_pq2, h_eq_pq
@@ -797,7 +797,7 @@ proof pair_second_degenerate:
     refl_scd = forall_elim refl, scd
     # Case D1: singleton(scd, a) with doubleton(scd, c, d)
     # singleton_eq_doubleton -> eq(c,a) & eq(d,a)
-    # eq_trans(eq(d,a), eq(a,b)) -> eq(d,b) -> eq_sym -> eq(b,d)
+    # eq_trans(eq(d,a), eq(a,b)) -> eq(d,b) -> eq_symmetric -> eq(b,d)
     case_d1 = assume forall w. (elem(w, scd) <-> eq(w, a))
         sdef = use singleton_def
         sda1 = forall_elim sdef, scd
@@ -844,7 +844,7 @@ proof pair_second_degenerate:
             h_bd_s1 = and_elim_r sub1
         impl_s1 = implies_intro h_bd_s1
         # Sub-case: eq(a,d) & eq(b,c)
-        # eq_sym(eq(a,b)) = eq(b,a), eq_trans(eq(b,a), eq(a,d)) = eq(b,d)
+        # eq_symmetric(eq(a,b)) = eq(b,a), eq_trans(eq(b,a), eq(a,d)) = eq(b,d)
         sub2 = assume eq(a, d) & eq(b, c)
             h_ad = and_elim_l sub2
             sym_ab1 = forall_elim sym, a

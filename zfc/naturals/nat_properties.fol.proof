@@ -49,8 +49,8 @@ proof not_self_elem:
     # Assume elem(x, x) to derive contradiction
     h_xx = assume elem(x, x)
 
-    # From eq(wy, x) get eq(x, wy) via eq_sym
-    esym = use eq_sym
+    # From eq(wy, x) get eq(x, wy) via eq_symmetric
+    esym = use eq_symmetric
     esym1 = forall_elim esym, wy
     esym2 = forall_elim esym1, x
     h_eq_xwy = implies_elim esym2, h_eq_wyx
@@ -149,7 +149,7 @@ proof zero_not_succ:
     h_eq = assume eq(e, s)
 
     # Transfer elem(x, s) to elem(x, e) via eq(s, e)
-    esym = use eq_sym
+    esym = use eq_symmetric
     esym1 = forall_elim esym, e
     esym2 = forall_elim esym1, s
     h_eq_se = implies_elim esym2, h_eq
@@ -363,7 +363,7 @@ proof nat_transitive:
     h_eq_Sn = implies_elim ni2, h_ni_conj2
 
     # From elem(x, n) and eq(wS, n), get elem(x, wS)
-    esym = use eq_sym
+    esym = use eq_symmetric
     esym1 = forall_elim esym, wS
     esym2 = forall_elim esym1, n
     h_eq_nS = implies_elim esym2, h_eq_Sn
@@ -432,7 +432,7 @@ proof succ_injective:
     h_ext = iff_elim_l ext2, h_eq_sasb
 
     er = use eq_refl
-    esym = use eq_sym
+    esym = use eq_symmetric
 
     # D1: elem(a, b) | eq(a, b)
     er_a = forall_elim er, a

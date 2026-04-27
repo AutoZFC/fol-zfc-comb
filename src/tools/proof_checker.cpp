@@ -136,53 +136,71 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Execute all proofs (continue on error to get full results)
-    int proof_errors = 0;
+    // Execute all proofs (continue on error to get full results).
+    // Distinguish *explicit* unproved (marker in .fol.proof) from *implicit*
+    // unproved (proof failed during execution). The former is legal; the
+    // latter is a build error. Both get registered as unproved theorems so
+    // that downstream proofs classify as CONDITIONAL rather than MISSING.
     int max_warnings = 10;
     const char* max_env = std::getenv("PROOF_CHECKER_MAX_WARNINGS");
     if (max_env) max_warnings = std::atoi(max_env);
-    // A failed proof doesn't disprove the claim. Register it as unproved
-    // so dependents remain conditional rather than becoming missing.
+    int error_count = 0;
+    std::unordered_set<std::string> execution_failed;
     auto mark_failed_as_unproved = [&](const ParsedProof& proof) {
-        if (!proof.unproved) {
-            auto claim = rt.context().find_claim(proof.claim_name);
-            if (!claim.has_value()) claim = rt.context().find_known(proof.claim_name);
-            if (claim.has_value()) {
-                rt.context().add_unproved_theorem(proof.claim_name, claim.value());
-            }
+        auto claim = rt.context().find_claim(proof.claim_name);
+        if (!claim.has_value()) claim = rt.context().find_known(proof.claim_name);
+        if (claim.has_value()) {
+            rt.context().add_unproved_theorem(proof.claim_name, claim.value());
         }
     };
 
     {
         PROFILE_SCOPE("execute_proofs");
         for (const auto& proof : proof_result.proofs) {
+            bool failed = false;
+            std::string msg;
             try {
                 PROFILE_SCOPE("execute_single_proof");
                 auto status = rt.execute_proof(proof);
                 if (!status.ok()) {
-                    proof_errors++;
-                    if (proof_errors <= max_warnings)
-                        std::cerr << "WARNING: " << proof.claim_name << ": "
-                                  << status.error().to_string() << "\n";
-                    else if (proof_errors == max_warnings + 1)
-                        std::cerr << "WARNING: ... more errors suppressed\n";
-                    mark_failed_as_unproved(proof);
+                    failed = true;
+                    msg = status.error().to_string();
                 }
             } catch (const std::exception& e) {
-                proof_errors++;
-                if (proof_errors <= max_warnings)
-                    std::cerr << "WARNING: " << proof.claim_name << ": exception: "
-                              << e.what() << "\n";
-                else if (proof_errors == max_warnings + 1)
-                    std::cerr << "WARNING: ... more errors suppressed\n";
+                failed = true;
+                msg = std::string("exception: ") + e.what();
+            }
+            if (failed) {
+                if (!proof.unproved) {
+                    execution_failed.insert(proof.claim_name);
+                    error_count++;
+                    if (error_count <= max_warnings)
+                        std::cerr << "ERROR: " << proof.claim_name << ": " << msg << "\n";
+                    else if (error_count == max_warnings + 1)
+                        std::cerr << "ERROR: ... more errors suppressed\n";
+                }
                 mark_failed_as_unproved(proof);
             }
         }
     }
 
-    // Classify each NEW claim (from the main header, not deps)
-    // Categories: PROVED, CONDITIONAL, UNPROVED, MISSING
-    std::vector<std::string> proved, conditional, unproved_list, missing;
+    // Classify each NEW claim (from the main header, not deps). Every claim
+    // falls into exactly one of five buckets, evaluated in priority order:
+    //
+    //   MISSING     no theorem was registered at all (proof block absent)
+    //   FAILED      proof ran but errored, was not marked `unproved` in the
+    //               .fol.proof (tracked via `execution_failed` above). Also
+    //               present in the theorem store as unproved, so dependents
+    //               classify as CONDITIONAL rather than MISSING.
+    //   UNPROVED    claim was explicitly marked `unproved` in the .fol.proof
+    //   CONDITIONAL has a real proof, but transitively uses an UNPROVED claim
+    //   PROVED      has a real proof and no unproved transitive dep
+    //
+    // Exit status is 1 iff the claim set contains any MISSING or FAILED.
+    // The sentence-level state (proved / unproved) lives on GlobalContext;
+    // the FAILED/UNPROVED distinction is tool-local and reconstructed here
+    // from `execution_failed`.
+    std::vector<std::string> proved, conditional, unproved_list, failed_list, missing;
     size_t new_claims = 0;
 
     // Helper: check if a theorem transitively depends on any UNPROVED claim
@@ -225,6 +243,10 @@ int main(int argc, char* argv[]) {
             if (!rt.context().find_theorem(name).has_value()) {
                 // No theorem at all — MISSING
                 missing.push_back(name);
+            } else if (execution_failed.count(name)) {
+                // Proof ran but failed — FAILED (build error, distinct from
+                // explicitly UNPROVED)
+                failed_list.push_back(name);
             } else if (rt.context().is_unproved(name)) {
                 // Explicitly UNPROVED
                 unproved_list.push_back(name);
@@ -245,6 +267,7 @@ int main(int argc, char* argv[]) {
     std::sort(proved.begin(), proved.end());
     std::sort(conditional.begin(), conditional.end());
     std::sort(unproved_list.begin(), unproved_list.end());
+    std::sort(failed_list.begin(), failed_list.end());
     std::sort(missing.begin(), missing.end());
 
     // Print status report
@@ -277,6 +300,14 @@ int main(int argc, char* argv[]) {
         std::cout << "\n";
     }
 
+    if (!failed_list.empty()) {
+        std::cerr << "Failed (" << failed_list.size() << "):\n";
+        for (const auto& name : failed_list) {
+            std::cerr << "  x " << name << "\n";
+        }
+        std::cerr << "\n";
+    }
+
     if (!missing.empty()) {
         std::cerr << "Missing (" << missing.size() << "):\n";
         for (const auto& name : missing) {
@@ -285,9 +316,15 @@ int main(int argc, char* argv[]) {
         std::cerr << "\n";
     }
 
-    // Fail only if there are MISSING claims (no proof and not UNPROVED)
-    if (!missing.empty()) {
-        std::cerr << "ERROR: " << missing.size() << " claim(s) have no proof and are not marked UNPROVED\n";
+    // Fail on MISSING (no proof block) or FAILED (proof ran but errored and
+    // was not explicitly marked `unproved`). Only the latter signals a
+    // user-visible soundness concern we previously masked as UNPROVED.
+    if (!missing.empty() || !failed_list.empty()) {
+        if (!missing.empty())
+            std::cerr << "ERROR: " << missing.size()
+                      << " claim(s) have no proof and are not marked UNPROVED\n";
+        if (!failed_list.empty())
+            std::cerr << "ERROR: " << failed_list.size() << " proof(s) failed\n";
         PROFILE_REPORT();
         return 1;
     }
@@ -303,7 +340,8 @@ int main(int argc, char* argv[]) {
 
     PROFILE_REPORT();
 
-    // Write output marker file if FOL_OUTPUT is set (for Bazel)
+    // Write output marker file if FOL_OUTPUT is set (for Bazel).
+    // Only reached on success (no MISSING, no FAILED).
     const char* output_path = std::getenv("FOL_OUTPUT");
     if (output_path) {
         std::ofstream out(output_path);

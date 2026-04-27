@@ -347,7 +347,7 @@ proof wf_no_self_loop:
     subdef = use subset_def
     sub1 = forall_elim subdef, s
     sub2 = forall_elim sub1, x
-    sym = use eq_sym
+    sym = use eq_symmetric
     fix z
     h_zs = assume elem(z, s)
     h_z_iff = forall_elim h_sing_body, z

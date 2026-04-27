@@ -150,8 +150,8 @@ proof rel_elem_in_cart_prod:
     h_eq_pair = implies_elim pi6, h_pi_conj2
     h_eq_xu = and_elim_l h_eq_pair
     h_eq_yv = and_elim_r h_eq_pair
-    # eq_sym to get eq(u, x) and eq(v, y)
-    sym = use eq_sym
+    # eq_symmetric to get eq(u, x) and eq(v, y)
+    sym = use eq_symmetric
     sym_xu1 = forall_elim sym, x
     sym_xu2 = forall_elim sym_xu1, u
     h_eq_ux = implies_elim sym_xu2, h_eq_xu

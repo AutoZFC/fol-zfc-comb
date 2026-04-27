@@ -128,7 +128,7 @@ proof pair_exists:
 
     # Precompute tools
     ext = use extensionality
-    esym = use eq_sym
+    esym = use eq_symmetric
     eer = use eq_elem_r
 
     # Show: forall z. (elem(z, wp) <-> D1(z) | D2(z))

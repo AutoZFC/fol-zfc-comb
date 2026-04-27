@@ -1,5 +1,6 @@
-#include "proof.h"
+#include "stack.h"
 #include "src/core/formula.h"
+#include "src/core/scope_utils.h"
 #include "src/util/error.h"
 
 namespace logic {
@@ -155,41 +156,7 @@ bool ProofStack::is_term_accessible(Term const& t) const {
 }
 
 bool ProofStack::formula_contains_fixed_var(FormulaHandle const& h, var_index var_idx) const {
-    const Formula& f = h.get();
-
-    if (f.is_schema_var()) return false;
-
-    if (f.is_predicate()) {
-        const PredicateInstance& p = f.as_predicate();
-        for (const Term& t : p.args()) {
-            if (t.is_fixed() && t.as_variable() == var_idx) {
-                return true;
-            }
-            if (t.is_description() && formula_contains_fixed_var(t.as_description().body, var_idx)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    else if (f.is_compound()) {
-        const Compound& c = f.as_compound();
-        if (c.left.valid() && formula_contains_fixed_var(c.left, var_idx)) {
-            return true;
-        }
-        if (c.right.valid() && formula_contains_fixed_var(c.right, var_idx)) {
-            return true;
-        }
-        return false;
-    }
-    else if (f.is_quantified()) {
-        const Quantified& q = f.as_quantified();
-        return formula_contains_fixed_var(q.body, var_idx);
-    }
-    else if (f.is_sentence()) {
-        // Sentences are closed, they don't contain free fixed vars
-        return false;
-    }
-    return false;
+    return logic::formula_contains_fixed_var(h, var_idx);
 }
 
 FormulaHandle ProofStack::make_exists_from_witness(FormulaHandle const& body, Term const& witness) {
@@ -661,7 +628,10 @@ FormulaResult ProofStack::eq_subst(FormulaHandle const &eq_formula, FormulaHandl
     Term a = pred.args()[0];
     Term b = pred.args()[1];
 
-    // Replace a with b in target
+    // Accessibility of a and b is guaranteed by is_derived(eq_formula):
+    // derive_with_deps records a dep for every fixed var in the formula,
+    // and cleanup_scope drops entries whose deps include a closed scope —
+    // so a derived formula cannot reference an inaccessible fixed var.
     auto result = formula_builder_.translate_term(target, a, b);
     derive_with_deps(result, deps_of(eq_formula) | deps_of(target));
     return result;
@@ -769,28 +739,9 @@ FormulaResult ClassicalProofStack::peirce(FormulaHandle const &a, FormulaHandle 
 // ========== Definite Descriptions ==========
 
 bool ProofStack::description_body_accessible(FormulaHandle const& h) const {
-    const Formula& f = h.get();
-
-    if (f.is_schema_var()) return true;
-
-    if (f.is_predicate()) {
-        for (const Term& t : f.as_predicate().args()) {
-            if (t.is_fixed() && find_scope_for_term(t) < 0) return false;
-            if (t.is_description() && !description_body_accessible(t.as_description().body)) return false;
-            // Generalized vars are bound — skip
-        }
-        return true;
-    }
-    else if (f.is_compound()) {
-        const Compound& c = f.as_compound();
-        if (c.left.valid() && !description_body_accessible(c.left)) return false;
-        if (c.right.valid() && !description_body_accessible(c.right)) return false;
-        return true;
-    }
-    else if (f.is_quantified()) {
-        return description_body_accessible(f.as_quantified().body);
-    }
-    return true;  // Sentences are closed
+    return logic::description_body_accessible(
+        h,
+        [this](var_index v) { return find_scope_for_term(Term::fixed(v)) >= 0; });
 }
 
 FormulaResult ClassicalProofStack::iota_elim(FormulaHandle const &exists_formula) {

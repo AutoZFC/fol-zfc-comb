@@ -37,7 +37,7 @@ include "axioms.fol.def"
 
 claim eq_refl: forall x. eq(x, x)
 
-claim eq_sym: forall x. forall y. (eq(x, y) -> eq(y, x))
+claim eq_symmetric: forall x. forall y. (eq(x, y) -> eq(y, x))
 
 claim eq_trans: forall x. forall y. forall z. ((eq(x, y) & eq(y, z)) -> eq(x, z))
 

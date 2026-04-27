@@ -128,7 +128,7 @@ bool test_simple_proof() {
         claim identity: forall x. (P(x) -> P(x))
     )");
 
-    auto ctx = rt.prove("identity");
+    auto ctx = rt.prove("identity").unwrap();
 
     // Fix variable x
     Term x = ctx.fix_var();
@@ -181,7 +181,7 @@ bool test_modus_ponens_proof() {
         claim all_Q: forall x. Q(x)
     )");
 
-    auto ctx = rt.prove("all_Q");
+    auto ctx = rt.prove("all_Q").unwrap();
 
     // Fix variable
     Term x = ctx.fix_var();
@@ -249,7 +249,7 @@ bool test_forall_elim_proof() {
         claim all_Q: forall x. Q(x)
     )");
 
-    auto ctx = rt.prove("all_Q");
+    auto ctx = rt.prove("all_Q").unwrap();
 
     // Fix a variable x
     Term x = ctx.fix_var();
@@ -757,7 +757,7 @@ bool test_ordered_pair_axioms_loaded() {
 
     // Verify claims are registered
     std::vector<std::string> claims = {
-        "eq_refl", "eq_sym", "eq_trans", "eq_elem_l", "eq_elem_r",
+        "eq_refl", "eq_symmetric", "eq_trans", "eq_elem_l", "eq_elem_r",
         "pair_injective", "singleton_injective", "singleton_eq_doubleton",
         "doubleton_eq", "pair_elems", "singleton_in_pair", "doubleton_in_pair"
     };
@@ -894,7 +894,7 @@ bool test_iota_elim_basic() {
         return false;
     }
 
-    auto pctx = rt.prove("p_of_iota");
+    auto pctx = rt.prove("p_of_iota").unwrap();
     auto h_exists = pctx.use("exists_p");
     if (!h_exists.ok()) { std::cout << "[use error] "; return false; }
 
@@ -1684,6 +1684,165 @@ bool test_predicate_schema_capture_with_forall_intro() {
     return true;
 }
 
+// ==================== Core Inference Rule Tests ====================
+// Direct tests for rules that were previously only exercised transitively
+// via the zfc/ proofs. A failure here pinpoints the broken rule, instead of
+// appearing as a generic ZFC-theorem breakage.
+
+// and_elim_l / and_elim_r: from A ∧ B derive A, and derive B.
+bool test_and_elim() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom ab: forall x. (P(x) & Q(x))
+        claim p_only: forall x. P(x)
+        claim q_only: forall x. Q(x)
+
+        proof p_only:
+            fix x
+            h1 = use ab
+            h2 = forall_elim h1, x
+            h3 = and_elim_l h2
+            h4 = forall_intro h3
+            qed h4
+
+        proof q_only:
+            fix x
+            h1 = use ab
+            h2 = forall_elim h1, x
+            h3 = and_elim_r h2
+            h4 = forall_intro h3
+            qed h4
+    )");
+    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
+    return true;
+}
+
+// or_elim: from A ∨ B, A → C, B → C derive C.
+bool test_or_elim() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom disj: forall x. (P(x) | Q(x))
+        axiom p_to_r: forall x. (P(x) -> R(x))
+        axiom q_to_r: forall x. (Q(x) -> R(x))
+        claim all_r: forall x. R(x)
+
+        proof all_r:
+            fix x
+            h_disj = use disj
+            h_d = forall_elim h_disj, x
+            h_pr = use p_to_r
+            h_pr_x = forall_elim h_pr, x
+            h_qr = use q_to_r
+            h_qr_x = forall_elim h_qr, x
+            h_r = or_elim h_d, h_pr_x, h_qr_x
+            h_all = forall_intro h_r
+            qed h_all
+    )");
+    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
+    return true;
+}
+
+// exists_elim: from ∃x.P(x) open a witness scope, combine with P→Q, then
+// re-close via exists_intro.
+bool test_exists_elim() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom ex_p: exists x. P(x)
+        axiom p_to_q: forall x. (P(x) -> Q(x))
+        claim ex_q: exists y. Q(y)
+
+        proof ex_q:
+            h1 = use ex_p
+            h2 = exists_elim h1, w
+            h3 = use p_to_q
+            h4 = forall_elim h3, w
+            h5 = implies_elim h4, h2
+            h6 = exists_intro h5
+            qed h6
+    )");
+    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
+    return true;
+}
+
+// eq_subst: from eq(a,b) and φ(a), derive φ(b).
+bool test_eq_subst_rule() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom all_eq: forall x. forall y. eq(x, y)
+        claim any_to_any: forall x. forall y. (P(x) -> P(y))
+
+        proof any_to_any:
+            fix x
+            fix y
+            h_px = assume P(x)
+            h_eqall = use all_eq
+            h_eq1 = forall_elim h_eqall, x
+            h_eq_xy = forall_elim h_eq1, y
+            h_py = eq_subst h_eq_xy, h_px
+            h_imp = implies_intro h_py
+            h_inner = forall_intro h_imp
+            h_outer = forall_intro h_inner
+            qed h_outer
+    )");
+    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
+    return true;
+}
+
+// double_neg_elim: ¬¬A ⊢ A.
+bool test_double_neg_elim_rule() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom nn_p: forall x. ~~P(x)
+        claim p_holds: forall x. P(x)
+
+        proof p_holds:
+            fix x
+            h1 = use nn_p
+            h2 = forall_elim h1, x
+            h3 = double_neg_elim h2
+            h4 = forall_intro h3
+            qed h4
+    )");
+    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
+    return true;
+}
+
+// execute_proof must reject proof blocks naming a claim/schema the loader
+// does not know. Previously this path silently accepted any derived formula.
+bool test_proof_of_unknown_claim_rejected() {
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom triv: forall x. P(x)
+
+        proof does_not_exist:
+            fix x
+            h1 = use triv
+            h2 = forall_elim h1, x
+            h3 = forall_intro h2
+            qed h3
+    )");
+    if (!result.ok()) {
+        // Parse error is also an acceptable rejection mode.
+        return true;
+    }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (exec.ok()) {
+        std::cout << "[expected execute_all_proofs to fail on unknown claim] ";
+        return false;
+    }
+    return true;
+}
+
 // ==================== Main ====================
 
 int main() {
@@ -1759,6 +1918,15 @@ int main() {
     run_test("Capture avoidance arity-N", test_predicate_schema_capture_avoidance);
     run_test("Capture avoidance nested", test_predicate_schema_capture_nested);
     run_test("Capture avoidance + forall_intro", test_predicate_schema_capture_with_forall_intro);
+
+    // Direct tests for core inference rules
+    std::cout << "\n── Core Inference Rule Tests ──\n";
+    run_test("and_elim_l / and_elim_r", test_and_elim);
+    run_test("or_elim", test_or_elim);
+    run_test("exists_elim", test_exists_elim);
+    run_test("eq_subst", test_eq_subst_rule);
+    run_test("double_neg_elim", test_double_neg_elim_rule);
+    run_test("Proof of unknown claim rejected", test_proof_of_unknown_claim_rejected);
 
     // Integration test
     std::cout << "\n── Integration Test ──\n";

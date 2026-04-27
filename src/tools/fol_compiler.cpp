@@ -75,6 +75,17 @@ int main(int argc, char* argv[]) {
     }
 
     // If a proof file is provided, load and execute it
+    int proof_errors = 0;
+    // Shared with proof_checker so both tools honour the same cap.
+    int max_errors = 10;
+    if (const char* e = std::getenv("PROOF_CHECKER_MAX_WARNINGS")) max_errors = std::atoi(e);
+    auto report = [&](const std::string& name, const std::string& msg) {
+        proof_errors++;
+        if (proof_errors <= max_errors)
+            std::cerr << "ERROR: " << name << ": " << msg << "\n";
+        else if (proof_errors == max_errors + 1)
+            std::cerr << "ERROR: ... more errors suppressed\n";
+    };
     if (!proof_path.empty()) {
         std::ifstream proof_file(proof_path);
         if (!proof_file.is_open()) {
@@ -91,24 +102,27 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Execute proofs (continue on error)
-        int proof_errors = 0;
+        // Execute every proof so the user sees all failures in one pass, but
+        // track failures so the build fails at the end. Proofs explicitly
+        // marked `unproved` are permitted; only failures of proofs that were
+        // meant to succeed are errors.
         for (const auto& proof : proof_result.proofs) {
             try {
                 auto status = rt.execute_proof(proof);
-                if (!status.ok()) {
-                    proof_errors++;
-                    if (proof_errors <= 10)
-                        std::cerr << "WARNING: " << proof.claim_name << ": "
-                                  << status.error().to_string() << "\n";
+                if (!status.ok() && !proof.unproved) {
+                    report(proof.claim_name, status.error().to_string());
                 }
             } catch (const std::exception& e) {
-                proof_errors++;
-                if (proof_errors <= 10)
-                    std::cerr << "WARNING: " << proof.claim_name << ": exception: "
-                              << e.what() << "\n";
+                if (!proof.unproved) {
+                    report(proof.claim_name, std::string("exception: ") + e.what());
+                }
             }
         }
+    }
+
+    if (proof_errors > 0) {
+        std::cerr << "ERROR: " << proof_errors << " proof(s) failed in " << proof_path << "\n";
+        return 1;
     }
 
     // Collect source files for this compilation unit
@@ -133,12 +147,20 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Save the library
-    auto save_status = FolLibrary::save(
-        rt.context(), baseline, proof_deps_delta, source_files, output_path);
-    if (!save_status.ok()) {
-        std::cerr << "ERROR: Failed to save library: "
-                  << save_status.error().to_string() << "\n";
+    // Save the library. FolLibrary::save can throw (e.g. on serialization
+    // invariants like "FixedVar in stored formula" indicating a bad theorem
+    // registration). Convert to a clean build failure rather than aborting.
+    try {
+        auto save_status = FolLibrary::save(
+            rt.context(), baseline, proof_deps_delta, source_files, output_path);
+        if (!save_status.ok()) {
+            std::cerr << "ERROR: Failed to save library: "
+                      << save_status.error().to_string() << "\n";
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: Library serialization failed for " << output_path
+                  << ": " << e.what() << "\n";
         return 1;
     }
 

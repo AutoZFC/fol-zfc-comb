@@ -1,10 +1,14 @@
 #include "runtime.h"
 #include "../library/library.h"
+#include "../proof/nd/lowering.h"
+#include "../proof/nd/verifier.h"
+#include "../proof/proof.h"
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 namespace logic {
 
@@ -51,7 +55,10 @@ util::Result<ParseResult> Runtime::load_file_with_proofs(const std::string& path
 util::Result<ParseResult> Runtime::load_file_recursive(const std::string& path) {
     // Seed with paths from previously loaded libraries (#pragma once across boundaries)
     std::unordered_set<std::string> loaded(loaded_paths_);
-    std::filesystem::path abs_path = std::filesystem::absolute(path);
+    // weakly_canonical resolves symlinks and .. for the existing portion of
+    // the path and normalizes the rest, giving a stable key for dedup even
+    // when the same file is reached via different access paths.
+    std::filesystem::path abs_path = std::filesystem::weakly_canonical(path);
     std::string base_dir = abs_path.parent_path().string();
     return load_file_impl(abs_path.string(), base_dir, loaded);
 }
@@ -61,8 +68,8 @@ util::Result<ParseResult> Runtime::load_file_impl(
     const std::string& base_dir,
     std::unordered_set<std::string>& loaded) {
 
-    // Get canonical path for cycle detection
-    std::filesystem::path abs_path = std::filesystem::absolute(path);
+    // Resolve to a canonical key for cycle / #pragma once detection.
+    std::filesystem::path abs_path = std::filesystem::weakly_canonical(path);
     std::string canonical = abs_path.string();
 
     // Skip already-loaded files (#pragma once semantics)
@@ -121,293 +128,19 @@ util::Result<ParseResult> Runtime::load_file_impl(
     return merged;
 }
 
-// Helper to execute a single rule
-static FormulaResult execute_rule(
-    ProofContext& ctx,
-    const ParsedProofStep& step,
-    std::unordered_map<std::string, FormulaHandle>& steps,
-    std::unordered_map<std::string, Term>& fixed_vars) {
-
-    auto get_step = [&](const std::string& name) -> FormulaResult {
-        auto it = steps.find(name);
-        if (it == steps.end()) {
-            return MAKE_ERROR << "Unknown step: " << name;
-        }
-        return it->second;
-    };
-
-    auto get_term = [&](const std::string& name) -> std::optional<Term> {
-        auto it = fixed_vars.find(name);
-        if (it != fixed_vars.end()) {
-            return it->second;
-        }
-        return std::nullopt;
-    };
-
-    const std::string& rule = step.rule_name;
-    const auto& args = step.args;
-
-    // Conjunction
-    if (rule == "and_intro") {
-        if (args.size() != 2) return MAKE_ERROR << "and_intro requires 2 arguments";
-        TRY_ASSIGN(a, get_step(args[0]));
-        TRY_ASSIGN(b, get_step(args[1]));
-        return ctx.and_intro(a, b);
-    }
-    if (rule == "and_elim_l") {
-        if (args.size() != 1) return MAKE_ERROR << "and_elim_l requires 1 argument";
-        TRY_ASSIGN(f, get_step(args[0]));
-        return ctx.and_elim_l(f);
-    }
-    if (rule == "and_elim_r") {
-        if (args.size() != 1) return MAKE_ERROR << "and_elim_r requires 1 argument";
-        TRY_ASSIGN(f, get_step(args[0]));
-        return ctx.and_elim_r(f);
-    }
-
-    // Disjunction
-    if (rule == "or_intro_l") {
-        if (args.size() != 2) return MAKE_ERROR << "or_intro_l requires 2 arguments (step, step_for_B)";
-        TRY_ASSIGN(a, get_step(args[0]));
-        TRY_ASSIGN(b, get_step(args[1]));
-        return ctx.or_intro_l(a, b);
-    }
-    if (rule == "or_intro_r") {
-        if (args.size() != 2) return MAKE_ERROR << "or_intro_r requires 2 arguments (step_for_A, step)";
-        TRY_ASSIGN(a, get_step(args[0]));
-        TRY_ASSIGN(b, get_step(args[1]));
-        return ctx.or_intro_r(a, b);
-    }
-    if (rule == "or_elim") {
-        if (args.size() != 3) return MAKE_ERROR << "or_elim requires 3 arguments";
-        TRY_ASSIGN(or_f, get_step(args[0]));
-        TRY_ASSIGN(a_impl_c, get_step(args[1]));
-        TRY_ASSIGN(b_impl_c, get_step(args[2]));
-        return ctx.or_elim(or_f, a_impl_c, b_impl_c);
-    }
-
-    // Implication
-    if (rule == "implies_intro") {
-        if (args.size() != 1) return MAKE_ERROR << "implies_intro requires 1 argument";
-        TRY_ASSIGN(c, get_step(args[0]));
-        return ctx.implies_intro(c);
-    }
-    if (rule == "implies_elim") {
-        if (args.size() != 2) return MAKE_ERROR << "implies_elim requires 2 arguments";
-        TRY_ASSIGN(impl, get_step(args[0]));
-        TRY_ASSIGN(ant, get_step(args[1]));
-        return ctx.implies_elim(impl, ant);
-    }
-
-    // Negation
-    if (rule == "not_intro") {
-        if (args.size() != 1) return MAKE_ERROR << "not_intro requires 1 argument";
-        TRY_ASSIGN(bot, get_step(args[0]));
-        return ctx.not_intro(bot);
-    }
-    if (rule == "not_elim") {
-        if (args.size() != 2) return MAKE_ERROR << "not_elim requires 2 arguments";
-        TRY_ASSIGN(neg, get_step(args[0]));
-        TRY_ASSIGN(f, get_step(args[1]));
-        return ctx.not_elim(neg, f);
-    }
-
-    // Bottom
-    if (rule == "bottom_elim") {
-        if (args.size() != 2) return MAKE_ERROR << "bottom_elim requires 2 arguments";
-        TRY_ASSIGN(bot, get_step(args[0]));
-        TRY_ASSIGN(f, get_step(args[1]));
-        return ctx.bottom_elim(bot, f);
-    }
-
-    // Biconditional
-    if (rule == "iff_intro") {
-        if (args.size() != 2) return MAKE_ERROR << "iff_intro requires 2 arguments";
-        TRY_ASSIGN(ab, get_step(args[0]));
-        TRY_ASSIGN(ba, get_step(args[1]));
-        return ctx.iff_intro(ab, ba);
-    }
-    if (rule == "iff_elim_l") {
-        if (args.size() != 2) return MAKE_ERROR << "iff_elim_l requires 2 arguments";
-        TRY_ASSIGN(iff, get_step(args[0]));
-        TRY_ASSIGN(a, get_step(args[1]));
-        return ctx.iff_elim_l(iff, a);
-    }
-    if (rule == "iff_elim_r") {
-        if (args.size() != 2) return MAKE_ERROR << "iff_elim_r requires 2 arguments";
-        TRY_ASSIGN(iff, get_step(args[0]));
-        TRY_ASSIGN(b, get_step(args[1]));
-        return ctx.iff_elim_r(iff, b);
-    }
-
-    // Quantifiers
-    if (rule == "forall_intro") {
-        if (args.size() != 1) return MAKE_ERROR << "forall_intro requires 1 argument";
-        TRY_ASSIGN(body, get_step(args[0]));
-        return ctx.forall_intro(body);
-    }
-    if (rule == "forall_elim") {
-        if (args.size() != 2) return MAKE_ERROR << "forall_elim requires 2 arguments";
-        TRY_ASSIGN(f, get_step(args[0]));
-        auto term = get_term(args[1]);
-        if (!term.has_value()) {
-            return MAKE_ERROR << "Unknown term/variable: " << args[1];
-        }
-        return ctx.forall_elim(f, term.value());
-    }
-    if (rule == "exists_intro") {
-        if (args.size() == 1) {
-            TRY_ASSIGN(body, get_step(args[0]));
-            return ctx.exists_intro(body);
-        } else if (args.size() == 2) {
-            TRY_ASSIGN(body, get_step(args[0]));
-            auto term = get_term(args[1]);
-            if (!term.has_value()) {
-                return MAKE_ERROR << "Unknown term/variable: " << args[1];
-            }
-            return ctx.exists_intro(body, term.value());
-        } else {
-            return MAKE_ERROR << "exists_intro requires 1-2 arguments";
-        }
-    }
-    if (rule == "exists_elim") {
-        if (args.size() < 1 || args.size() > 2) return MAKE_ERROR << "exists_elim requires 1-2 arguments";
-        TRY_ASSIGN(f, get_step(args[0]));
-        return ctx.exists_elim(f);
-    }
-
-    // Classical
-    if (rule == "double_neg_elim") {
-        if (args.size() != 1) return MAKE_ERROR << "double_neg_elim requires 1 argument";
-        TRY_ASSIGN(dn, get_step(args[0]));
-        return ctx.double_neg_elim(dn);
-    }
-    if (rule == "excluded_middle") {
-        if (args.size() != 1) return MAKE_ERROR << "excluded_middle requires 1 argument";
-        TRY_ASSIGN(f, get_step(args[0]));
-        return ctx.excluded_middle(f);
-    }
-
-    // Equality
-    if (rule == "eq_subst") {
-        if (args.size() != 2) return MAKE_ERROR << "eq_subst requires 2 arguments";
-        TRY_ASSIGN(eq, get_step(args[0]));
-        TRY_ASSIGN(target, get_step(args[1]));
-        return ctx.eq_subst(eq, target);
-    }
-    if (rule == "eq_sym") {
-        if (args.size() != 1) return MAKE_ERROR << "eq_sym requires 1 argument";
-        TRY_ASSIGN(eq, get_step(args[0]));
-        return ctx.eq_sym(eq);
-    }
-
-    // Definite descriptions
-    if (rule == "iota_elim") {
-        if (args.size() < 1 || args.size() > 2)
-            return MAKE_ERROR << "iota_elim requires 1-2 arguments";
-        TRY_ASSIGN(f, get_step(args[0]));
-        return ctx.iota_elim(f);
-    }
-
-    return MAKE_ERROR << "Unknown rule: " << rule;
-}
-
-// Execute a schema_inst proof step: resolve bindings and instantiate.
-FormulaResult Runtime::execute_schema_inst(
-        ProofContext& pctx,
-        const ParsedProofStep& step,
-        const std::unordered_map<std::string, Term>& fixed_vars,
-        const std::unordered_map<std::string, size_t>& schema_var_map,
-        const std::unordered_map<std::string, size_t>& schema_arity_map) {
-    auto schema = ctx_.find_schema(step.rule_name);
-    if (!schema.has_value())
-        return MAKE_ERROR << "unknown schema: " << step.rule_name;
-    if (!ctx_.is_schema_proven(step.rule_name))
-        return MAKE_ERROR << "schema '" << step.rule_name << "' not yet proven";
-
-    // Resolve named bindings to positional vector
-    std::vector<SchemaBind> bindings(schema->var_names.size());
-    std::vector<bool> bound(schema->var_names.size(), false);
-    for (const auto& sb : step.schema_bindings) {
-        size_t idx = schema->var_names.size();
-        for (size_t j = 0; j < schema->var_names.size(); ++j) {
-            if (schema->var_names[j] == sb.var_name) { idx = j; break; }
-        }
-        if (idx >= schema->var_names.size())
-            return MAKE_ERROR << "unknown schema variable: " << sb.var_name;
-        if (bound[idx])
-            return MAKE_ERROR << "duplicate binding for: " << sb.var_name;
-
-        size_t arity = (schema->var_arities.size() > idx) ? schema->var_arities[idx] : 0;
-
-        if (arity == 0) {
-            // Arity-0: parse as concrete formula. Don't inject target schema
-            // vars — binding value P should be a predicate, not a schema ref.
-            bindings[idx] = SchemaBind(parse_formula_with_vars(
-                sb.formula_ast.get(), ctx_, pctx.builder(), fixed_vars, schema_var_map, schema_arity_map));
-        } else {
-            // Arity-N: lambda body may reference OTHER schema vars from the
-            // target schema (e.g., \x. P(x) where P is a schema var).
-            // Merge target schema vars so they're recognized as SchemaVars.
-            auto binding_sv_map = schema_var_map;
-            auto binding_ar_map = schema_arity_map;
-            for (size_t j = 0; j < schema->var_names.size(); ++j) {
-                if (!binding_sv_map.count(schema->var_names[j])) {
-                    binding_sv_map[schema->var_names[j]] = j;
-                    if (j < schema->var_arities.size())
-                        binding_ar_map[schema->var_names[j]] = schema->var_arities[j];
-                }
-            }
-            // Determine lambda params: explicit from parser, or auto-generated
-            auto lambda_param_names = sb.lambda_params;
-            if (lambda_param_names.empty()) {
-                // No explicit lambda — auto-wrap: the formula IS the predicate,
-                // applied to fresh params. E.g., schema expects P(1), binding is
-                // "elem" → treat as \x. elem(x).
-                for (size_t a = 0; a < arity; a++)
-                    lambda_param_names.push_back("_lam" + std::to_string(a));
-            }
-            if (lambda_param_names.size() != arity)
-                return MAKE_ERROR << "schema var '" << sb.var_name
-                    << "' expects " << arity << " lambda params, got "
-                    << lambda_param_names.size();
-            auto lambda_vars = fixed_vars;
-            std::vector<var_index> param_indices;
-            for (const auto& param : lambda_param_names) {
-                var_index vi = pctx.builder().enter_scope();
-                lambda_vars[param] = Term::fixed(vi);
-                param_indices.push_back(vi);
-            }
-            auto body = parse_formula_with_vars(
-                sb.formula_ast.get(), ctx_, pctx.builder(), lambda_vars, binding_sv_map, binding_ar_map);
-            for (size_t k = 0; k < arity; ++k)
-                pctx.builder().exit_scope();
-            bindings[idx] = SchemaBind(std::move(param_indices), body);
-        }
-        bound[idx] = true;
-    }
-    for (size_t j = 0; j < bound.size(); ++j) {
-        if (!bound[j])
-            return MAKE_ERROR << "missing binding for: " << schema->var_names[j];
-    }
-    return pctx.schema_inst(*schema, bindings);
-}
 
 util::ResultStatus Runtime::execute_proof(const ParsedProof& proof) {
-    // Handle UNPROVED proofs: register claim/schema as unproved
+    // Handle UNPROVED proofs: register claim/schema as unproved.
+    // This path bypasses verification entirely — by definition the proof
+    // body is not checked — so it does not go through ProofRunner.
     if (proof.unproved) {
-        // If this name is also a schema, mark it proven for schema_inst
         if (ctx_.find_schema(proof.claim_name).has_value())
             ctx_.mark_schema_proven(proof.claim_name);
 
         auto claim = ctx_.find_claim(proof.claim_name);
+        if (!claim.has_value()) claim = ctx_.find_known(proof.claim_name);
         if (!claim.has_value()) {
-            claim = ctx_.find_known(proof.claim_name);
-        }
-        if (!claim.has_value()) {
-            // Schema-only (no claim): already handled above
-            if (ctx_.is_schema_proven(proof.claim_name))
-                return util::Ok();
+            if (ctx_.is_schema_proven(proof.claim_name)) return util::Ok();
             return MAKE_ERROR << "UNPROVED: unknown claim '" << proof.claim_name << "'";
         }
         ctx_.add_unproved_theorem(proof.claim_name, claim.value());
@@ -421,129 +154,27 @@ util::ResultStatus Runtime::execute_proof(const ParsedProof& proof) {
         return util::Ok();
     }
 
-    // If this name is also a schema, mark it as proven for schema_inst
-    // regardless of whether the claim proof succeeds. Schemas are axiomatically
-    // accepted; the claim proof is a separate concern.
-    if (ctx_.find_schema(proof.claim_name).has_value())
-        ctx_.mark_schema_proven(proof.claim_name);
-
-    auto pctx = prove(proof.claim_name);
-
-    std::unordered_map<std::string, FormulaHandle> steps;
-    std::unordered_map<std::string, Term> fixed_vars;
-
-    // Build schema var map and arity map if this is a schema proof
-    std::unordered_map<std::string, size_t> schema_var_map;
-    std::unordered_map<std::string, size_t> schema_arity_map;
-    if (auto schema = ctx_.find_schema(proof.claim_name)) {
-        for (size_t i = 0; i < schema->var_names.size(); ++i) {
-            schema_var_map[schema->var_names[i]] = i;
-            if (i < schema->var_arities.size())
-                schema_arity_map[schema->var_names[i]] = schema->var_arities[i];
-        }
+    // Lower the parsed proof to nd::Program. Lowering is system-specific
+    // (Phase 7 will route to lkr::lower for .fol.lkr.proof inputs).
+    auto lowered = proof::nd::lower(proof);
+    if (!lowered.ok()) {
+        return MAKE_ERROR << "lowering '" << proof.claim_name << "': "
+                          << lowered.error().to_string();
     }
 
-    for (size_t i = 0; i < proof.steps.size(); ++i) {
-        const auto& step = proof.steps[i];
-        std::string step_desc = "Step " + std::to_string(i + 1);
-        if (!step.result_name.empty()) {
-            step_desc += " (" + step.result_name + ")";
-        }
+    proof::Proof p{
+        proof::System::ND,
+        std::move(lowered).unwrap(),
+    };
 
-        switch (step.kind) {
-            case ParsedProofStep::Kind::Fix: {
-                if (step.args.empty()) {
-                    return MAKE_ERROR << step_desc << ": fix requires variable name";
-                }
-                Term v = pctx.fix_var();
-                fixed_vars[step.args[0]] = v;
-                break;
-            }
+    // Dispatch through ProofRunner. The runner handles claim resolution,
+    // verifier dispatch, schema-proven marking, and theorem registration.
+    auto status = runner_.verify(p);
+    if (!status.ok()) return status.error();
 
-            case ParsedProofStep::Kind::Assume: {
-                if (!step.formula_ast) {
-                    return MAKE_ERROR << step_desc << ": assume requires formula";
-                }
-                // Parse formula with fixed variables in scope
-                FormulaHandle assumed = parse_formula_with_vars(
-                    step.formula_ast.get(), ctx_, pctx.builder(), fixed_vars, schema_var_map, schema_arity_map);
-                FormulaHandle h = pctx.assume(assumed);
-                steps[step.result_name] = h;
-                break;
-            }
-
-            case ParsedProofStep::Kind::Let: {
-                if (!step.formula_ast) {
-                    return MAKE_ERROR << step_desc << ": let requires formula";
-                }
-                FormulaHandle h = parse_formula_with_vars(
-                    step.formula_ast.get(), ctx_, pctx.builder(), fixed_vars, schema_var_map, schema_arity_map);
-                steps[step.result_name] = h;
-                break;
-            }
-
-            case ParsedProofStep::Kind::Use: {
-                auto result = pctx.use(step.rule_name);
-                if (!result.ok()) {
-                    return MAKE_ERROR << step_desc << ": " << result.error().to_string();
-                }
-                steps[step.result_name] = result.value();
-                break;
-            }
-
-            case ParsedProofStep::Kind::Rule: {
-                auto result = execute_rule(pctx, step, steps, fixed_vars);
-                if (!result.ok()) {
-                    return MAKE_ERROR << step_desc << " (" << step.rule_name << "): "
-                                      << result.error().to_string();
-                }
-                steps[step.result_name] = result.value();
-                // Store witness variable for exists_elim with named witness
-                if (step.rule_name == "exists_elim" && step.args.size() == 2) {
-                    auto witness = pctx.last_witness();
-                    if (witness.has_value()) {
-                        fixed_vars[step.args[1]] = witness.value();
-                    }
-                }
-                // Store iota term for iota_elim with named term
-                if (step.rule_name == "iota_elim" && step.args.size() == 2) {
-                    auto iota_term = pctx.last_iota_term();
-                    if (iota_term.has_value()) {
-                        fixed_vars[step.args[1]] = iota_term.value();
-                    }
-                }
-                break;
-            }
-
-            case ParsedProofStep::Kind::SchemaInst: {
-                auto result = execute_schema_inst(pctx, step, fixed_vars, schema_var_map, schema_arity_map);
-                if (!result.ok()) {
-                    return MAKE_ERROR << step_desc << " (schema_inst " << step.rule_name << "): "
-                                      << result.error().to_string();
-                }
-                steps[step.result_name] = result.value();
-                break;
-            }
-
-            case ParsedProofStep::Kind::Qed: {
-                if (step.args.empty()) {
-                    return MAKE_ERROR << step_desc << ": qed requires step name";
-                }
-                auto it = steps.find(step.args[0]);
-                if (it == steps.end()) {
-                    return MAKE_ERROR << step_desc << ": unknown step: " << step.args[0];
-                }
-                auto result = pctx.qed(it->second);
-                if (!result.ok()) {
-                    return MAKE_ERROR << step_desc << ": " << result.error().to_string();
-                }
-                proof_deps_[proof.claim_name] = pctx.used();
-                return util::Ok();
-            }
-        }
-    }
-
-    return MAKE_ERROR << "Proof missing qed";
+    // Mirror the runner's per-call deps into the runtime-wide map.
+    proof_deps_[proof.claim_name] = runner_.last_used_names();
+    return util::Ok();
 }
 
 util::ResultStatus Runtime::execute_all_proofs(const ParseResult& result) {
@@ -557,23 +188,18 @@ util::ResultStatus Runtime::execute_all_proofs(const ParseResult& result) {
     return util::Ok();
 }
 
-ProofContext Runtime::prove(const std::string& claim_name) {
-    // First try to find as a claim, then as a known axiom/theorem
+util::Result<ProofContext> Runtime::prove(const std::string& claim_name) {
+    // Claim or already-known theorem.
     auto claim = ctx_.find_claim(claim_name);
-    if (!claim.has_value()) {
-        claim = ctx_.find_known(claim_name);
-    }
-    if (claim.has_value()) {
-        return ProofContext(*this, claim_name, claim.value());
-    }
+    if (!claim.has_value()) claim = ctx_.find_known(claim_name);
+    if (claim.has_value()) return ProofContext(*this, claim_name, claim.value());
 
-    // Try as a schema
+    // Schema. Re-proving an already-proven schema is idempotent: the
+    // ProofContext just re-validates the derivation against the schema body.
     auto schema = ctx_.find_schema(claim_name);
-    if (schema.has_value() && !ctx_.is_schema_proven(claim_name)) {
-        return ProofContext::for_schema(*this, claim_name, *schema);
-    }
+    if (schema.has_value()) return ProofContext::for_schema(*this, claim_name, *schema);
 
-    return ProofContext(*this, claim_name, SentenceHandle{});
+    return MAKE_ERROR << "prove: unknown claim or schema: '" << claim_name << "'";
 }
 
 ProofContext Runtime::prove(SentenceHandle goal) {
@@ -721,6 +347,14 @@ FormulaResult ProofContext::peirce(FormulaHandle const& a, FormulaHandle const& 
 util::ResultStatus ProofContext::qed(FormulaHandle const& derived) {
     if (completed_) {
         return MAKE_ERROR << "Proof already completed";
+    }
+
+    // A named proof with no goal and no schema is a proof of nothing —
+    // something upstream (e.g. Runtime::prove with an unknown name) produced
+    // an un-targeted context. Fail rather than silently accept any formula.
+    if (!name_.empty() && !is_schema_ && !goal_sentence_.valid()) {
+        return MAKE_ERROR << "qed: proof context for '" << name_
+                          << "' has no resolved goal (unknown claim or schema?)";
     }
 
     // Check that the formula is actually derived (not just created via let)

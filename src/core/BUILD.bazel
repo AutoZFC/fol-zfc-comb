@@ -20,16 +20,3 @@ cc_library(
         ":formula",
     ],
 )
-
-cc_library(
-    name = "proof",
-    srcs = ["proof.cpp"],
-    hdrs = ["proof.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":formula",
-        ":scope_utils",
-        "//src/util:error",
-        "//src/util:registry",
-    ],
-)

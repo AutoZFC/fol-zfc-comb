@@ -1,6 +1,6 @@
 # id_func_is_function: rel_elem(i,a,b) & rel_elem(i,a,c) -> eq(b,c)
 # From id_func_def: rel_elem(i,a,b) <-> (elem(a,x) & eq(a,b))
-# So eq(a,b) and eq(a,c). eq_sym(eq(a,b)) = eq(b,a). eq_trans(eq(b,a), eq(a,c)) = eq(b,c).
+# So eq(a,b) and eq(a,c). eq_symmetric(eq(a,b)) = eq(b,a). eq_trans(eq(b,a), eq(a,c)) = eq(b,c).
 proof id_func_is_function:
     fix i
     fix x
@@ -24,8 +24,8 @@ proof id_func_is_function:
     h_ac2 = forall_elim h_ac, c
     h_ac_cond = iff_elim_l h_ac2, h_rac
     h_eq_ac = and_elim_r h_ac_cond
-    # eq_sym(eq(a,b)) = eq(b,a), eq_trans(eq(b,a), eq(a,c)) = eq(b,c)
-    sym = use eq_sym
+    # eq_symmetric(eq(a,b)) = eq(b,a), eq_trans(eq(b,a), eq(a,c)) = eq(b,c)
+    sym = use eq_symmetric
     sym1 = forall_elim sym, a
     sym2 = forall_elim sym1, b
     h_ba = implies_elim sym2, h_eq_ab
@@ -123,7 +123,7 @@ proof id_func_from_to:
     qed h1
 
 # id_func_injective: rel_elem(i,a,c) & rel_elem(i,b,c) -> eq(a,b)
-# From id_func_def: eq(a,c) and eq(b,c). eq_sym + eq_trans -> eq(a,b).
+# From id_func_def: eq(a,c) and eq(b,c). eq_symmetric + eq_trans -> eq(a,b).
 proof id_func_injective:
     fix i
     fix x
@@ -146,8 +146,8 @@ proof id_func_injective:
     h_bc2 = forall_elim h_bc, c
     h_bc_cond = iff_elim_l h_bc2, h_rbc
     h_eq_bc = and_elim_r h_bc_cond
-    # eq(a,c) and eq(b,c) -> eq_trans(eq(a,c), eq_sym(eq(b,c))) = eq(a,b)
-    sym = use eq_sym
+    # eq(a,c) and eq(b,c) -> eq_trans(eq(a,c), eq_symmetric(eq(b,c))) = eq(a,b)
+    sym = use eq_symmetric
     sym1 = forall_elim sym, b
     sym2 = forall_elim sym1, c
     h_cb = implies_elim sym2, h_eq_bc
@@ -193,7 +193,7 @@ proof id_func_bijective:
     iddef2 = forall_elim iddef1, x
     h_body = iff_elim_l iddef2, h
     refl = use eq_refl
-    sym = use eq_sym
+    sym = use eq_symmetric
     # Build surjective onto condition
     fix b
     h_bx = assume elem(b, x)
@@ -272,7 +272,7 @@ proof compose_id_right:
     iddef2 = forall_elim iddef1, x
     h_idbody = iff_elim_l iddef2, h_id
     refl = use eq_refl
-    sym = use eq_sym
+    sym = use eq_symmetric
     fix a
     fix c
     h_hac_iff = forall_elim h_hbody, a
@@ -287,7 +287,7 @@ proof compose_id_right:
     h_id_inst2 = forall_elim h_id_inst, wb
     h_id_cond = iff_elim_l h_id_inst2, h_id_awb
     h_eq_awb = and_elim_r h_id_cond
-    # eq_sym: eq(wb, a), then eq_subst to get rel_elem(f, a, c)
+    # eq_symmetric: eq(wb, a), then eq_subst to get rel_elem(f, a, c)
     sym1 = forall_elim sym, a
     sym2 = forall_elim sym1, wb
     h_eq_wba = implies_elim sym2, h_eq_awb
@@ -372,7 +372,7 @@ proof compose_id_left:
     iddef2 = forall_elim iddef1, y
     h_idbody = iff_elim_l iddef2, h_id
     refl = use eq_refl
-    sym = use eq_sym
+    sym = use eq_symmetric
     fix a
     fix c
     h_hac_iff = forall_elim h_hbody, a

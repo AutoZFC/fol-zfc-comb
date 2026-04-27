@@ -1,8 +1,9 @@
 #pragma once
 
 #include "../core/formula.h"
-#include "../core/proof.h"
+#include "../proof/nd/stack.h"
 #include "../parser/parser.h"
+#include "../proof/runner.h"
 #include "../util/error.h"
 
 #include <string>
@@ -15,15 +16,20 @@ namespace logic {
 
 class ProofContext;
 
-// Runtime manages axioms/theorems and creates proof contexts
+// Runtime manages axioms/theorems and creates proof contexts.
+//
+// The proof-execution pipeline runs through ProofRunner (the dispatcher),
+// which is the single audit point for theorem registration. Runtime owns
+// loading/library/include concerns and the cumulative proof_deps map.
 class Runtime {
-    GlobalContext ctx_;
+    GlobalContext     ctx_;
+    proof::ProofRunner runner_;
     std::unordered_map<std::string, std::unordered_set<std::string>> proof_deps_;
     // Source files loaded from libraries (for #pragma once across lib/source boundaries)
     std::unordered_set<std::string> loaded_paths_;
 
 public:
-    Runtime() = default;
+    Runtime() : runner_(ctx_) {}
 
     // Load axioms and claims from a string (uses parse_statements)
     util::Result<std::vector<ParsedStatement>> load(std::string_view input);
@@ -37,19 +43,9 @@ public:
     // Load axioms, claims, and proofs from a file
     util::Result<ParseResult> load_file_with_proofs(const std::string& path);
 
-    // Execute a parsed proof and verify it
+    // Execute a parsed proof: lower to nd::Program, verify with NDVerifier,
+    // register theorem and proof-dependency graph on success.
     util::ResultStatus execute_proof(const ParsedProof& proof);
-
-private:
-    // Execute a schema_inst step (extracted from execute_proof)
-    FormulaResult execute_schema_inst(
-        ProofContext& pctx,
-        const ParsedProofStep& step,
-        const std::unordered_map<std::string, Term>& fixed_vars,
-        const std::unordered_map<std::string, size_t>& schema_var_map,
-        const std::unordered_map<std::string, size_t>& schema_arity_map);
-
-public:
 
     // Execute all proofs from a ParseResult
     util::ResultStatus execute_all_proofs(const ParseResult& result);
@@ -79,8 +75,15 @@ public:
     // Load a compiled library (fast binary deserialization + link)
     util::ResultStatus load_library(const std::string& path);
 
-    // Create a proof context for proving a claim
-    ProofContext prove(const std::string& claim_name);
+    // Create a proof context for proving a claim or schema by name.
+    // Returns an error if the name is unknown; previously the silent
+    // fallback produced an untargeted ProofContext that qed would accept
+    // with any formula.
+    util::Result<ProofContext> prove(const std::string& claim_name);
+
+    // Create an ad-hoc, un-named proof context for exploratory proofs
+    // (no claim registration). Pass an empty SentenceHandle to skip the
+    // goal check.
     ProofContext prove(SentenceHandle goal);
 };
 

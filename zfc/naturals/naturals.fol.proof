@@ -95,7 +95,7 @@ proof inductive_set_exists:
     ext2 = forall_elim ext1, y0
     h_eq_sy = iff_elim_r ext2, h_all_z
     # From eq(s0, y0) and elem(y0, wI), derive elem(s0, wI)
-    esym = use eq_sym
+    esym = use eq_symmetric
     esym1 = forall_elim esym, s0
     esym2 = forall_elim esym1, y0
     h_eq_ys = implies_elim esym2, h_eq_sy
@@ -225,8 +225,8 @@ proof zero_in_nat:
     eu2 = forall_elim eu1, e0
     h_both = and_intro h_empty, h_e0_empty
     h_eq = implies_elim eu2, h_both
-    # eq(e0, e) via eq_sym, then eq_subst to get elem(e, a0)
-    esym = use eq_sym
+    # eq(e0, e) via eq_symmetric, then eq_subst to get elem(e, a0)
+    esym = use eq_symmetric
     esym1 = forall_elim esym, e
     esym2 = forall_elim esym1, e0
     h_eq_rev = implies_elim esym2, h_eq

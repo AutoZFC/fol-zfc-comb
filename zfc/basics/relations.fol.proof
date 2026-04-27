@@ -331,7 +331,7 @@ proof rel_ext:
     # Utilities
     rdef = use rel_elem_def
     pu = use pair_unique
-    sym = use eq_sym
+    sym = use eq_symmetric
     eel = use eq_elem_l
     # Show forall z. (elem(z,r) <-> elem(z,s))
     fix z
@@ -369,7 +369,7 @@ proof rel_ext:
     pu4 = forall_elim pu3, wy
     h_pairs = and_intro h_pair_body, h_pair_q
     h_eq_zq = implies_elim pu4, h_pairs
-    # eq_sym: eq(wq, z)
+    # eq_symmetric: eq(wq, z)
     sym1 = forall_elim sym, z
     sym2 = forall_elim sym1, wq
     h_eq_qz = implies_elim sym2, h_eq_zq
@@ -418,7 +418,7 @@ proof rel_ext:
     pu8 = forall_elim pu7, vy
     h_pairs2 = and_intro h_pair_body2, h_pair_vq
     h_eq_zvq = implies_elim pu8, h_pairs2
-    # eq_sym + eq_elem_l
+    # eq_symmetric + eq_elem_l
     sym3 = forall_elim sym, z
     sym4 = forall_elim sym3, vq
     h_eq_vqz = implies_elim sym4, h_eq_zvq
