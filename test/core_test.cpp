@@ -61,6 +61,63 @@ void print_summary() {
     }
 }
 
+// ==================== NNF Tests ====================
+// NNF strategy: parse a sentence, NNF its root, render to string, compare.
+
+bool nnf_string_equals(const std::string& src, const std::string& expected) {
+    GlobalContext ctx;
+    auto s = parse_sentence(src, ctx);
+    FormulaBuilder b(ctx);
+    auto h = b.to_nnf(s->root());
+    std::string got = h.get().to_string();
+    std::cout << "[" << src << " => " << got << "] ";
+    return got == expected;
+}
+
+bool test_nnf_atomic() {
+    return nnf_string_equals("forall x. P(x)", "forall x_0. P(x_0)");
+}
+
+bool test_nnf_double_neg() {
+    // ~~P(x) under forall: should become P(x).
+    return nnf_string_equals("forall x. ~~P(x)", "forall x_0. P(x_0)");
+}
+
+bool test_nnf_implies() {
+    // P(x) -> Q(x)  becomes  ~P(x) | Q(x)
+    return nnf_string_equals("forall x. (P(x) -> Q(x))",
+                             "forall x_0. ~P(x_0) | Q(x_0)");
+}
+
+bool test_nnf_de_morgan_and() {
+    // ~(P(x) & Q(x))  becomes  ~P(x) | ~Q(x)
+    return nnf_string_equals("forall x. ~(P(x) & Q(x))",
+                             "forall x_0. ~P(x_0) | ~Q(x_0)");
+}
+
+bool test_nnf_de_morgan_or() {
+    // ~(P(x) | Q(x))  becomes  ~P(x) & ~Q(x)
+    return nnf_string_equals("forall x. ~(P(x) | Q(x))",
+                             "forall x_0. ~P(x_0) & ~Q(x_0)");
+}
+
+bool test_nnf_iff() {
+    // P(x) <-> Q(x)  becomes  (~P(x) | Q(x)) & (P(x) | ~Q(x))
+    return nnf_string_equals("forall x. (P(x) <-> Q(x))",
+                             "forall x_0. (~P(x_0) | Q(x_0)) & (P(x_0) | ~Q(x_0))");
+}
+
+bool test_nnf_neg_forall() {
+    // ~forall x. P(x)  becomes  exists x. ~P(x)
+    return nnf_string_equals("~forall x. P(x)", "exists x_0. ~P(x_0)");
+}
+
+bool test_nnf_quantifier_body() {
+    // ~exists x. (P(x) -> Q(x))  becomes  forall x. (P(x) & ~Q(x))
+    return nnf_string_equals("~exists x. (P(x) -> Q(x))",
+                             "forall x_0. P(x_0) & ~Q(x_0)");
+}
+
 // ==================== Parser Tests ====================
 
 bool test_parse_simple_forall() {
@@ -804,6 +861,17 @@ int main() {
     std::cout << "\n── ZFC Axioms Test ──\n";
     run_test("Parse ZFC axioms", test_parse_zfc_axioms);
     run_test("Parse ordered pair proof", test_parse_ordered_pair_proof);
+
+    // NNF tests
+    std::cout << "\n── NNF Tests ──\n";
+    run_test("NNF of atomic predicate is identity", test_nnf_atomic);
+    run_test("NNF of double negation removes both", test_nnf_double_neg);
+    run_test("NNF of implies eliminates ->", test_nnf_implies);
+    run_test("NNF of negated and uses De Morgan", test_nnf_de_morgan_and);
+    run_test("NNF of negated or uses De Morgan", test_nnf_de_morgan_or);
+    run_test("NNF of iff expands to and-of-or", test_nnf_iff);
+    run_test("NNF of negated forall becomes exists", test_nnf_neg_forall);
+    run_test("NNF preserves De Bruijn under quantifier", test_nnf_quantifier_body);
 
     // Print summary
     print_summary();

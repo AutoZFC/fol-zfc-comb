@@ -1,0 +1,61 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Phase 1 — IR foundation (header-only).
+# Declares the system-agnostic skeleton: identifier newtypes, OpHeader,
+# SchemaInstData, Program<Instr>, Proof. Per-system Op enums and Instr
+# variants live in subpackages (src/proof/nd, src/proof/lkr).
+
+cc_library(
+    name = "ir",
+    srcs = ["ir_smoke.cpp"],
+    hdrs = ["ir.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/parser",
+        "//src/util:error",
+    ],
+)
+
+# proof_value: the system-tagged Proof umbrella plus NDProgram/LKRProgram
+# typedefs. Pulls in the per-system ops headers so the std::variant has
+# complete types.
+cc_library(
+    name = "proof_value",
+    hdrs = ["proof.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ir",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:ops",
+    ],
+)
+
+# Verifier base interface.
+cc_library(
+    name = "verifier",
+    hdrs = ["verifier.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ir",
+        ":proof_value",
+        "//src/core:formula",
+        "//src/util:error",
+    ],
+)
+
+# ProofRunner — dispatcher and centralized theorem-registration site.
+cc_library(
+    name = "runner",
+    srcs = ["runner.cpp"],
+    hdrs = ["runner.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ir",
+        ":proof_value",
+        ":verifier",
+        "//src/core:formula",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)

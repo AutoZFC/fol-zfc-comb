@@ -633,4 +633,135 @@ FormulaHandle FormulaBuilder::instantiate_schema(FormulaHandle h, const std::vec
     return h;
 }
 
+// ========== NNF (Negation Normal Form) ==========
+//
+// Transformation laws:
+//   nnf(P)              = P                         (atomic)
+//   nnf(¬P)             = ¬P                        (atomic)
+//   nnf(¬¬φ)            = nnf(φ)
+//   nnf(φ ∧ ψ)          = nnf(φ) ∧ nnf(ψ)
+//   nnf(¬(φ ∧ ψ))       = nnf(¬φ) ∨ nnf(¬ψ)         De Morgan
+//   nnf(φ ∨ ψ)          = nnf(φ) ∨ nnf(ψ)
+//   nnf(¬(φ ∨ ψ))       = nnf(¬φ) ∧ nnf(¬ψ)         De Morgan
+//   nnf(φ → ψ)          = nnf(¬φ) ∨ nnf(ψ)          eliminate →
+//   nnf(¬(φ → ψ))       = nnf(φ) ∧ nnf(¬ψ)
+//   nnf(φ ↔ ψ)          = (nnf(¬φ) ∨ nnf(ψ)) ∧ (nnf(φ) ∨ nnf(¬ψ))
+//   nnf(¬(φ ↔ ψ))       = (nnf(φ) ∧ nnf(¬ψ)) ∨ (nnf(¬φ) ∧ nnf(ψ))
+//   nnf(∀x.φ)           = ∀x. nnf(φ)
+//   nnf(¬∀x.φ)          = ∃x. nnf(¬φ)
+//   nnf(∃x.φ)           = ∃x. nnf(φ)
+//   nnf(¬∃x.φ)          = ∀x. nnf(¬φ)
+//   nnf(⊥)              = ⊥
+//   nnf(¬⊥)             = ¬⊥                        (top-as-literal placeholder)
+
+namespace {
+
+// Forward declaration for mutual recursion within this TU.
+FormulaHandle nnf_dispatch(FormulaBuilder& b, FormulaHandle h, bool negate);
+
+FormulaHandle nnf_compound(FormulaBuilder& b, const Compound& c, bool negate) {
+    switch (c.op) {
+        case Op::Not:
+            // ¬X under negate: nnf(X). Otherwise: nnf_neg(X).
+            return nnf_dispatch(b, c.left, !negate);
+        case Op::And: {
+            FormulaHandle nl = nnf_dispatch(b, c.left,  negate);
+            FormulaHandle nr = nnf_dispatch(b, c.right, negate);
+            return negate ? b.make_or(nl, nr) : b.make_and(nl, nr);
+        }
+        case Op::Or: {
+            FormulaHandle nl = nnf_dispatch(b, c.left,  negate);
+            FormulaHandle nr = nnf_dispatch(b, c.right, negate);
+            return negate ? b.make_and(nl, nr) : b.make_or(nl, nr);
+        }
+        case Op::Implies: {
+            // φ → ψ  ≡  ¬φ ∨ ψ
+            // ¬(φ → ψ)  ≡  φ ∧ ¬ψ
+            if (negate) {
+                FormulaHandle nl = nnf_dispatch(b, c.left,  /*negate=*/false);
+                FormulaHandle nr = nnf_dispatch(b, c.right, /*negate=*/true);
+                return b.make_and(nl, nr);
+            } else {
+                FormulaHandle nl = nnf_dispatch(b, c.left,  /*negate=*/true);
+                FormulaHandle nr = nnf_dispatch(b, c.right, /*negate=*/false);
+                return b.make_or(nl, nr);
+            }
+        }
+        case Op::Iff: {
+            // φ ↔ ψ        ≡  (¬φ ∨ ψ) ∧ (φ ∨ ¬ψ)
+            // ¬(φ ↔ ψ)    ≡  (φ ∧ ¬ψ) ∨ (¬φ ∧ ψ)
+            FormulaHandle phi_pos = nnf_dispatch(b, c.left,  false);
+            FormulaHandle phi_neg = nnf_dispatch(b, c.left,  true);
+            FormulaHandle psi_pos = nnf_dispatch(b, c.right, false);
+            FormulaHandle psi_neg = nnf_dispatch(b, c.right, true);
+            if (negate) {
+                FormulaHandle a = b.make_and(phi_pos, psi_neg);
+                FormulaHandle bb = b.make_and(phi_neg, psi_pos);
+                return b.make_or(a, bb);
+            } else {
+                FormulaHandle a = b.make_or(phi_neg, psi_pos);
+                FormulaHandle bb = b.make_or(phi_pos, psi_neg);
+                return b.make_and(a, bb);
+            }
+        }
+        case Op::Bottom:
+            // ⊥ stays as ⊥; ¬⊥ stays as Compound{Not, ⊥, _} — a "top" literal
+            // we don't normalize further (no Top constructor available).
+            if (negate) {
+                FormulaHandle bot = b.make_bottom();
+                return b.make_not(bot);
+            }
+            return b.make_bottom();
+        default:
+            // Unreachable: FOL Op enum is exhaustively handled above.
+            return c.left;
+    }
+}
+
+FormulaHandle nnf_quantified(FormulaBuilder& b, const Quantified& q, bool negate) {
+    // ∀x.φ under negate: ∃x. nnf(¬φ). ∃x.φ under negate: ∀x. nnf(¬φ).
+    Op out_op = q.op;
+    if (negate) {
+        out_op = (q.op == Op::Forall) ? Op::Exists : Op::Forall;
+    }
+    FormulaHandle nb = nnf_dispatch(b, q.body, negate);
+    return b.make_quantified(out_op, nb);
+}
+
+FormulaHandle nnf_dispatch(FormulaBuilder& b, FormulaHandle h, bool negate) {
+    const Formula& f = h.get();
+
+    if (f.is_predicate()) {
+        return negate ? b.make_not(h) : h;
+    }
+    if (f.is_compound()) {
+        return nnf_compound(b, f.as_compound(), negate);
+    }
+    if (f.is_quantified()) {
+        return nnf_quantified(b, f.as_quantified(), negate);
+    }
+    if (f.is_schema_var()) {
+        // Schema vars are formula placeholders: we can't push negation
+        // inside them. Treat as atomic for NNF purposes.
+        return negate ? b.make_not(h) : h;
+    }
+    if (f.is_sentence()) {
+        // Recurse into the sentence root; sentences are closed formulas.
+        return nnf_dispatch(b, f.as_sentence().get().root(), negate);
+    }
+    return h;
+}
+
+}  // namespace
+
+FormulaHandle FormulaBuilder::to_nnf(FormulaHandle h) {
+    return nnf_dispatch(*this, h, /*negate=*/false);
+}
+
+FormulaHandle FormulaBuilder::to_nnf_neg(FormulaHandle h) {
+    return nnf_dispatch(*this, h, /*negate=*/true);
+}
+
 }  // namespace logic
+
+

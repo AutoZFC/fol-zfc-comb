@@ -1,0 +1,42 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "ops",
+    hdrs = ["ops.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/parser",
+        "//src/proof:ir",
+    ],
+)
+
+cc_library(
+    name = "verifier",
+    srcs = ["verifier.cpp"],
+    hdrs = ["verifier.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ops",
+        "//src/core:formula",
+        "//src/core:proof",
+        "//src/parser",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof:verifier",
+        "//src/util:error",
+    ],
+)
+
+cc_library(
+    name = "lowering",
+    srcs = ["lowering.cpp"],
+    hdrs = ["lowering.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ops",
+        "//src/parser",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/util:error",
+    ],
+)

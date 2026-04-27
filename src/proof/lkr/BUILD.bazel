@@ -1,0 +1,49 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "ops",
+    hdrs = ["ops.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/parser",
+        "//src/proof:ir",
+    ],
+)
+
+cc_library(
+    name = "sequent",
+    hdrs = ["sequent.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+    ],
+)
+
+cc_library(
+    name = "literal",
+    srcs = ["literal.cpp"],
+    hdrs = ["literal.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+    ],
+)
+
+cc_library(
+    name = "verifier",
+    srcs = ["verifier.cpp"],
+    hdrs = ["verifier.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":literal",
+        ":ops",
+        ":sequent",
+        "//src/core:formula",
+        "//src/core:scope_utils",
+        "//src/parser",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof:verifier",
+        "//src/util:error",
+    ],
+)

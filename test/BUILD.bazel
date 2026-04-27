@@ -41,10 +41,73 @@ cc_binary(
     ],
 )
 
+cc_test(
+    name = "lkr_verifier_test",
+    srcs = ["lkr_verifier_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof:runner",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
+    name = "nd_to_lkr_test",
+    srcs = ["nd_to_lkr_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate:nd_to_lkr",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
+    name = "nd_to_lkr_corpus_test",
+    srcs = ["nd_to_lkr_corpus_test.cpp"],
+    data = [
+        "//zfc/basics:axioms.fol.def",
+        "//zfc/basics:cartesian.fol.def",
+        "//zfc/basics:cartesian.fol.proof",
+        "//zfc/basics:functions.fol.def",
+        "//zfc/basics:functions.fol.proof",
+        "//zfc/basics:identity.fol.def",
+        "//zfc/basics:identity.fol.proof",
+        "//zfc/basics:ordered_pair.fol.def",
+        "//zfc/basics:ordered_pair.fol.proof",
+        "//zfc/basics:relations.fol.def",
+        "//zfc/basics:relations.fol.proof",
+        "//zfc/basics:replacement_choice.fol.def",
+        "//zfc/basics:set_operations.fol.def",
+        "//zfc/basics:set_operations.fol.proof",
+        "//zfc/basics:subset.fol.def",
+        "//zfc/basics:subset.fol.proof",
+    ],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate:nd_to_lkr",
+        "//src/runtime",
+    ],
+)
+
 test_suite(
     name = "all_tests",
     tests = [
         ":core_test",
+        ":lkr_verifier_test",
+        ":nd_to_lkr_corpus_test",
+        ":nd_to_lkr_test",
         ":runtime_test",
     ],
 )

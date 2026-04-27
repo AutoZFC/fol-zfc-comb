@@ -562,6 +562,15 @@ public:
     Term instantiate_schema_in_term(const Term& t, const std::vector<SchemaBind>& bindings);
     FormulaHandle instantiate_schema(FormulaHandle h, const std::vector<SchemaBind>& bindings);
 
+    // ========== NNF (Negation Normal Form) ==========
+    // Push negations inward via De Morgan; eliminate Implies/Iff/double-Not.
+    // Result contains only: PredicateInstance, Compound{Not,Predicate,_},
+    // Compound{And/Or,...}, Quantified{Forall/Exists,...}, Bottom,
+    // SchemaVar (positive or negated). Bottom is preserved; ¬⊥ stays as
+    // Compound{Not,Bottom,_} and is treated as a "top" literal.
+    FormulaHandle to_nnf(FormulaHandle h);
+    FormulaHandle to_nnf_neg(FormulaHandle h);  // returns NNF of ¬h
+
     // Build sentence if formula is closed (no free fixed vars AND no free Gen vars)
     SentenceHandle build_sentence(FormulaHandle root, var_index start = 0) {
         if (!is_closed_since(start)) return SentenceHandle{};

@@ -1,0 +1,29 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Pass<From, To> — IR-to-IR transformation interface.
+cc_library(
+    name = "pass",
+    hdrs = ["pass.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/proof:ir",
+        "//src/util:error",
+    ],
+)
+
+# NDtoLKR translator (Phase 6 v1: use+qed pattern).
+cc_library(
+    name = "nd_to_lkr",
+    srcs = ["nd_to_lkr.cpp"],
+    hdrs = ["nd_to_lkr.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pass",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)
