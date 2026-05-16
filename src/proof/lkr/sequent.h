@@ -17,7 +17,7 @@
 // transform the sequent O(width); width is bounded by the proof's
 // instruction count, which is small in practice.
 
-#include "../../core/formula.h"
+#include "src/core/formula.h"
 
 #include <vector>
 

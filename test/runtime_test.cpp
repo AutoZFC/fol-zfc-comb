@@ -1,7 +1,7 @@
 // Runtime tests and ordered pair proofs
 
-#include "../src/runtime/runtime.h"
-#include "../src/parser/parser.h"
+#include "src/runtime/runtime.h"
+#include "src/parser/parser.h"
 
 #include <cassert>
 #include <fstream>

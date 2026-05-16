@@ -14,9 +14,9 @@
 // the proof's structural well-formedness (e.g. no axiom/theorem lookup;
 // that's deferred to the verifier).
 
-#include "../../parser/parser.h"
-#include "../../util/error.h"
-#include "../proof.h"
+#include "src/parser/parser.h"
+#include "src/util/error.h"
+#include "src/proof/proof.h"
 
 namespace logic::proof::nd {
 

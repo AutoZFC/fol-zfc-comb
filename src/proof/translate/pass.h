@@ -22,8 +22,8 @@
 // Memory: each pass produces a new Program; the input is read-only.
 // At our proof scale, copying instr lists is cheap.
 
-#include "../../util/error.h"
-#include "../ir.h"
+#include "src/util/error.h"
+#include "src/proof/ir.h"
 
 #include <utility>
 

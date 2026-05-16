@@ -16,7 +16,7 @@
 // Soundness contract: these functions inspect formula structure only;
 // they allocate nothing and mutate nothing.
 
-#include "../../core/formula.h"
+#include "src/core/formula.h"
 
 namespace logic::proof::lkr {
 

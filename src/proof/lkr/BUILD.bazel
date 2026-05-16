@@ -43,6 +43,7 @@ cc_library(
         "//src/parser",
         "//src/proof:ir",
         "//src/proof:proof_value",
+        "//src/proof:schema_resolve",
         "//src/proof:verifier",
         "//src/util:error",
     ],

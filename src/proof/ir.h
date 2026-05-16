@@ -27,8 +27,8 @@
 // inside a deferred formula AST — is a parser artifact, not an IR-level
 // identifier (see Option A in design discussion).
 
-#include "../parser/parser.h"     // SchemaBinding (parser-side struct, reused as-is)
-#include "../util/error.h"        // util::SourceLocation
+#include "src/parser/parser.h"     // SchemaBinding (parser-side struct, reused as-is)
+#include "src/util/error.h"        // util::SourceLocation
 
 #include <cstdint>
 #include <functional>
@@ -155,13 +155,14 @@ struct Program {
 // ProofRunner / dispatchers can index by it without including the ops.
 
 enum class System : uint8_t {
-    ND  = 0,
-    LKR = 1,
+    ND   = 0,
+    LKR  = 1,
+    COMB = 2,
 };
 
 // Number of supported systems. Used by ProofRunner to size its verifier
 // array. Update when adding a new System tag.
-inline constexpr size_t kNumSystems = 2;
+inline constexpr size_t kNumSystems = 3;
 
 }  // namespace logic::proof
 

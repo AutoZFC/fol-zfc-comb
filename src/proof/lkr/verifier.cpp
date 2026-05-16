@@ -4,10 +4,12 @@
 #include "ops.h"
 #include "sequent.h"
 
-#include "../../core/formula.h"
-#include "../../core/scope_utils.h"
-#include "../../parser/parser.h"
-#include "../../util/error.h"
+#include "src/proof/schema_resolve.h"
+
+#include "src/core/formula.h"
+#include "src/core/scope_utils.h"
+#include "src/parser/parser.h"
+#include "src/util/error.h"
 
 #include <algorithm>
 #include <string>
@@ -29,16 +31,15 @@ struct Session {
 
     std::vector<SequentRecord> open_goals;
 
-    // SSA term env: TermRef.idx -> Term (set by Forall and Exists ops
-    // when they introduce eigenvars; Exists's witness is a TermRef into
-    // this env, so eigenvariables introduced earlier can be witnesses
-    // for ∃ later — provided the eigenvar is in scope).
+    // SSA term env: TermRef.idx -> Term (set by Forall ops when they
+    // introduce eigenvars; Exists's witness is a TermRef into this env,
+    // so eigenvars introduced earlier can be witnesses for ∃ later —
+    // provided the eigenvar is in scope).
     std::vector<Term>     term_env;
     std::vector<uint8_t>  term_present;
 
     // Source-level scope-name -> Term, for deferred AST resolution
-    // (Cut and Weakening formula sources). Empty by default; populated
-    // when ND-style scope names appear in the program (rare for LKR).
+    // (Cut and Weakening formula sources). Empty by default.
     std::unordered_map<std::string, Term> name_table;
 
     // Track introducing-instr's index for each fixed-var, for diagnostic
@@ -102,8 +103,10 @@ util::Result<FormulaHandle> resolve_source_nnf(Session& s, const FormulaSource& 
         const auto& ast = std::get<std::shared_ptr<ASTNode>>(src);
         if (!ast) return MAKE_ERROR << op << ": missing formula AST";
         std::unordered_map<std::string, size_t> empty_sv, empty_ar;
-        raw = parse_formula_with_vars(ast.get(), s.ctx, s.builder,
-                                       s.name_table, empty_sv, empty_ar);
+        TRY_ASSIGN(parsed,
+            try_parse_formula_with_vars(ast.get(), s.ctx, s.builder,
+                                         s.name_table, empty_sv, empty_ar));
+        raw = parsed;
     }
     return s.builder.to_nnf(raw);
 }
@@ -132,46 +135,42 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const AxiomLit& op) {
     return util::Ok();
 }
 
-util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const AxiomGen& op) {
-    TRY(require_top(s, "axiom_gen"));
-    auto& g = s.top();
-    TRY(require_idx(g, op.a, "axiom_gen"));
-    TRY(require_idx(g, op.b, "axiom_gen"));
-    if (op.a == op.b) {
-        return MAKE_ERROR << "axiom_gen: a and b must differ";
-    }
-    // NNF dual check: to_nnf(¬entries[a]) should equal entries[b].
-    FormulaHandle neg_a = s.builder.make_not(g.entries[op.a]);
-    FormulaHandle neg_a_nnf = s.builder.to_nnf(neg_a);
-    if (neg_a_nnf != g.entries[op.b]) {
-        return MAKE_ERROR << "axiom_gen: entries at " << op.a
-                          << " and " << op.b << " are not NNF duals";
-    }
-    s.open_goals.pop_back();
-    return util::Ok();
-}
-
 util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const One& op) {
     TRY(require_top(s, "one"));
     auto& g = s.top();
     TRY(require_idx(g, op.idx, "one"));
     if (!is_top_literal(g.entries[op.idx])) {
         return MAKE_ERROR << "one: entry " << op.idx
-                          << " is not the top literal ¬⊥";
+                          << " is not the truth literal ¬⊥";
     }
     s.open_goals.pop_back();
     return util::Ok();
 }
 
-util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const UseTheorem& op) {
-    TRY(require_top(s, "use_theorem"));
-    auto found = s.ctx.find_known(op.axiom.name);
-    if (!found.has_value()) {
-        return MAKE_ERROR << "use_theorem: unknown axiom/theorem '"
-                          << op.axiom.name << "'";
-    }
+util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const CloseByLemma& op) {
+    TRY(require_top(s, "close_by_lemma"));
     s.used_names.insert(op.axiom.name);
-    FormulaHandle raw = found.value().get().root();
+
+    // Resolve the closing formula. If bindings are empty, the name must
+    // resolve to a theorem/axiom; otherwise it must resolve to a schema
+    // (instantiated with the bindings).
+    FormulaHandle raw{};
+    if (op.bindings.empty()) {
+        auto found = s.ctx.find_known(op.axiom.name);
+        if (!found.has_value()) {
+            return MAKE_ERROR << "close_by_lemma: unknown axiom/theorem '"
+                              << op.axiom.name << "'";
+        }
+        raw = found.value().get().root();
+    } else {
+        SchemaInstData data;
+        data.schema = SchemaRef{op.axiom.name};
+        data.bindings = op.bindings;
+        TRY_ASSIGN(inst, resolve_and_instantiate_schema(
+            s.ctx, s.builder, data, s.name_table, "close_by_lemma"));
+        raw = inst;
+    }
+
     FormulaHandle nnf = s.builder.to_nnf(raw);
     auto& g = s.top();
     bool found_match = false;
@@ -179,59 +178,8 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const UseTheorem& op) {
         if (e == nnf) { found_match = true; break; }
     }
     if (!found_match) {
-        return MAKE_ERROR << "use_theorem: theorem '" << op.axiom.name
-                          << "' (NNF) is not present in the current goal";
-    }
-    s.open_goals.pop_back();
-    return util::Ok();
-}
-
-util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const SchemaInst& op) {
-    TRY(require_top(s, "schema_inst"));
-    auto schema = s.ctx.find_schema(op.data.schema.name);
-    if (!schema.has_value()) {
-        return MAKE_ERROR << "schema_inst: unknown schema '"
-                          << op.data.schema.name << "'";
-    }
-    if (!s.ctx.is_schema_proven(op.data.schema.name)) {
-        return MAKE_ERROR << "schema_inst: schema '" << op.data.schema.name
-                          << "' not yet proven";
-    }
-    s.used_names.insert(op.data.schema.name);
-    std::unordered_map<std::string, size_t> empty_sv, empty_ar;
-    std::vector<SchemaBind> bindings(schema->var_names.size());
-    std::vector<bool> bound(schema->var_names.size(), false);
-    for (const auto& sb : op.data.bindings) {
-        size_t idx = schema->var_names.size();
-        for (size_t j = 0; j < schema->var_names.size(); ++j) {
-            if (schema->var_names[j] == sb.var_name) { idx = j; break; }
-        }
-        if (idx >= schema->var_names.size())
-            return MAKE_ERROR << "schema_inst: unknown schema variable '" << sb.var_name << "'";
-        if (bound[idx])
-            return MAKE_ERROR << "schema_inst: duplicate binding for '" << sb.var_name << "'";
-        size_t arity = (idx < schema->var_arities.size()) ? schema->var_arities[idx] : 0;
-        if (arity != 0) {
-            return MAKE_ERROR << "schema_inst: arity-N schema bindings not supported in LKR";
-        }
-        FormulaHandle body = parse_formula_with_vars(
-            sb.formula_ast.get(), s.ctx, s.builder, s.name_table, empty_sv, empty_ar);
-        bindings[idx] = SchemaBind(body);
-        bound[idx] = true;
-    }
-    for (size_t j = 0; j < bound.size(); ++j) {
-        if (!bound[j])
-            return MAKE_ERROR << "schema_inst: missing binding for '" << schema->var_names[j] << "'";
-    }
-    FormulaHandle inst_raw = s.builder.instantiate_schema(schema->body, bindings);
-    FormulaHandle inst_nnf = s.builder.to_nnf(inst_raw);
-    auto& g = s.top();
-    bool found_match = false;
-    for (const auto& e : g.entries) {
-        if (e == inst_nnf) { found_match = true; break; }
-    }
-    if (!found_match) {
-        return MAKE_ERROR << "schema_inst: instantiated formula (NNF) not present in the current goal";
+        return MAKE_ERROR << "close_by_lemma: lemma formula (NNF) for '"
+                          << op.axiom.name << "' is not present in the current goal";
     }
     s.open_goals.pop_back();
     return util::Ok();
@@ -285,12 +233,38 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const And& op) {
     FormulaHandle phi = f.as_compound().left;
     FormulaHandle psi = f.as_compound().right;
 
-    // Additive split: both subgoals retain the non-principal entries;
-    // LEFT replaces principal with phi, RIGHT replaces with psi.
-    SequentRecord left  = g;
-    SequentRecord right = g;
-    left.entries[op.principal]  = phi;
-    right.entries[op.principal] = psi;
+    // Validate the partition: distinct, in-range, none equals principal.
+    std::vector<size_t> sorted_left = op.left_partition;
+    std::sort(sorted_left.begin(), sorted_left.end());
+    for (size_t k = 0; k < sorted_left.size(); ++k) {
+        if (sorted_left[k] >= g.entries.size()) {
+            return MAKE_ERROR << "and: left_partition index " << sorted_left[k]
+                              << " out of range (size " << g.entries.size() << ")";
+        }
+        if (sorted_left[k] == op.principal) {
+            return MAKE_ERROR << "and: left_partition contains principal index "
+                              << op.principal;
+        }
+        if (k > 0 && sorted_left[k] == sorted_left[k-1]) {
+            return MAKE_ERROR << "and: left_partition has duplicate "
+                              << sorted_left[k];
+        }
+    }
+
+    std::unordered_set<size_t> in_left(sorted_left.begin(), sorted_left.end());
+
+    // Multiplicative split:
+    //   LEFT  = entries in left_partition (original order) + [φ]
+    //   RIGHT = entries NOT in left_partition (and != principal), original order, + [θ]
+    SequentRecord left;
+    SequentRecord right;
+    for (size_t i = 0; i < g.entries.size(); ++i) {
+        if (i == op.principal) continue;
+        if (in_left.count(i)) left.entries.push_back(g.entries[i]);
+        else                   right.entries.push_back(g.entries[i]);
+    }
+    left.entries.push_back(phi);
+    right.entries.push_back(psi);
 
     s.open_goals.pop_back();
     s.open_goals.push_back(std::move(right));   // pushed first → deeper
@@ -324,11 +298,14 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const Forall& op) {
     if (!f.is_quantified() || f.as_quantified().op != Op::Forall) {
         return MAKE_ERROR << "forall: principal entry is not ∀x.ϕ";
     }
-    var_index v = s.builder.enter_scope();
-    Term eigen = Term::fixed(v);
-    s.bind_term(idx, eigen);
+    // The eigen is declared on the op; the verifier does NOT allocate.
+    // This keeps the eigenvariable's identity intrinsic to the proof
+    // (chosen by whoever constructed the LKR program).
+    var_index v = op.eigen;
 
     // Eigenvariable freshness: v must not occur free in any other entry.
+    // Validate before binding into term_env so a failed Forall does not
+    // pollute the SSA term environment.
     for (size_t k = 0; k < g.entries.size(); ++k) {
         if (k == op.principal) continue;
         if (formula_contains_fixed_var(g.entries[k], v)) {
@@ -336,6 +313,9 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const Forall& op) {
                               << " is not fresh in entry[" << k << "]";
         }
     }
+
+    Term eigen = Term::fixed(v);
+    s.bind_term(idx, eigen);
 
     FormulaHandle body = f.as_quantified().body;
     FormulaHandle inst = s.builder.instantiate_quantifier_body(body, eigen);

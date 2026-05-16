@@ -17,6 +17,7 @@
 #include "src/proof/translate/nd_to_lkr.h"
 #include "src/runtime/runtime.h"
 
+#include <cassert>
 #include <iostream>
 #include <string>
 
@@ -61,7 +62,8 @@ Program<nd::Instr> lower_or_die(const ParsedProof& parsed) {
 
 // =========================================================================
 // Use+Qed pattern: ND proof imports an axiom whose formula equals the
-// claim. NDtoLKR translates to [UseTheorem(axiom)]. LKR verifies.
+// claim. NDtoLKR translates to [Cut + CloseByLemma + axiom-decomp]. LKR
+// verifies.
 // =========================================================================
 void test_use_qed_translates_and_verifies() {
     Runtime rt;
@@ -129,15 +131,14 @@ void test_no_ctx_rejected() {
 //     h3 = forall_intro h2        // F_h3 = ∀x. P(x)
 //     qed h3
 //
-// Expected LKR translation (Cut-based, with x → ForallR-introduced eigen):
-//   ForallR(0)              # ⊢ ∀x. P(x)  →  ⊢ P(eigen)
-//   Cut(∀x. P(x))           # left:  ⊢ ∀x. P(x)        right: ∀x. P(x) ⊢ P(eigen)
-//     UseTheorem(all_p)     #   close left
-//   Cut(P(eigen))           # left:  ∀x. P(x) ⊢ P(eigen)
-//                           # right: ∀x. P(x), P(eigen) ⊢ P(eigen)
-//     ForallL(0, eigen)     #   left becomes P(eigen) ⊢ P(eigen)
-//     Axiom(0, 0)           #   close left
-//   Axiom(1, 0)             # close right via the cut-in P(eigen)
+// Expected LKR translation (Cut-based, with x → Forall-introduced eigen):
+//   Forall(0)                  # ⊢ ∀x. P(x)  →  ⊢ P(eigen)
+//   Cut(∀x. P(x))              # left:  ⊢ ∀x. P(x)        right: ¬∀x.P(x), P(eigen)
+//     CloseByLemma(all_p)      #   close left
+//   Cut(P(eigen))              # left:  ¬∀x. P(x), P(eigen)
+//                              # right: ¬∀x. P(x), ¬P(eigen), P(eigen)
+//     ... close left via Exists+axiom decomp ...
+//   ... close right via axiom decomp on duals ...
 // =========================================================================
 void test_v2_full_translation_of_real_proof() {
     Runtime rt;
@@ -217,7 +218,8 @@ void test_v2_modus_ponens_chain() {
 
 // =========================================================================
 // Translator produces a valid LKR program shape for use+qed: cut spine
-// emits Cut + UseTheorem + AxiomGen for a 0-Fix, 0-Assume claim.
+// emits Cut(my_ax_nnf), CloseByLemma(my_ax), then a structural axiom
+// decomposition that closes the final RIGHT subgoal.
 // =========================================================================
 void test_translator_output_shape() {
     Runtime rt;
@@ -242,20 +244,19 @@ void test_translator_output_shape() {
     if (lkr_prog.claim_name != "my_claim") {
         std::cerr << "claim_name mismatch\n"; ++g_failed; return;
     }
-    // Expected: Cut(my_ax_nnf), UseTheorem(my_ax), AxiomGen(0,1).
-    if (lkr_prog.instrs.size() != 3) {
-        std::cerr << "expected 3 LKR instrs, got " << lkr_prog.instrs.size() << "\n";
+    // Expected leading shape: Cut(my_ax_nnf), CloseByLemma(my_ax), then a
+    // structural axiom decomposition that closes the trailing RIGHT
+    // subgoal. We assert the leading two instrs.
+    if (lkr_prog.instrs.size() < 2) {
+        std::cerr << "expected ≥2 LKR instrs, got " << lkr_prog.instrs.size() << "\n";
         ++g_failed; return;
     }
     if (!std::holds_alternative<lkr::Cut>(lkr_prog.instrs[0])) {
         std::cerr << "instr 0 not Cut\n"; ++g_failed; return;
     }
-    const auto* ut = std::get_if<lkr::UseTheorem>(&lkr_prog.instrs[1]);
-    if (!ut || ut->axiom.name != "my_ax") {
-        std::cerr << "instr 1 not UseTheorem(my_ax)\n"; ++g_failed; return;
-    }
-    if (!std::holds_alternative<lkr::AxiomGen>(lkr_prog.instrs[2])) {
-        std::cerr << "instr 2 not AxiomGen\n"; ++g_failed; return;
+    const auto* cb = std::get_if<lkr::CloseByLemma>(&lkr_prog.instrs[1]);
+    if (!cb || cb->axiom.name != "my_ax" || !cb->bindings.empty()) {
+        std::cerr << "instr 1 not CloseByLemma(my_ax)\n"; ++g_failed; return;
     }
     ++g_passed;
 }
@@ -319,6 +320,144 @@ void test_v2_transitive_implication() {
     EXPECT_OK(translate::translate_and_verify(ctx, goal, nd_prog));
 }
 
+// =========================================================================
+// SchemaInst: a schema with a single arity-0 variable, instantiated then
+// proven via the schema-as-axiom pattern. The proof block first proves
+// the schema (which marks it proven), then a separate claim uses
+// schema_inst to instantiate it. Tests the full ND → LKR roundtrip
+// through resolve_and_instantiate_schema.
+// =========================================================================
+void test_v2_schema_inst() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        schema univ_self_impl[P]: forall x. (P -> P)
+
+        proof univ_self_impl:
+            fix x
+            h_assume = assume P
+            h_impl = implies_intro h_assume
+            h_all = forall_intro h_impl
+            qed h_all
+
+        axiom dummy: forall y. (Q(y) | ~Q(y))
+        claim q_inst: forall x. (Q -> Q)
+
+        proof q_inst:
+            h = schema_inst univ_self_impl { P: Q }
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    EXPECT_OK(rt.execute_all_proofs(parsed.value()));
+
+    // Locate the q_inst proof's parsed structure.
+    const ParsedProof* q_inst_proof = nullptr;
+    for (const auto& p : parsed.value().proofs) {
+        if (p.claim_name == "q_inst") { q_inst_proof = &p; break; }
+    }
+    if (!q_inst_proof) { ++g_failed; return; }
+
+    Program<nd::Instr> nd_prog = lower_or_die(*q_inst_proof);
+
+    auto& ctx = rt.context();
+    auto thm = ctx.find_known("q_inst");
+    if (!thm.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = thm.value().get().root();
+
+    // Full ND→LKR roundtrip including SchemaInst.
+    EXPECT_OK(translate::translate_and_verify(ctx, goal, nd_prog));
+}
+
+// =========================================================================
+// Arity-N schema bindings — full ND→LKR roundtrip with an arity-1
+// predicate variable. The schema body uses ?P(x) at two sites; the
+// instantiation binds P to a lambda \y. eq(y, y), so the resolved body
+// becomes forall x. (eq(x, x) -> eq(x, x)). Exercises schema_resolve's
+// arity-N substitution path on both the ND verification (which proves
+// the claim) and the LKR re-verification (translate_and_verify).
+// =========================================================================
+void test_arity_n_schema_inst_roundtrip() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        schema unary_self_impl [P(1)]: forall x. (P(x) -> P(x))
+
+        proof unary_self_impl:
+            fix x
+            h_assume = assume P(x)
+            h_impl = implies_intro h_assume
+            h_all = forall_intro h_impl
+            qed h_all
+
+        axiom dummy: forall y. (Q(y) | ~Q(y))
+        claim eq_self_impl: forall x. (eq(x, x) -> eq(x, x))
+
+        proof eq_self_impl:
+            h = schema_inst unary_self_impl { P: \y. eq(y, y) }
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    EXPECT_OK(rt.execute_all_proofs(parsed.value()));
+
+    const ParsedProof* claim_proof = nullptr;
+    for (const auto& p : parsed.value().proofs) {
+        if (p.claim_name == "eq_self_impl") { claim_proof = &p; break; }
+    }
+    if (!claim_proof) { ++g_failed; return; }
+
+    Program<nd::Instr> nd_prog = lower_or_die(*claim_proof);
+
+    auto& ctx = rt.context();
+    auto thm = ctx.find_known("eq_self_impl");
+    if (!thm.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = thm.value().get().root();
+
+    // schema_resolve must now accept the arity-1 binding instead of
+    // returning the "arity-N schema bindings not yet supported" error.
+    EXPECT_OK(translate::translate_and_verify(ctx, goal, nd_prog));
+}
+
+// =========================================================================
+// Boundary test: ScopeDeps uses a 64-bit bitset with kMaxDepth = 63, so
+// nesting depth 64 must be rejected with a diagnostic mentioning the
+// capacity. Build a synthetic ND program of 64 nested `fix` ops directly
+// (deeper than any human-written proof) and confirm decompose_blocks
+// rejects it instead of silently overflowing.
+// =========================================================================
+void test_translator_rejects_excessive_nesting() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    auto& ctx = rt.context();
+
+    Program<nd::Instr> nd_prog;
+    for (int i = 0; i < 64; ++i) {
+        nd::Fix fx;
+        fx.var_name.name = "x" + std::to_string(i);
+        nd_prog.instrs.push_back(fx);
+    }
+
+    translate::NDtoLKR translator(ctx);
+    auto r = translator.apply(nd_prog);
+    if (!r.is_error()) {
+        std::cerr << "FAIL: 64-deep nesting should be rejected\n";
+        ++g_failed;
+        return;
+    }
+    const std::string& msg = r.error().to_string();
+    if (msg.find("ScopeDeps capacity") == std::string::npos) {
+        std::cerr << "FAIL: expected 'ScopeDeps capacity' in error, got: "
+                  << msg << "\n";
+        ++g_failed;
+        return;
+    }
+    ++g_passed;
+}
+
 int main() {
     test_use_qed_translates_and_verifies();
     test_no_ctx_rejected();
@@ -326,6 +465,9 @@ int main() {
     test_v2_full_translation_of_real_proof();
     test_v2_modus_ponens_chain();
     test_v2_transitive_implication();
+    test_v2_schema_inst();
+    test_arity_n_schema_inst_roundtrip();
+    test_translator_rejects_excessive_nesting();
     std::cout << "nd_to_lkr_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

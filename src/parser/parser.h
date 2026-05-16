@@ -1,6 +1,7 @@
 #pragma once
 
-#include "../core/formula.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
 #include "formula_ast.h"
 
 #include <memory>
@@ -59,8 +60,21 @@ struct ParsedProofStep {
     std::vector<SchemaBinding> schema_bindings;  // For SchemaInst kind
 };
 
-// Parse a formula with external variables (for proof steps)
+// Parse a formula with external variables (for proof steps).
+// Throws std::runtime_error on parse/conversion failure.
 FormulaHandle parse_formula_with_vars(
+    const ASTNode* ast,
+    GlobalContext& ctx,
+    FormulaBuilder& builder,
+    const std::unordered_map<std::string, Term>& external_vars,
+    const std::unordered_map<std::string, size_t>& schema_vars = {},
+    const std::unordered_map<std::string, size_t>& schema_arities = {});
+
+// Non-throwing variant of parse_formula_with_vars: catches std::runtime_error
+// internally and returns it as a util::Result error. Use this from
+// Result<T>-returning code (verifier dispatch, schema resolver, translator)
+// so parser exceptions don't leak across the boundary.
+util::Result<FormulaHandle> try_parse_formula_with_vars(
     const ASTNode* ast,
     GlobalContext& ctx,
     FormulaBuilder& builder,

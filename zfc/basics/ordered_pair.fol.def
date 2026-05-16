@@ -45,6 +45,22 @@ claim eq_elem_l: forall x. forall y. forall s. ((eq(x, y) & elem(x, s)) -> elem(
 
 claim eq_elem_r: forall x. forall s. forall t. ((eq(s, t) & elem(x, s)) -> elem(x, t))
 
+# eq is congruent in its second argument: eq(a, b) implies eq(w, a) and eq(w, b)
+# are interchangeable for any w. Used as a helper inside pair / rel_elem
+# congruence proofs. Derived from eq_trans + eq_symmetric — no eq_subst rule.
+claim eq_iff_eq: forall a. forall b. forall w. (eq(a, b) -> (eq(w, a) <-> eq(w, b)))
+
+# Substitution into pair's argument positions (Kuratowski pair congruence).
+# Derived from pair_def, eq_trans, and eq_symmetric — no eq_subst rule used.
+
+# Substituting equal first components: pair(p, a, b) and a = a2 imply pair(p, a2, b).
+claim pair_eq_a: forall p. forall a. forall a2. forall b.
+    ((eq(a, a2) & pair(p, a, b)) -> pair(p, a2, b))
+
+# Substituting equal second components: pair(p, a, b) and b = b2 imply pair(p, a, b2).
+claim pair_eq_b: forall p. forall a. forall b. forall b2.
+    ((eq(b, b2) & pair(p, a, b)) -> pair(p, a, b2))
+
 # ============================================================
 # Main Theorem: Ordered pairs are unambiguous
 # ============================================================

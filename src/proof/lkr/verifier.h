@@ -10,11 +10,11 @@
 // invocations. Eigenvariable freshness is checked locally at the point
 // of introduction (Forall).
 
-#include "../proof.h"
-#include "../verifier.h"
+#include "src/proof/proof.h"
+#include "src/proof/verifier.h"
 
-#include "../../core/formula.h"
-#include "../../util/error.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
 
 #include <string>
 #include <unordered_set>

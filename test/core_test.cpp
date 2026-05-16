@@ -1,7 +1,7 @@
 // Unit tests for core formula system
 
-#include "../src/core/formula.h"
-#include "../src/parser/parser.h"
+#include "src/core/formula.h"
+#include "src/parser/parser.h"
 
 #include <cassert>
 #include <fstream>
@@ -318,7 +318,8 @@ bool test_parse_zfc_axioms() {
     GlobalContext ctx;
     try {
         auto stmts = parse_statements(zfc_axioms, ctx);
-        if (stmts.size() != 8) {
+        // 8 standard ZFC axioms + 1 equality axiom (elem_subst) = 9.
+        if (stmts.size() != 9) {
             std::cout << "[got " << stmts.size() << " statements] ";
             return false;
         }

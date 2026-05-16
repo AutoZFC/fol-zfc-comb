@@ -2,10 +2,10 @@
 
 #include "ops.h"
 
-#include "../../core/formula.h"
+#include "src/core/formula.h"
 #include "stack.h"
-#include "../../parser/parser.h"
-#include "../../util/error.h"
+#include "src/parser/parser.h"
+#include "src/util/error.h"
 
 #include <optional>
 #include <string>
@@ -86,7 +86,7 @@ struct Session {
 util::Result<FormulaHandle> parse_deferred(Session& s, const ASTNode* ast,
                                            const char* op_name) {
     if (!ast) return MAKE_ERROR << op_name << ": missing formula AST";
-    return parse_formula_with_vars(
+    return try_parse_formula_with_vars(
         ast, s.ctx, s.stack.builder(),
         s.name_table, s.schema_var_map, s.schema_arity_map);
 }
@@ -121,9 +121,9 @@ util::Result<FormulaResult> exec_schema_inst(Session& s, const SchemaInstData& d
 
         if (arity == 0) {
             // Formula binding: parse as a concrete formula.
-            FormulaHandle body = parse_formula_with_vars(
+            TRY_ASSIGN(body, try_parse_formula_with_vars(
                 sb.formula_ast.get(), s.ctx, s.stack.builder(),
-                s.name_table, s.schema_var_map, s.schema_arity_map);
+                s.name_table, s.schema_var_map, s.schema_arity_map));
             bindings[idx] = SchemaBind(body);
         } else {
             // Predicate binding: \x. body. Body may reference other schema
@@ -160,10 +160,12 @@ util::Result<FormulaResult> exec_schema_inst(Session& s, const SchemaInstData& d
                 lambda_vars[param] = Term::fixed(vi);
                 param_indices.push_back(vi);
             }
-            FormulaHandle body = parse_formula_with_vars(
+            auto body_r = try_parse_formula_with_vars(
                 sb.formula_ast.get(), s.ctx, s.stack.builder(),
                 lambda_vars, sv_map, ar_map);
             for (size_t k = 0; k < arity; ++k) s.stack.builder().exit_scope();
+            if (!body_r.ok()) return body_r.error();
+            FormulaHandle body = std::move(body_r).unwrap();
             bindings[idx] = SchemaBind(std::move(param_indices), body);
         }
         bound[idx] = true;

@@ -56,6 +56,15 @@ cc_test(
 )
 
 cc_test(
+    name = "translate_env_test",
+    srcs = ["translate_env_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/translate:env",
+    ],
+)
+
+cc_test(
     name = "nd_to_lkr_test",
     srcs = ["nd_to_lkr_test.cpp"],
     deps = [
@@ -89,6 +98,8 @@ cc_test(
         "//zfc/basics:set_operations.fol.proof",
         "//zfc/basics:subset.fol.def",
         "//zfc/basics:subset.fol.proof",
+        "//zfc/basics:typed_functions.fol.def",
+        "//zfc/basics:typed_functions.fol.proof",
     ],
     deps = [
         "//src/core:formula",
@@ -101,13 +112,27 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "comb_test",
+    srcs = ["comb_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/comb:cotree",
+        "//src/proof/comb:leap",
+        "//src/proof/comb:verifier",
+    ],
+)
+
 test_suite(
     name = "all_tests",
     tests = [
+        ":comb_test",
         ":core_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_corpus_test",
         ":nd_to_lkr_test",
         ":runtime_test",
+        ":translate_env_test",
     ],
 )

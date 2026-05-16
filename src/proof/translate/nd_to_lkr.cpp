@@ -1,17 +1,22 @@
 #include "nd_to_lkr.h"
 
-#include "../lkr/literal.h"
-#include "../lkr/ops.h"
-#include "../lkr/verifier.h"
-#include "../nd/ops.h"
-#include "../proof.h"
+#include "emit_close.h"
+#include "env.h"
+#include "nd_to_lkr_internal.h"
 
-#include "../../core/formula.h"
-#include "../../parser/parser.h"
-#include "../../util/error.h"
+#include "src/proof/lkr/literal.h"
+#include "src/proof/lkr/ops.h"
+#include "src/proof/lkr/verifier.h"
+#include "src/proof/nd/ops.h"
+#include "src/proof/proof.h"
+#include "src/proof/schema_resolve.h"
+
+#include "src/core/formula.h"
+#include "src/core/scope_utils.h"
+#include "src/parser/parser.h"
+#include "src/util/error.h"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -20,91 +25,56 @@
 
 namespace logic::proof::translate {
 
+// Bring detail-namespace types into this TU's scope. close_flat lives in
+// detail (defined in close_flat.cpp) and is called from translate_flat_step
+// below; the shared types (Block, LowerCtx, StepNegMap, …) come from
+// nd_to_lkr_internal.h.
+using detail::BlockKind;
+using detail::Block;
+using detail::FlatStep;
+using detail::BodyItem;
+using detail::StepFormulaMap;
+using detail::FlatEvent;
+using detail::SubBlockEvent;
+using detail::EmissionEvent;
+using detail::DepsPlan;
+using detail::LowerCtx;
+using detail::StepNegMap;
+using detail::ScopeDeps;
+using detail::discharge;
+using detail::close_flat;
+
 namespace {
-
-// =========================================================================
-// Block tree (translator-internal scratch state)
-// =========================================================================
-//
-// An ND derivation is a tree of nested scopes. Each scope opens with one
-// of {Fix, Assume, ExistsElim} and closes with one of {ForallIntro,
-// ImpliesIntro, NotIntro, ExistsIntro-no-witness, Qed}. Inside a scope,
-// the body is a sequence of steps — each step is either a flat ND rule
-// or a sub-scope.
-//
-// The flat ND IR (vector<nd::Instr>) is correct for execution; the
-// translator reifies the implicit scope tree as private scratch state to
-// match the natural shape of structural translation. The Block tree is
-// not an IR — it does not cross any pass boundary, has no serialization
-// format, and exists only for the lifetime of NDtoLKR::apply().
-
-enum class BlockKind {
-    OUTER,         // root; closer is Qed; result is the bare claim conclusion
-    FORALL,        // Fix x ... ForallIntro h
-    IMPLIES,       // Assume A ... ImpliesIntro h
-    NOT,           // Assume A ... NotIntro h_bot
-    EXISTS_ELIM,   // ExistsElim h ... ExistsIntro h_inner (no witness)
-};
-
-struct Block;
-
-// A body item is either a flat ND step (referenced by its instr index)
-// or a nested sub-block.
-struct FlatStep { uint32_t nd_idx; };
-using BodyItem = std::variant<FlatStep, std::unique_ptr<Block>>;
-
-struct Block {
-    BlockKind kind{BlockKind::OUTER};
-
-    uint32_t opener_idx{0};   // ND instr index of opener (N/A for OUTER)
-    uint32_t closer_idx{0};   // ND instr index of closer
-    uint32_t close_target_idx{0};  // body step the closer references
-
-    // FORALL / EXISTS_ELIM: eigenvariable as Term::fixed.
-    Term eigen_term{};
-
-    // IMPLIES / NOT: the assumption formula (raw, parsed from AST).
-    FormulaHandle assumption_raw{};
-
-    // For EXISTS_ELIM: the ND step ref to the ∃-formula being eliminated.
-    StepRef exists_formula_step{};
-
-    // Body in source order.
-    std::vector<BodyItem> body;
-};
-
-// =========================================================================
-// Pass 1 — decompose_blocks: nd::Program -> Block tree.
-// =========================================================================
-//
-// Stack-walks the flat ND instruction list. Open-ops push a new block
-// onto the topmost block's body and onto the parsing stack. Close-ops
-// pop. All other ops are flat steps appended to the topmost block's body.
-//
-// Eigenvariables are allocated here via the translator's FormulaBuilder
-// in lockstep with what the LKR verifier will allocate when it processes
-// the emitted Forall ops in DFS order. Both builders start fresh and
-// allocate sequentially, so the var_index values match.
 
 util::Result<std::unique_ptr<Block>> decompose_blocks(
     const Program<nd::Instr>& in,
     GlobalContext& ctx,
     FormulaBuilder& builder,
     std::unordered_map<std::string, Term>& name_table,
-    std::unordered_map<uint32_t, Term>& term_for_idx)
+    std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<var_index, int>&  var_to_depth)
 {
     if (in.instrs.empty()) {
         return MAKE_ERROR << "NDtoLKR: empty program";
     }
 
     auto outer = std::make_unique<Block>();
-    outer->kind = BlockKind::OUTER;
+    outer->kind  = BlockKind::OUTER;
+    outer->depth = 0;
 
     std::vector<Block*> stack{outer.get()};
     std::unordered_map<std::string, size_t> empty_sv, empty_ar;
 
-    auto push_block = [&](std::unique_ptr<Block> b) -> Block* {
+    auto push_block = [&](std::unique_ptr<Block> b) -> util::Result<Block*> {
+        int new_depth = static_cast<int>(stack.size());   // = parent.depth + 1
+        if (ScopeDeps::overflows(new_depth)) {
+            return MAKE_ERROR
+                << "decompose: scope nesting depth " << new_depth
+                << " exceeds ScopeDeps capacity ("
+                << ScopeDeps::kMaxDepth << ")";
+        }
         Block* raw = b.get();
+        raw->depth = new_depth;
         stack.back()->body.push_back(BodyItem{std::move(b)});
         stack.push_back(raw);
         return raw;
@@ -113,7 +83,6 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
     for (uint32_t i = 0; i < in.instrs.size(); ++i) {
         const auto& instr = in.instrs[i];
 
-        // ---- Open-ops ----
         if (auto* fix = std::get_if<nd::Fix>(&instr)) {
             auto blk = std::make_unique<Block>();
             blk->kind = BlockKind::FORALL;
@@ -124,7 +93,8 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
             if (!fix->var_name.name.empty()) {
                 name_table[fix->var_name.name] = blk->eigen_term;
             }
-            push_block(std::move(blk));
+            TRY_ASSIGN(raw, push_block(std::move(blk)));
+            var_to_depth[v] = raw->depth;
             continue;
         }
         if (auto* assume = std::get_if<nd::Assume>(&instr)) {
@@ -132,12 +102,13 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
                 return MAKE_ERROR << "decompose: assume #" << i << " missing formula AST";
             }
             auto blk = std::make_unique<Block>();
-            blk->kind = BlockKind::IMPLIES;  // tentative; reclassified by NotIntro
+            blk->kind = BlockKind::IMPLIES;
             blk->opener_idx = i;
-            blk->assumption_raw = parse_formula_with_vars(
+            TRY_ASSIGN(assumption_raw, try_parse_formula_with_vars(
                 assume->formula.get(), ctx, builder,
-                name_table, empty_sv, empty_ar);
-            push_block(std::move(blk));
+                name_table, empty_sv, empty_ar));
+            blk->assumption_raw = assumption_raw;
+            TRY(push_block(std::move(blk)));
             continue;
         }
         if (auto* ee = std::get_if<nd::ExistsElim>(&instr)) {
@@ -151,11 +122,11 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
             if (ee->bind_witness.has_value() && !ee->bind_witness->name.empty()) {
                 name_table[ee->bind_witness->name] = blk->eigen_term;
             }
-            push_block(std::move(blk));
+            TRY_ASSIGN(raw, push_block(std::move(blk)));
+            var_to_depth[v] = raw->depth;
             continue;
         }
 
-        // ---- Close-ops ----
         if (auto* fi = std::get_if<nd::ForallIntro>(&instr)) {
             if (stack.back() == outer.get() || stack.back()->kind != BlockKind::FORALL) {
                 return MAKE_ERROR << "decompose: forall_intro at #" << i
@@ -181,7 +152,7 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
                 return MAKE_ERROR << "decompose: not_intro at #" << i
                                   << " has no matching IMPLIES scope";
             }
-            stack.back()->kind = BlockKind::NOT;  // reclassify
+            stack.back()->kind = BlockKind::NOT;
             stack.back()->closer_idx = i;
             stack.back()->close_target_idx = ni->bottom.idx;
             stack.pop_back();
@@ -189,7 +160,6 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
         }
         if (auto* ei = std::get_if<nd::ExistsIntro>(&instr)) {
             if (!ei->witness.has_value()) {
-                // Scope-closing form: must close an EXISTS_ELIM block.
                 if (stack.back() == outer.get() || stack.back()->kind != BlockKind::EXISTS_ELIM) {
                     return MAKE_ERROR << "decompose: exists_intro (scope-closing) at #" << i
                                       << " has no matching EXISTS_ELIM scope";
@@ -199,8 +169,6 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
                 stack.pop_back();
                 continue;
             }
-            // With explicit witness: a regular flat step (∃-introduction
-            // logical rule), not a scope-closer. Falls through.
         }
         if (auto* qed = std::get_if<nd::Qed>(&instr)) {
             if (stack.back() != outer.get()) {
@@ -213,7 +181,6 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
             continue;
         }
 
-        // All other ops are flat steps appended to the topmost block.
         stack.back()->body.push_back(BodyItem{FlatStep{i}});
     }
 
@@ -226,19 +193,9 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
 }
 
 // =========================================================================
-// Pass 2 — compute_step_formulas: walk the Block tree, fill in each ND
-// step's derived raw FormulaHandle.
+// Pass 2 — compute_block_formulas
 // =========================================================================
-//
-// For each flat step, the raw formula is determined by the rule kind
-// and its operand step formulas. For each scope-closing step (the
-// closer instr of a sub-block), the formula is the block's "result":
-//   FORALL(close_target=h, eigen=e):       ∀x. abstract_at_e(step_formula[h])
-//   IMPLIES(close_target=h, assumption=A): A → step_formula[h]
-//   NOT(close_target=h_bot, assumption=A): ¬A
-//   EXISTS_ELIM(close_target=h):            step_formula[h]  (lifted out)
-
-using StepFormulaMap = std::unordered_map<uint32_t, FormulaHandle>;
+// (StepFormulaMap is declared in nd_to_lkr_internal.h.)
 
 util::Result<FormulaHandle> compute_flat_formula(
     const Program<nd::Instr>& in,
@@ -264,19 +221,11 @@ util::ResultStatus compute_block_formulas(
         step_formula_nnf[idx] = builder.to_nnf(f);
     };
 
-    // For IMPLIES / NOT blocks: assumption is the assume's "step formula"
-    // — register it before walking the body so flat steps that reference
-    // op.idx == assume_step_idx via implies_elim et al. resolve correctly.
     if ((blk.kind == BlockKind::IMPLIES || blk.kind == BlockKind::NOT) &&
         blk.assumption_raw.valid()) {
         record(blk.opener_idx, blk.assumption_raw);
     }
 
-    // For EXISTS_ELIM: the eigen-instantiated body of the ∃-formula is
-    // the "available" formula inside the scope. Treat it as the step
-    // formula of the opener (so body steps that reference the
-    // ExistsElim's ND idx via implies_elim, eq_subst, etc., see the
-    // instantiated form).
     if (blk.kind == BlockKind::EXISTS_ELIM) {
         auto it = step_formula.find(blk.exists_formula_step.idx);
         if (it == step_formula.end()) {
@@ -305,7 +254,6 @@ util::ResultStatus compute_block_formulas(
             TRY(compute_block_formulas(
                 in, sub, builder, ctx, step_formula, step_formula_nnf,
                 term_for_idx, name_table));
-            // Compute the sub-block's result formula.
             FormulaHandle target_f;
             if (auto it = step_formula.find(sub.close_target_idx);
                 it != step_formula.end()) {
@@ -333,11 +281,18 @@ util::ResultStatus compute_block_formulas(
                     break;
                 }
                 case BlockKind::EXISTS_ELIM: {
-                    // The lifted-out formula must not reference the eigen.
-                    // We don't enforce here; the LKR verifier's eigen
-                    // freshness check (or downstream AxiomGen) will catch
-                    // any leak as a verification failure.
-                    result = target_f;
+                    // Mirror ND scope-closing exists_intro semantics: if
+                    // target_f mentions the witness eigenvariable, abstract
+                    // it back into ∃x.target_f[v↦x]; otherwise keep target_f
+                    // unchanged (witness escaped trivially).
+                    var_index v = sub.eigen_term.as_variable();
+                    if (formula_contains_fixed_var(target_f, v)) {
+                        FormulaHandle abstracted =
+                            builder.abstract_var(target_f, v);
+                        result = builder.make_quantified(Op::Exists, abstracted);
+                    } else {
+                        result = target_f;
+                    }
                     break;
                 }
                 case BlockKind::OUTER:
@@ -387,8 +342,13 @@ util::Result<FormulaHandle> compute_flat_formula(
         [&](const nd::Let& op) -> util::Result<FormulaHandle> {
             if (!op.formula) return MAKE_ERROR << "let: missing formula AST";
             std::unordered_map<std::string, size_t> empty_sv, empty_ar;
-            return parse_formula_with_vars(op.formula.get(), ctx, builder,
-                                            name_table, empty_sv, empty_ar);
+            return try_parse_formula_with_vars(op.formula.get(), ctx, builder,
+                                                name_table, empty_sv, empty_ar);
+        },
+        [&](const nd::SchemaInst& op) -> util::Result<FormulaHandle> {
+            std::unordered_map<std::string, Term> empty_vars;
+            return resolve_and_instantiate_schema(
+                ctx, builder, op.data, empty_vars, "schema_inst");
         },
         [&](const nd::ForallElim& op) -> util::Result<FormulaHandle> {
             TRY_ASSIGN(f, require_step(op.formula, "forall_elim"));
@@ -451,7 +411,7 @@ util::Result<FormulaHandle> compute_flat_formula(
                 return MAKE_ERROR << "or_elim: bc's antecedent doesn't match B";
             if (fac.as_compound().right != fbc.as_compound().right)
                 return MAKE_ERROR << "or_elim: ac and bc have different conclusions";
-            return fac.as_compound().right;  // = C
+            return fac.as_compound().right;
         },
         [&](const nd::IffIntro& op) -> util::Result<FormulaHandle> {
             TRY_ASSIGN(ab, require_step(op.ab, "iff_intro"));
@@ -500,10 +460,6 @@ util::Result<FormulaHandle> compute_flat_formula(
         [&](const nd::ExistsIntro& op) -> util::Result<FormulaHandle> {
             TRY_ASSIGN(body, require_step(op.body, "exists_intro"));
             if (!op.witness.has_value()) {
-                // Scope-closing form is handled at the Block level (closer
-                // is recorded as the block's close_target). This arm only
-                // fires for explicit-witness ExistsIntro, which is a flat
-                // step.
                 return MAKE_ERROR << "exists_intro (scope-closing) reached in flat dispatch";
             }
             TRY_ASSIGN(t, require_term(*op.witness, "exists_intro"));
@@ -517,7 +473,6 @@ util::Result<FormulaHandle> compute_flat_formula(
             return builder.make_or(a, builder.make_not(a));
         },
         [&](const nd::NotElim& op) -> util::Result<FormulaHandle> {
-            // NotElim produces ⊥. Validate that the operands are dual.
             TRY_ASSIGN(neg, require_step(op.negation, "not_elim"));
             TRY_ASSIGN(pos, require_step(op.formula,  "not_elim"));
             const Formula& nf = neg.get();
@@ -528,8 +483,6 @@ util::Result<FormulaHandle> compute_flat_formula(
             return builder.make_bottom();
         },
         [&](const nd::BottomElim& op) -> util::Result<FormulaHandle> {
-            // BottomElim takes ⊥ and a target formula step; result is the
-            // target's formula.
             TRY_ASSIGN(target, require_step(op.target_formula, "bottom_elim"));
             return target;
         },
@@ -543,920 +496,597 @@ util::Result<FormulaHandle> compute_flat_formula(
 }
 
 // =========================================================================
-// Translator state (TS) and emit/close helpers
-// =========================================================================
+// DepsPlan — scope-aware cut hoisting (mirrors ND ScopeDeps semantics).
 //
-// TS shadows the LKR verifier's runtime sequent state. Each emitted op
-// updates ts.seq in lockstep with what the verifier will compute. The
-// `step_to_neg_idx` map records, for each ND step whose ¬F_step_nnf has
-// been cut into the goal, the index in ts.seq of that cut-in entry.
-
-struct TS {
-    GlobalContext&        ctx;
-    FormulaBuilder        builder;
-    Program<lkr::Instr>&  out;
-
-    std::vector<FormulaHandle> seq;
-    std::unordered_map<uint32_t, FormulaHandle>      step_formula;
-    std::unordered_map<uint32_t, FormulaHandle>      step_formula_nnf;
-    std::unordered_map<uint32_t, size_t>             step_to_neg_idx;
-    std::unordered_map<uint32_t, Term>               term_for_idx;
-    std::unordered_map<std::string, Term>            name_table;
-
-    // ND TermRef.idx → LKR instr index of the corresponding Forall op
-    // that allocated this eigenvariable. Populated by emit_opener for
-    // FORALL and EXISTS_ELIM blocks (since both bind term-refs via
-    // lkr::Forall on either the result-side or the dual-side respectively).
-    std::unordered_map<uint32_t, uint32_t>           nd_to_lkr_termref;
-
-    TS(GlobalContext& c, Program<lkr::Instr>& o)
-        : ctx(c), builder(c), out(o) {}
-
-    void emit(lkr::Instr i) { out.instrs.push_back(std::move(i)); }
-
-    // Resolve an ND TermRef (referring to an ND Fix or ExistsElim instr)
-    // to an LKR TermRef (referring to the LKR Forall instr that bound
-    // the matching eigenvariable).
-    util::Result<TermRef> resolve_lkr_termref(TermRef nd_ref, const char* op) const {
-        auto it = nd_to_lkr_termref.find(nd_ref.idx);
-        if (it == nd_to_lkr_termref.end()) {
-            return MAKE_ERROR << op << ": ND term %" << nd_ref.idx
-                              << " has no LKR-side binding";
-        }
-        return TermRef{it->second};
-    }
-};
-
-FormulaHandle nnf_of(TS& ts, FormulaHandle h)     { return ts.builder.to_nnf(h); }
-FormulaHandle nnf_neg_of(TS& ts, FormulaHandle h) {
-    return ts.builder.to_nnf(ts.builder.make_not(h));
-}
-
-// emit_cut: emit Cut(phi_nnf) and update ts.seq to LEFT subgoal.
-// Returns a snapshot of pre-cut ts.seq for the caller to use when
-// transitioning to RIGHT.
-std::vector<FormulaHandle> emit_cut(TS& ts, FormulaHandle phi_raw) {
-    auto snapshot = ts.seq;
-    FormulaHandle phi_nnf = nnf_of(ts, phi_raw);
-    lkr::Cut cut{};
-    cut.cut_formula = phi_nnf;
-    ts.emit(std::move(cut));
-    ts.seq.push_back(phi_nnf);
-    return snapshot;
-}
-
-void enter_right(TS& ts, std::vector<FormulaHandle> snapshot,
-                  FormulaHandle neg_phi_nnf) {
-    snapshot.push_back(neg_phi_nnf);
-    ts.seq = std::move(snapshot);
-}
-
-// =========================================================================
-// Per-rule LEFT-subgoal closure helpers
-// =========================================================================
+// For every step k that produces a formula, compute step_deps[k] — the
+// bitset of block-depths whose scope k transitively depends on. The
+// recurrence matches src/proof/nd/stack.cpp's derive_with_deps exactly:
+//   total = proof_deps_from_operands | compute_var_deps(step_formula[k])
+// with discharge applied at sub-block closers.
 //
-// Each helper assumes ts.seq mirrors the LEFT subgoal of a Cut(F_k) —
-// pre-cut Γ + F_k_nnf at the end. After the helper, the verifier closes
-// LEFT and pops to RIGHT.
-
-util::ResultStatus close_use(TS& ts, const std::string& axiom_name) {
-    lkr::UseTheorem ut{}; ut.axiom = AxiomRef{axiom_name};
-    ts.emit(std::move(ut));
-    return util::Ok();
-}
-
-util::ResultStatus close_forall_elim(TS& ts, size_t neg_F_h_idx,
-                                       TermRef witness, size_t F_k_idx) {
-    lkr::Exists ex{}; ex.principal = neg_F_h_idx; ex.witness = witness;
-    ts.emit(std::move(ex));
-    lkr::AxiomGen ax{}; ax.a = neg_F_h_idx; ax.b = F_k_idx;
-    ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-util::ResultStatus close_implies_elim(TS& ts, size_t neg_F_impl_idx,
-                                        size_t neg_F_ant_idx, size_t F_k_idx) {
-    auto pre_and = ts.seq;
-    if (neg_F_impl_idx >= pre_and.size())
-        return MAKE_ERROR << "close_implies_elim: neg_F_impl_idx OOB";
-    const Formula& fn = pre_and[neg_F_impl_idx].get();
-    if (!fn.is_compound() || fn.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_implies_elim: ¬F_impl not A ∧ ¬B";
-    FormulaHandle A_nnf = fn.as_compound().left;
-    FormulaHandle negB  = fn.as_compound().right;
-
-    lkr::And andop{}; andop.principal = neg_F_impl_idx;
-    ts.emit(std::move(andop));
-    ts.seq = pre_and;
-    ts.seq[neg_F_impl_idx] = A_nnf;
-    {
-        lkr::AxiomGen ax{}; ax.a = neg_F_ant_idx; ax.b = neg_F_impl_idx;
-        ts.emit(std::move(ax));
-    }
-    ts.seq = pre_and;
-    ts.seq[neg_F_impl_idx] = negB;
-    {
-        lkr::AxiomGen ax{}; ax.a = neg_F_impl_idx; ax.b = F_k_idx;
-        ts.emit(std::move(ax));
-    }
-    return util::Ok();
-}
-
-util::ResultStatus close_and_intro(TS& ts, size_t F_k_idx,
-                                     size_t neg_F_a_idx, size_t neg_F_b_idx) {
-    auto pre_and = ts.seq;
-    if (F_k_idx >= pre_and.size())
-        return MAKE_ERROR << "close_and_intro: F_k_idx OOB";
-    const Formula& f = pre_and[F_k_idx].get();
-    if (!f.is_compound() || f.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_and_intro: F_k not A ∧ B";
-    FormulaHandle A = f.as_compound().left;
-    FormulaHandle B = f.as_compound().right;
-
-    lkr::And andop{}; andop.principal = F_k_idx;
-    ts.emit(std::move(andop));
-    ts.seq = pre_and; ts.seq[F_k_idx] = A;
-    { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_F_a_idx; ts.emit(std::move(ax)); }
-    ts.seq = pre_and; ts.seq[F_k_idx] = B;
-    { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_F_b_idx; ts.emit(std::move(ax)); }
-    return util::Ok();
-}
-
-util::ResultStatus close_and_elim_l(TS& ts, size_t neg_F_of_idx, size_t F_k_idx) {
-    auto pre_or = ts.seq;
-    if (neg_F_of_idx >= pre_or.size())
-        return MAKE_ERROR << "close_and_elim_l: neg_F_of_idx OOB";
-    const Formula& nf = pre_or[neg_F_of_idx].get();
-    if (!nf.is_compound() || nf.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_and_elim_l: ¬F_of not (¬A ∨ ¬B)";
-    lkr::Or orop{}; orop.principal = neg_F_of_idx; ts.emit(std::move(orop));
-    FormulaHandle negA = nf.as_compound().left;
-    FormulaHandle negB = nf.as_compound().right;
-    ts.seq[neg_F_of_idx] = negA;
-    ts.seq.push_back(negB);
-    lkr::AxiomGen ax{}; ax.a = neg_F_of_idx; ax.b = F_k_idx; ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-util::ResultStatus close_and_elim_r(TS& ts, size_t neg_F_of_idx, size_t F_k_idx) {
-    auto pre_or = ts.seq;
-    if (neg_F_of_idx >= pre_or.size())
-        return MAKE_ERROR << "close_and_elim_r: neg_F_of_idx OOB";
-    const Formula& nf = pre_or[neg_F_of_idx].get();
-    if (!nf.is_compound() || nf.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_and_elim_r: ¬F_of not (¬A ∨ ¬B)";
-    lkr::Or orop{}; orop.principal = neg_F_of_idx; ts.emit(std::move(orop));
-    FormulaHandle negA = nf.as_compound().left;
-    FormulaHandle negB = nf.as_compound().right;
-    ts.seq[neg_F_of_idx] = negA;
-    ts.seq.push_back(negB);
-    size_t negB_idx = ts.seq.size() - 1;
-    lkr::AxiomGen ax{}; ax.a = negB_idx; ax.b = F_k_idx; ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-// close_iff_intro: F_k = A ↔ B given F_ab (= A→B) and F_ba (= B→A).
-// LEFT after Cut(A↔B) holds:
-//   F_k_nnf at F_k_idx = (¬A ∨ B) ∧ (A ∨ ¬B)
-//   ¬F_ab_nnf at neg_ab_idx = A ∧ ¬B
-//   ¬F_ba_nnf at neg_ba_idx = B ∧ ¬A
-// Strategy:
-//   Outer And on F_k → two subgoals (additive):
-//     LEFT-A:  F_k_idx becomes (¬A ∨ B). Or-unfold → ¬A, B.
-//              And on ¬F_ab (A ∧ ¬B) → two sub-subgoals:
-//                ¬F_ab=A: AxiomGen(F_k_idx=¬A, neg_ab_idx=A).
-//                ¬F_ab=¬B: AxiomGen(neg_ab_idx=¬B, B's idx).
-//     LEFT-B:  F_k_idx becomes (A ∨ ¬B). Or-unfold → A, ¬B.
-//              And on ¬F_ba (B ∧ ¬A) → two sub-subgoals:
-//                ¬F_ba=B: AxiomGen(neg_ba_idx=B, ¬B's idx).
-//                ¬F_ba=¬A: AxiomGen(F_k_idx=A, neg_ba_idx=¬A).
-util::ResultStatus close_iff_intro(TS& ts, size_t F_k_idx,
-                                     size_t neg_ab_idx, size_t neg_ba_idx) {
-    if (F_k_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_iff_intro: F_k_idx OOB";
-    const Formula& f = ts.seq[F_k_idx].get();
-    if (!f.is_compound() || f.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_iff_intro: F_k_nnf not a conjunction";
-    FormulaHandle phi = f.as_compound().left;   // ¬A ∨ B
-    FormulaHandle psi = f.as_compound().right;  // A ∨ ¬B
-
-    auto pre_outer = ts.seq;
-    lkr::And outer_and{}; outer_and.principal = F_k_idx;
-    ts.emit(std::move(outer_and));
-
-    // ---- LEFT-A subgoal: F_k_idx = (¬A ∨ B). ----
-    ts.seq = pre_outer;
-    ts.seq[F_k_idx] = phi;
-    if (!phi.get().is_compound() || phi.get().as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_iff_intro: phi not (¬A ∨ B)";
-    FormulaHandle negA  = phi.get().as_compound().left;
-    FormulaHandle B_nnf = phi.get().as_compound().right;
-    {
-        lkr::Or orop{}; orop.principal = F_k_idx; ts.emit(std::move(orop));
-    }
-    ts.seq[F_k_idx] = negA;
-    ts.seq.push_back(B_nnf);
-    size_t B_idx = ts.seq.size() - 1;
-    if (neg_ab_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_iff_intro: neg_ab_idx OOB";
-    const Formula& ab_neg = ts.seq[neg_ab_idx].get();
-    if (!ab_neg.is_compound() || ab_neg.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_iff_intro: ¬F_ab not (A ∧ ¬B)";
-    FormulaHandle A_nnf = ab_neg.as_compound().left;
-    FormulaHandle negB  = ab_neg.as_compound().right;
-    {
-        auto pre_inner = ts.seq;
-        lkr::And inner_and{}; inner_and.principal = neg_ab_idx;
-        ts.emit(std::move(inner_and));
-        // ¬F_ab = A
-        ts.seq = pre_inner; ts.seq[neg_ab_idx] = A_nnf;
-        { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_ab_idx; ts.emit(std::move(ax)); }
-        // ¬F_ab = ¬B
-        ts.seq = pre_inner; ts.seq[neg_ab_idx] = negB;
-        { lkr::AxiomGen ax{}; ax.a = neg_ab_idx; ax.b = B_idx; ts.emit(std::move(ax)); }
-    }
-
-    // ---- LEFT-B subgoal: F_k_idx = (A ∨ ¬B). ----
-    ts.seq = pre_outer;
-    ts.seq[F_k_idx] = psi;
-    if (!psi.get().is_compound() || psi.get().as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_iff_intro: psi not (A ∨ ¬B)";
-    FormulaHandle A2     = psi.get().as_compound().left;
-    FormulaHandle negB2  = psi.get().as_compound().right;
-    {
-        lkr::Or orop{}; orop.principal = F_k_idx; ts.emit(std::move(orop));
-    }
-    ts.seq[F_k_idx] = A2;
-    ts.seq.push_back(negB2);
-    size_t negB_idx = ts.seq.size() - 1;
-    if (neg_ba_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_iff_intro: neg_ba_idx OOB";
-    const Formula& ba_neg = ts.seq[neg_ba_idx].get();
-    if (!ba_neg.is_compound() || ba_neg.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_iff_intro: ¬F_ba not (B ∧ ¬A)";
-    FormulaHandle B2     = ba_neg.as_compound().left;
-    FormulaHandle negA2  = ba_neg.as_compound().right;
-    {
-        auto pre_inner = ts.seq;
-        lkr::And inner_and{}; inner_and.principal = neg_ba_idx;
-        ts.emit(std::move(inner_and));
-        // ¬F_ba = B
-        ts.seq = pre_inner; ts.seq[neg_ba_idx] = B2;
-        { lkr::AxiomGen ax{}; ax.a = neg_ba_idx; ax.b = negB_idx; ts.emit(std::move(ax)); }
-        // ¬F_ba = ¬A
-        ts.seq = pre_inner; ts.seq[neg_ba_idx] = negA2;
-        { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_ba_idx; ts.emit(std::move(ax)); }
-    }
-    return util::Ok();
-}
-
-// close_or_elim: F_k = C given F_or (A∨B), F_ac (A→C), F_bc (B→C).
-// LEFT after Cut(C) holds C_nnf at F_k_idx, ¬F_or_nnf=(¬A∧¬B), ¬F_ac_nnf=(A∧¬C),
-// ¬F_bc_nnf=(B∧¬C). Outer And on ¬F_or splits into ¬A / ¬B branches; in
-// each branch, And on the matching ¬F_ac/¬F_bc splits to (A,¬C) / (B,¬C),
-// closing via AxiomGen on (¬A,A)/(C,¬C) and (¬B,B)/(C,¬C) respectively.
-util::ResultStatus close_or_elim(TS& ts, size_t F_k_idx,
-                                   size_t neg_or_idx, size_t neg_ac_idx,
-                                   size_t neg_bc_idx) {
-    if (neg_or_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_or_elim: neg_or_idx OOB";
-    const Formula& orf = ts.seq[neg_or_idx].get();
-    if (!orf.is_compound() || orf.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_or_elim: ¬F_or not (¬A ∧ ¬B)";
-    FormulaHandle negA = orf.as_compound().left;
-    FormulaHandle negB = orf.as_compound().right;
-
-    auto pre_outer = ts.seq;
-    lkr::And outer{}; outer.principal = neg_or_idx;
-    ts.emit(std::move(outer));
-
-    // ---- LEFT-¬A branch: ¬F_or = ¬A. And on ¬F_ac. ----
-    ts.seq = pre_outer;
-    ts.seq[neg_or_idx] = negA;
-    if (neg_ac_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_or_elim: neg_ac_idx OOB";
-    const Formula& acf = ts.seq[neg_ac_idx].get();
-    if (!acf.is_compound() || acf.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_or_elim: ¬F_ac not (A ∧ ¬C)";
-    FormulaHandle A_ac  = acf.as_compound().left;
-    FormulaHandle negC1 = acf.as_compound().right;
-    {
-        auto pre_inner = ts.seq;
-        lkr::And inner{}; inner.principal = neg_ac_idx;
-        ts.emit(std::move(inner));
-        ts.seq = pre_inner; ts.seq[neg_ac_idx] = A_ac;
-        { lkr::AxiomGen ax{}; ax.a = neg_or_idx; ax.b = neg_ac_idx; ts.emit(std::move(ax)); }
-        ts.seq = pre_inner; ts.seq[neg_ac_idx] = negC1;
-        { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_ac_idx; ts.emit(std::move(ax)); }
-    }
-
-    // ---- LEFT-¬B branch: ¬F_or = ¬B. And on ¬F_bc. ----
-    ts.seq = pre_outer;
-    ts.seq[neg_or_idx] = negB;
-    if (neg_bc_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_or_elim: neg_bc_idx OOB";
-    const Formula& bcf = ts.seq[neg_bc_idx].get();
-    if (!bcf.is_compound() || bcf.as_compound().op != Op::And)
-        return MAKE_ERROR << "close_or_elim: ¬F_bc not (B ∧ ¬C)";
-    FormulaHandle B_bc  = bcf.as_compound().left;
-    FormulaHandle negC2 = bcf.as_compound().right;
-    {
-        auto pre_inner = ts.seq;
-        lkr::And inner{}; inner.principal = neg_bc_idx;
-        ts.emit(std::move(inner));
-        ts.seq = pre_inner; ts.seq[neg_bc_idx] = B_bc;
-        { lkr::AxiomGen ax{}; ax.a = neg_or_idx; ax.b = neg_bc_idx; ts.emit(std::move(ax)); }
-        ts.seq = pre_inner; ts.seq[neg_bc_idx] = negC2;
-        { lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_bc_idx; ts.emit(std::move(ax)); }
-    }
-    return util::Ok();
-}
-
-util::ResultStatus close_iff_elim_l(TS& ts, size_t neg_F_iff_idx,
-                                      size_t neg_F_a_idx, size_t F_k_idx) {
-    if (neg_F_iff_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_iff_elim_l: neg_F_iff_idx OOB";
-    const Formula& nf = ts.seq[neg_F_iff_idx].get();
-    if (!nf.is_compound() || nf.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_iff_elim_l: ¬F_iff not (X ∨ Y)";
-    FormulaHandle and_a_negb = nf.as_compound().left;
-    FormulaHandle nega_and_b = nf.as_compound().right;
-    if (!and_a_negb.get().is_compound() || and_a_negb.get().as_compound().op != Op::And)
-        return MAKE_ERROR << "close_iff_elim_l: left disjunct not A ∧ ¬B";
-    FormulaHandle A_nnf = and_a_negb.get().as_compound().left;
-    FormulaHandle negB  = and_a_negb.get().as_compound().right;
-
-    lkr::Or orop{}; orop.principal = neg_F_iff_idx; ts.emit(std::move(orop));
-    ts.seq[neg_F_iff_idx] = and_a_negb;
-    ts.seq.push_back(nega_and_b);
-
-    auto pre_and = ts.seq;
-    lkr::And andop{}; andop.principal = neg_F_iff_idx; ts.emit(std::move(andop));
-    ts.seq = pre_and; ts.seq[neg_F_iff_idx] = A_nnf;
-    { lkr::AxiomGen ax{}; ax.a = neg_F_iff_idx; ax.b = neg_F_a_idx; ts.emit(std::move(ax)); }
-    ts.seq = pre_and; ts.seq[neg_F_iff_idx] = negB;
-    { lkr::AxiomGen ax{}; ax.a = neg_F_iff_idx; ax.b = F_k_idx; ts.emit(std::move(ax)); }
-    return util::Ok();
-}
-
-util::ResultStatus close_iff_elim_r(TS& ts, size_t neg_F_iff_idx,
-                                      size_t neg_F_b_idx, size_t F_k_idx) {
-    if (neg_F_iff_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_iff_elim_r: neg_F_iff_idx OOB";
-    const Formula& nf = ts.seq[neg_F_iff_idx].get();
-    if (!nf.is_compound() || nf.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_iff_elim_r: ¬F_iff not (X ∨ Y)";
-    FormulaHandle and_a_negb = nf.as_compound().left;
-    FormulaHandle nega_and_b = nf.as_compound().right;
-    if (!nega_and_b.get().is_compound() || nega_and_b.get().as_compound().op != Op::And)
-        return MAKE_ERROR << "close_iff_elim_r: right disjunct not ¬A ∧ B";
-    FormulaHandle negA  = nega_and_b.get().as_compound().left;
-    FormulaHandle B_nnf = nega_and_b.get().as_compound().right;
-
-    lkr::Or orop{}; orop.principal = neg_F_iff_idx; ts.emit(std::move(orop));
-    ts.seq[neg_F_iff_idx] = and_a_negb;
-    ts.seq.push_back(nega_and_b);
-    size_t and_neg_idx = ts.seq.size() - 1;
-
-    auto pre_and = ts.seq;
-    lkr::And andop{}; andop.principal = and_neg_idx; ts.emit(std::move(andop));
-    ts.seq = pre_and; ts.seq[and_neg_idx] = negA;
-    { lkr::AxiomGen ax{}; ax.a = and_neg_idx; ax.b = F_k_idx; ts.emit(std::move(ax)); }
-    ts.seq = pre_and; ts.seq[and_neg_idx] = B_nnf;
-    { lkr::AxiomGen ax{}; ax.a = and_neg_idx; ax.b = neg_F_b_idx; ts.emit(std::move(ax)); }
-    return util::Ok();
-}
-
-util::ResultStatus close_or_intro_l(TS& ts, size_t F_k_idx, size_t neg_F_a_idx) {
-    if (F_k_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_or_intro_l: F_k_idx OOB";
-    const Formula& f = ts.seq[F_k_idx].get();
-    if (!f.is_compound() || f.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_or_intro_l: F_k not A ∨ B";
-    FormulaHandle A = f.as_compound().left;
-    FormulaHandle B = f.as_compound().right;
-    lkr::Or orop{}; orop.principal = F_k_idx; ts.emit(std::move(orop));
-    ts.seq[F_k_idx] = A; ts.seq.push_back(B);
-    lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_F_a_idx; ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-util::ResultStatus close_or_intro_r(TS& ts, size_t F_k_idx, size_t neg_F_b_idx) {
-    if (F_k_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_or_intro_r: F_k_idx OOB";
-    const Formula& f = ts.seq[F_k_idx].get();
-    if (!f.is_compound() || f.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_or_intro_r: F_k not A ∨ B";
-    FormulaHandle A = f.as_compound().left;
-    FormulaHandle B = f.as_compound().right;
-    lkr::Or orop{}; orop.principal = F_k_idx; ts.emit(std::move(orop));
-    ts.seq[F_k_idx] = A; ts.seq.push_back(B);
-    size_t B_idx = ts.seq.size() - 1;
-    lkr::AxiomGen ax{}; ax.a = B_idx; ax.b = neg_F_b_idx; ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-util::ResultStatus close_exists_intro(TS& ts, size_t F_k_idx,
-                                        size_t neg_F_body_idx, TermRef witness) {
-    lkr::Exists ex{}; ex.principal = F_k_idx; ex.witness = witness;
-    ts.emit(std::move(ex));
-    lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = neg_F_body_idx;
-    ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-util::ResultStatus close_excluded_middle(TS& ts, size_t F_k_idx) {
-    if (F_k_idx >= ts.seq.size())
-        return MAKE_ERROR << "close_excluded_middle: F_k_idx OOB";
-    const Formula& f = ts.seq[F_k_idx].get();
-    if (!f.is_compound() || f.as_compound().op != Op::Or)
-        return MAKE_ERROR << "close_excluded_middle: F_k not (A ∨ ¬A)";
-    FormulaHandle phi = f.as_compound().left;
-    FormulaHandle psi = f.as_compound().right;
-    lkr::Or orop{}; orop.principal = F_k_idx; ts.emit(std::move(orop));
-    ts.seq[F_k_idx] = phi; ts.seq.push_back(psi);
-    size_t psi_idx = ts.seq.size() - 1;
-    lkr::AxiomGen ax{}; ax.a = F_k_idx; ax.b = psi_idx; ts.emit(std::move(ax));
-    return util::Ok();
-}
-
-// =========================================================================
-// translate_flat_step: emit Cut(F_k) + close-LEFT for one flat ND rule.
-// =========================================================================
+// host_block[k] = the deepest live block whose depth equals
+// step_deps[k].deepest() (OUTER if deps are empty).
 //
-// On entry: ts.seq mirrors the current goal, with all relevant ¬F_j_nnf
-// already cut in (recorded in ts.step_to_neg_idx).
-// On exit: ts.seq mirrors the post-cut RIGHT subgoal, with ¬F_k_nnf
-// appended; ts.step_to_neg_idx[k] points to that entry.
+// `events` schedules per-block emission: each block B has a sequence of
+// EmissionEvents in the order they should be emitted. Each event is
+// either a B-hosted flat step's cut, or one of B's top-level sub-blocks.
+// The scheduler enforces that any B-hosted flat whose program position
+// lies INSIDE a top-level sub-block S of B is emitted BEFORE S's
+// SubBlock event — keeping the cut on B's RIGHT continuation (inherited
+// by S via apply_cut) rather than localized to S's LEFT subgoal.
+// =========================================================================
 
-util::ResultStatus translate_flat_step(TS& ts, uint32_t k,
-                                         const Program<nd::Instr>& in)
+// (FlatEvent, SubBlockEvent, EmissionEvent, DepsPlan are in
+// nd_to_lkr_internal.h.)
+
+// Walk a formula collecting fix-var deps. Mirrors ND's compute_var_deps.
+ScopeDeps compute_var_deps_fml(
+    FormulaHandle h,
+    const std::unordered_map<var_index, int>& var_to_depth);
+
+ScopeDeps compute_var_deps_term(
+    Term t,
+    const std::unordered_map<var_index, int>& var_to_depth)
 {
-    const auto& instr = in.instrs[k];
+    if (t.is_fixed()) {
+        auto it = var_to_depth.find(t.as_variable());
+        if (it != var_to_depth.end()) return ScopeDeps::from_bit(it->second);
+        return {};
+    }
+    if (t.is_description()) {
+        return compute_var_deps_fml(t.as_description().body, var_to_depth);
+    }
+    return {};
+}
 
-    auto resolve_neg = [&](StepRef r, const char* op) -> util::Result<size_t> {
-        auto it = ts.step_to_neg_idx.find(r.idx);
-        if (it == ts.step_to_neg_idx.end())
-            return MAKE_ERROR << op << ": step %" << r.idx << " not yet cut-in";
-        return it->second;
+ScopeDeps compute_var_deps_fml(
+    FormulaHandle h,
+    const std::unordered_map<var_index, int>& var_to_depth)
+{
+    if (!h.valid()) return {};
+    const Formula& f = h.get();
+    if (f.is_predicate()) {
+        ScopeDeps d;
+        for (const Term& t : f.as_predicate().args()) {
+            d |= compute_var_deps_term(t, var_to_depth);
+        }
+        return d;
+    }
+    if (f.is_compound()) {
+        const Compound& c = f.as_compound();
+        ScopeDeps d;
+        if (c.left.valid())  d |= compute_var_deps_fml(c.left,  var_to_depth);
+        if (c.right.valid()) d |= compute_var_deps_fml(c.right, var_to_depth);
+        return d;
+    }
+    if (f.is_quantified()) {
+        return compute_var_deps_fml(f.as_quantified().body, var_to_depth);
+    }
+    if (f.is_schema_var()) {
+        return {};
+    }
+    if (f.is_sentence()) {
+        return {};
+    }
+    return {};
+}
+
+// Per-flat-step proof_deps (operand union + witness-term scope). The
+// compute_var_deps(step_formula[k]) component is added uniformly by
+// record_step (mirroring ND's derive_with_deps), so this function does
+// NOT include it. Block-opener/closer/Fix ops are handled separately in
+// the block recursion and should never be passed here.
+util::Result<ScopeDeps> compute_flat_step_proof_deps(
+    const Program<nd::Instr>& in,
+    uint32_t k,
+    const std::unordered_map<uint32_t, ScopeDeps>& step_deps_so_far,
+    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    const std::unordered_map<var_index, int>& var_to_depth)
+{
+    auto deps_of = [&](StepRef r) -> ScopeDeps {
+        auto it = step_deps_so_far.find(r.idx);
+        return it != step_deps_so_far.end() ? it->second : ScopeDeps{};
+    };
+    auto deps_of_termref = [&](TermRef r) -> ScopeDeps {
+        auto it = term_for_idx.find(r.idx);
+        if (it == term_for_idx.end()) return {};
+        return compute_var_deps_term(it->second, var_to_depth);
     };
 
+    const auto& instr = in.instrs[k];
     return std::visit(overloaded{
-
-        [&](const nd::Use& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            auto snapshot = emit_cut(ts, F_raw);
-            TRY(close_use(ts, op.axiom.name));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::Use&)        -> util::Result<ScopeDeps> { return ScopeDeps{}; },
+        [&](const nd::SchemaInst&) -> util::Result<ScopeDeps> { return ScopeDeps{}; },
+        [&](const nd::Let&)        -> util::Result<ScopeDeps> { return ScopeDeps{}; },
+        [&](const nd::ForallElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.formula) | deps_of_termref(op.term);
         },
-
-        [&](const nd::Let& /*op*/) -> util::ResultStatus {
-            // Let emits no LKR ops; its formula is already in step_formula
-            // (computed by the pre-pass). Nothing to do here.
-            ts.step_formula_nnf[k] = nnf_of(ts, ts.step_formula.at(k));
-            return util::Ok();
+        [&](const nd::ImpliesElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.impl) | deps_of(op.ant);
         },
-
-        [&](const nd::ForallElim& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_F_h_idx, resolve_neg(op.formula, "forall_elim"));
-            TRY_ASSIGN(lkr_witness, ts.resolve_lkr_termref(op.term, "forall_elim"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_forall_elim(ts, neg_F_h_idx, lkr_witness, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::AndIntro& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.a) | deps_of(op.b);
         },
-
-        [&](const nd::ImpliesElim& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_impl_idx, resolve_neg(op.impl, "implies_elim"));
-            TRY_ASSIGN(neg_ant_idx,  resolve_neg(op.ant,  "implies_elim"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_implies_elim(ts, neg_impl_idx, neg_ant_idx, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::AndElimL& op) -> util::Result<ScopeDeps> { return deps_of(op.of); },
+        [&](const nd::AndElimR& op) -> util::Result<ScopeDeps> { return deps_of(op.of); },
+        [&](const nd::OrIntroL& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.a) | deps_of(op.b_formula);
         },
-
-        [&](const nd::AndIntro& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_a_idx, resolve_neg(op.a, "and_intro"));
-            TRY_ASSIGN(neg_b_idx, resolve_neg(op.b, "and_intro"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_and_intro(ts, F_k_idx, neg_a_idx, neg_b_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::OrIntroR& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.a_formula) | deps_of(op.b);
         },
-
-        [&](const nd::AndElimL& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_of_idx, resolve_neg(op.of, "and_elim_l"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_and_elim_l(ts, neg_of_idx, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::OrElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.or_formula) | deps_of(op.ac) | deps_of(op.bc);
         },
-
-        [&](const nd::AndElimR& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_of_idx, resolve_neg(op.of, "and_elim_r"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_and_elim_r(ts, neg_of_idx, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::IffIntro& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.ab) | deps_of(op.ba);
         },
-
-        [&](const nd::IffIntro& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_ab_idx, resolve_neg(op.ab, "iff_intro"));
-            TRY_ASSIGN(neg_ba_idx, resolve_neg(op.ba, "iff_intro"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_iff_intro(ts, F_k_idx, neg_ab_idx, neg_ba_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::IffElimL& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.iff) | deps_of(op.a);
         },
-
-        [&](const nd::OrElim& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_or_idx, resolve_neg(op.or_formula, "or_elim"));
-            TRY_ASSIGN(neg_ac_idx, resolve_neg(op.ac,         "or_elim"));
-            TRY_ASSIGN(neg_bc_idx, resolve_neg(op.bc,         "or_elim"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_or_elim(ts, F_k_idx, neg_or_idx, neg_ac_idx, neg_bc_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::IffElimR& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.iff) | deps_of(op.b);
         },
-
-        [&](const nd::IffElimL& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_iff_idx, resolve_neg(op.iff, "iff_elim_l"));
-            TRY_ASSIGN(neg_a_idx,   resolve_neg(op.a,   "iff_elim_l"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_iff_elim_l(ts, neg_iff_idx, neg_a_idx, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::ExistsIntro& op) -> util::Result<ScopeDeps> {
+            ScopeDeps d = deps_of(op.body);
+            if (op.witness.has_value()) d |= deps_of_termref(*op.witness);
+            return d;
         },
-
-        [&](const nd::IffElimR& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_iff_idx, resolve_neg(op.iff, "iff_elim_r"));
-            TRY_ASSIGN(neg_b_idx,   resolve_neg(op.b,   "iff_elim_r"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_iff_elim_r(ts, neg_iff_idx, neg_b_idx, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::NotElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.negation) | deps_of(op.formula);
         },
-
-        [&](const nd::OrIntroL& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_a_idx, resolve_neg(op.a, "or_intro_l"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_or_intro_l(ts, F_k_idx, neg_a_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::BottomElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.bottom) | deps_of(op.target_formula);
         },
-
-        [&](const nd::OrIntroR& op) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_b_idx, resolve_neg(op.b, "or_intro_r"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_or_intro_r(ts, F_k_idx, neg_b_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::EqSubst& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.eq_formula) | deps_of(op.target);
         },
-
-        [&](const nd::ExistsIntro& op) -> util::ResultStatus {
-            // Only explicit-witness form reaches here; scope-closing form
-            // is handled at the Block level.
-            if (!op.witness.has_value()) {
-                return MAKE_ERROR << "exists_intro: scope-closing form must be a block closer";
-            }
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            TRY_ASSIGN(neg_body_idx, resolve_neg(op.body, "exists_intro"));
-            TRY_ASSIGN(lkr_witness, ts.resolve_lkr_termref(*op.witness, "exists_intro"));
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            // After Exists rule, F_k_idx becomes body_nnf[x:=witness] =
-            // ts.step_formula_nnf[op.body.idx]. Update shadow seq.
-            ts.seq[F_k_idx] = ts.step_formula_nnf.at(op.body.idx);
-            TRY(close_exists_intro(ts, F_k_idx, neg_body_idx, lkr_witness));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::EqSym& op) -> util::Result<ScopeDeps> { return deps_of(op.eq_formula); },
+        [&](const nd::DoubleNegElim& op) -> util::Result<ScopeDeps> { return deps_of(op.of); },
+        [&](const nd::ExcludedMiddle& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.formula_let);
         },
-
-        [&](const nd::NotElim& /*op*/) -> util::ResultStatus {
-            // NotElim's "result" is ⊥ — there's no useful Cut on ⊥, since
-            // [Γ, ⊥] is unprovable in isolation. The contradiction is
-            // already available in the goal: cuts on the operands have
-            // placed φ_nnf and ¬φ_nnf as disjuncts. Subsequent ops that
-            // need the contradiction (BottomElim, or NotIntro at the
-            // block level) look up the operands directly.
-            //
-            // No LKR ops emitted; step_to_neg_idx is intentionally NOT
-            // populated for k.
-            ts.step_formula_nnf[k] = nnf_of(ts, ts.step_formula.at(k));
-            return util::Ok();
+        [&](const nd::IotaElim& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.exists_formula);
         },
-
-        [&](const nd::BottomElim& op) -> util::ResultStatus {
-            // BottomElim(h_bot, h_target): produce h_target's formula
-            // from the contradiction available via h_bot. h_bot must be
-            // a NotElim step whose operands' duals are in the goal.
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            // Look up the NotElim instr.
-            const auto& bot_instr = in.instrs[op.bottom.idx];
-            const nd::NotElim* ne = std::get_if<nd::NotElim>(&bot_instr);
-            if (!ne) {
-                return MAKE_ERROR << "bottom_elim: bot step %" << op.bottom.idx
-                                  << " is not a not_elim (other contradiction "
-                                     "patterns not yet supported)";
-            }
-            TRY_ASSIGN(neg_neg_idx, resolve_neg(ne->negation, "bottom_elim"));
-            TRY_ASSIGN(neg_pos_idx, resolve_neg(ne->formula,  "bottom_elim"));
-            auto snapshot = emit_cut(ts, F_raw);
-            // LEFT close: AxiomGen on the contradicting cut-in pair (already
-            // in Γ before the BottomElim cut, hence in LEFT after the cut).
-            { lkr::AxiomGen ax{}; ax.a = neg_neg_idx; ax.b = neg_pos_idx; ts.emit(std::move(ax)); }
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        [&](const nd::ClassicalAbsurd& op) -> util::Result<ScopeDeps> { return deps_of(op.bottom); },
+        [&](const nd::Peirce& op) -> util::Result<ScopeDeps> {
+            return deps_of(op.a_let) | deps_of(op.b_let);
         },
-
-        [&](const nd::ExcludedMiddle& /*op*/) -> util::ResultStatus {
-            FormulaHandle F_raw = ts.step_formula.at(k);
-            FormulaHandle negF_nnf = nnf_neg_of(ts, F_raw);
-            auto snapshot = emit_cut(ts, F_raw);
-            size_t F_k_idx = ts.seq.size() - 1;
-            TRY(close_excluded_middle(ts, F_k_idx));
-            enter_right(ts, std::move(snapshot), negF_nnf);
-            ts.step_formula_nnf[k] = nnf_of(ts, F_raw);
-            ts.step_to_neg_idx[k]  = ts.seq.size() - 1;
-            return util::Ok();
+        // Block-structural ops should never be passed to this function.
+        [&](const nd::Fix&)          -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: Fix is a block opener (#" << k << ")";
         },
-
-        [&](const auto& op) -> util::ResultStatus {
-            (void)op;
-            return MAKE_ERROR
-                << "translate_flat_step: ND op variant index "
-                << instr.index() << " not yet supported";
+        [&](const nd::Assume&)       -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: Assume is a block opener (#" << k << ")";
         },
-
+        [&](const nd::ExistsElim&)   -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: ExistsElim is a block opener (#" << k << ")";
+        },
+        [&](const nd::ForallIntro&)  -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: ForallIntro is a block closer (#" << k << ")";
+        },
+        [&](const nd::ImpliesIntro&) -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: ImpliesIntro is a block closer (#" << k << ")";
+        },
+        [&](const nd::NotIntro&)     -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: NotIntro is a block closer (#" << k << ")";
+        },
+        [&](const nd::Qed&)          -> util::Result<ScopeDeps> {
+            return MAKE_ERROR << "compute_flat_step_proof_deps: Qed is a block closer (#" << k << ")";
+        },
     }, instr);
 }
 
-// =========================================================================
-// translate_block: recursive emit for a Block of any kind.
-// =========================================================================
-//
-// Pre-condition: ts.seq mirrors the LEFT subgoal at this depth, with the
-// block's `result_nnf` at slot `result_idx` (placed there by the parent
-// Cut). For OUTER, ts.seq is the initial goal sequent and result_idx is
-// the index where the outer claim disjunct lives.
-//
-// Post-condition: the block's LEFT subgoal closes; the verifier pops to
-// the parent's RIGHT.
-
-util::ResultStatus translate_block(TS& ts, const Block& block,
-                                     size_t result_idx,
-                                     const Program<nd::Instr>& in);
-
-// Helper: given a Block whose `result_idx` slot in ts.seq currently holds
-// the result_nnf, apply the appropriate opening rule to set up the body's
-// initial state.
-//
-// Returns the index in ts.seq where the body's "qed-target slot" lives —
-// the slot that the final AxiomGen will reference.
-util::Result<size_t> emit_opener(TS& ts, const Block& block, size_t result_idx) {
-    switch (block.kind) {
-        case BlockKind::OUTER:
-            // OUTER: no opener. The body proves the goal disjunct directly.
-            return result_idx;
-
-        case BlockKind::FORALL: {
-            // result_nnf at result_idx is ∀x. body_nnf. Apply Forall rule
-            // to introduce eigenvar; entry becomes body_nnf[x:=eigen].
-            const Formula& f = ts.seq[result_idx].get();
-            if (!f.is_quantified() || f.as_quantified().op != Op::Forall)
-                return MAKE_ERROR << "emit_opener(FORALL): result_nnf is not ∀x.φ";
-            uint32_t lkr_idx = static_cast<uint32_t>(ts.out.instrs.size());
-            lkr::Forall fop{}; fop.principal = result_idx;
-            ts.emit(std::move(fop));
-            ts.nd_to_lkr_termref[block.opener_idx] = lkr_idx;
-            FormulaHandle body_inst = ts.builder.instantiate_quantifier_body(
-                f.as_quantified().body, block.eigen_term);
-            ts.seq[result_idx] = body_inst;
-            return result_idx;
+// Recursive deps-plan computation. live_blocks[d] is the block at depth
+// d currently in scope; live_blocks.back() is the innermost. Block opener
+// is responsible for pushing itself onto live_blocks before recursing,
+// and popping after.
+util::ResultStatus compute_deps_block(
+    const Program<nd::Instr>& in,
+    const Block& blk,
+    const StepFormulaMap& step_formula,
+    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    const std::unordered_map<var_index, int>& var_to_depth,
+    std::vector<const Block*>& live_blocks,
+    DepsPlan& plan)
+{
+    // Mirror ND's derive_with_deps: total = proof_deps | compute_var_deps(f).
+    // The compute_var_deps(f) component picks up free fix-vars present in
+    // the result formula — crucial for sub-block closers, whose result
+    // formula may mention vars from outer FORALL/EXISTS_ELIM scopes that
+    // the discharge of the sub-block's own bit doesn't cover.
+    auto record_step = [&](uint32_t k, ScopeDeps proof_deps) {
+        ScopeDeps total = proof_deps;
+        auto sf_it = step_formula.find(k);
+        if (sf_it != step_formula.end()) {
+            total |= compute_var_deps_fml(sf_it->second, var_to_depth);
         }
+        plan.step_deps[k] = total;
+        int dd = total.deepest();
+        const Block* host = (dd < 0) ? live_blocks[0] : live_blocks[dd];
+        plan.host_block[k] = host;
+    };
 
-        case BlockKind::IMPLIES: {
-            // result_nnf at result_idx is ¬A_nnf ∨ body_nnf. Apply Or
-            // rule: replaces with ¬A_nnf at result_idx, appends body_nnf.
-            const Formula& f = ts.seq[result_idx].get();
-            if (!f.is_compound() || f.as_compound().op != Op::Or)
-                return MAKE_ERROR << "emit_opener(IMPLIES): result_nnf is not ¬A ∨ body";
-            FormulaHandle negA = f.as_compound().left;
-            FormulaHandle body = f.as_compound().right;
-            lkr::Or orop{}; orop.principal = result_idx; ts.emit(std::move(orop));
-            ts.seq[result_idx] = negA;
-            ts.seq.push_back(body);
-            // Mark the assumption's ND idx as cut-in at result_idx so flat
-            // body steps can reference it via implies_elim et al.
-            ts.step_to_neg_idx[block.opener_idx] = result_idx;
-            return ts.seq.size() - 1;  // body slot
-        }
-
-        case BlockKind::NOT: {
-            // result_nnf at result_idx is ¬A_nnf (atomic-ish). No opening
-            // rule. The "qed-target slot" is conceptually the
-            // ¬A_nnf entry, but for NOT the close uses the body's
-            // contradiction, not the result slot. Caller must handle.
-            //
-            // Mark the assumption as available: its ¬A_nnf is at result_idx.
-            ts.step_to_neg_idx[block.opener_idx] = result_idx;
-            return result_idx;
-        }
-
-        case BlockKind::EXISTS_ELIM: {
-            // The ∃-formula's ¬-NNF (= ∀x.¬φ) must already be cut into
-            // the goal — i.e., step_to_neg_idx[block.exists_formula_step]
-            // is set. Apply Forall on that entry to introduce the eigen
-            // and obtain ¬φ[eigen] in the goal.
-            auto neg_exists_it = ts.step_to_neg_idx.find(
-                block.exists_formula_step.idx);
-            if (neg_exists_it == ts.step_to_neg_idx.end())
-                return MAKE_ERROR << "emit_opener(EXISTS_ELIM): exists step %"
-                                  << block.exists_formula_step.idx
-                                  << " not yet cut-in";
-            size_t neg_exists_idx = neg_exists_it->second;
-            const Formula& f = ts.seq[neg_exists_idx].get();
-            if (!f.is_quantified() || f.as_quantified().op != Op::Forall)
-                return MAKE_ERROR << "emit_opener(EXISTS_ELIM): cut-in is not ∀x.¬φ";
-            uint32_t lkr_idx = static_cast<uint32_t>(ts.out.instrs.size());
-            lkr::Forall fop{}; fop.principal = neg_exists_idx;
-            ts.emit(std::move(fop));
-            ts.nd_to_lkr_termref[block.opener_idx] = lkr_idx;
-            FormulaHandle inst = ts.builder.instantiate_quantifier_body(
-                f.as_quantified().body, block.eigen_term);
-            ts.seq[neg_exists_idx] = inst;
-            // Mark the opener as available (the eigen-inst body is at
-            // neg_exists_idx).
-            ts.step_to_neg_idx[block.opener_idx] = neg_exists_idx;
-            // result_idx still holds the lifted-out formula F (= the
-            // EXISTS_ELIM result). Final close compares against it.
-            return result_idx;
-        }
-    }
-    return MAKE_ERROR << "emit_opener: unhandled block kind";
-}
-
-util::ResultStatus emit_closer(TS& ts, const Block& block, size_t qed_slot,
-                                 const Program<nd::Instr>& in) {
-    if (block.kind == BlockKind::NOT) {
-        // For NOT, the "result" is ¬A and the body proves ⊥ (a contradiction).
-        // The close_target must be a `not_elim` step whose two operands form
-        // a dual literal pair. After the body's cuts, both sides of the
-        // contradiction are in the goal as ¬-cut-ins.
-        const auto& closer_instr = in.instrs[block.close_target_idx];
-        if (auto* ne = std::get_if<nd::NotElim>(&closer_instr)) {
-            auto neg_it = ts.step_to_neg_idx.find(ne->negation.idx);
-            auto pos_it = ts.step_to_neg_idx.find(ne->formula.idx);
-            if (neg_it == ts.step_to_neg_idx.end() ||
-                pos_it == ts.step_to_neg_idx.end()) {
-                return MAKE_ERROR << "emit_closer(NOT): not_elim's operands "
-                                     "not yet cut-in";
-            }
-            lkr::AxiomGen ax{}; ax.a = neg_it->second; ax.b = pos_it->second;
-            ts.emit(std::move(ax));
-            return util::Ok();
-        }
-        return MAKE_ERROR << "emit_closer(NOT): close_target #"
-                          << block.close_target_idx
-                          << " is not a not_elim step (other contradiction "
-                             "patterns not yet supported)";
+    // Record opener-step deps for IMPLIES/NOT/EXISTS_ELIM. (FORALL openers
+    // are Fix ops, which don't bind a step formula in step_formula and so
+    // don't need step_deps.)
+    if (blk.kind == BlockKind::IMPLIES || blk.kind == BlockKind::NOT) {
+        // Assume's step is the assumption formula itself; it depends on
+        // its own scope's bit.
+        record_step(blk.opener_idx, ScopeDeps::from_bit(blk.depth));
+    } else if (blk.kind == BlockKind::EXISTS_ELIM) {
+        ScopeDeps src;
+        auto it = plan.step_deps.find(blk.exists_formula_step.idx);
+        if (it != plan.step_deps.end()) src = it->second;
+        record_step(blk.opener_idx, src | ScopeDeps::from_bit(blk.depth));
     }
 
-    // For OUTER / FORALL / IMPLIES / EXISTS_ELIM: AxiomGen between
-    // the qed-target's result-side slot and its negation cut-in.
-    auto neg_it = ts.step_to_neg_idx.find(block.close_target_idx);
-    if (neg_it == ts.step_to_neg_idx.end())
-        return MAKE_ERROR << "emit_closer: close_target step %"
-                          << block.close_target_idx << " not cut-in";
-    lkr::AxiomGen ax{}; ax.a = qed_slot; ax.b = neg_it->second;
-    ts.emit(std::move(ax));
+    for (const auto& item : blk.body) {
+        if (auto* flat = std::get_if<FlatStep>(&item)) {
+            uint32_t k = flat->nd_idx;
+            TRY_ASSIGN(d, compute_flat_step_proof_deps(
+                in, k, plan.step_deps, term_for_idx, var_to_depth));
+            record_step(k, d);
+        } else {
+            const Block& sub = *std::get<std::unique_ptr<Block>>(item);
+            live_blocks.push_back(&sub);
+            TRY(compute_deps_block(in, sub, step_formula, term_for_idx,
+                                    var_to_depth, live_blocks, plan));
+            live_blocks.pop_back();
+
+            // Sub-block closer: proof_deps = discharge(target.deps, sub.depth).
+            // record_step ORs in compute_var_deps(closer_formula) uniformly,
+            // which restores any outer-scope fix-vars the discharge cleared
+            // (essential for IMPLIES closers whose result mentions vars from
+            // surrounding FORALL/EXISTS_ELIM scopes).
+            ScopeDeps target_deps;
+            auto t_it = plan.step_deps.find(sub.close_target_idx);
+            if (t_it != plan.step_deps.end()) target_deps = t_it->second;
+            record_step(sub.closer_idx,
+                        discharge(target_deps, sub.depth));
+        }
+    }
     return util::Ok();
 }
 
-util::ResultStatus translate_block(TS& ts, const Block& block,
-                                     size_t result_idx,
-                                     const Program<nd::Instr>& in)
+util::ResultStatus compute_deps_plan(
+    const Program<nd::Instr>& in,
+    const Block& root,
+    const StepFormulaMap& step_formula,
+    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    const std::unordered_map<var_index, int>& var_to_depth,
+    DepsPlan& plan)
 {
-    TRY_ASSIGN(qed_slot, emit_opener(ts, block, result_idx));
+    std::vector<const Block*> live_blocks{&root};
+    return compute_deps_block(in, root, step_formula, term_for_idx,
+                                var_to_depth, live_blocks, plan);
+}
 
-    for (const auto& item : block.body) {
+// Walk `search` recursively gathering every flat-step k hosted at
+// `host_target` and not Let/NotElim (which emit no LKR ops). Pushed in
+// program order via the body iteration order.
+void gather_hosted_inside(const Program<nd::Instr>& in,
+                          const Block& search,
+                          const Block* host_target,
+                          const DepsPlan& plan,
+                          std::vector<uint32_t>& out)
+{
+    for (const auto& item : search.body) {
         if (auto* flat = std::get_if<FlatStep>(&item)) {
-            TRY(translate_flat_step(ts, flat->nd_idx, in));
+            uint32_t k = flat->nd_idx;
+            const auto& instr = in.instrs[k];
+            if (std::holds_alternative<nd::Let>(instr) ||
+                std::holds_alternative<nd::NotElim>(instr)) {
+                continue;
+            }
+            auto it = plan.host_block.find(k);
+            if (it != plan.host_block.end() && it->second == host_target) {
+                out.push_back(k);
+            }
         } else {
             const Block& sub = *std::get<std::unique_ptr<Block>>(item);
-            FormulaHandle sub_result_raw = ts.step_formula.at(sub.closer_idx);
-            FormulaHandle sub_result_nnf = nnf_of(ts, sub_result_raw);
-            FormulaHandle sub_neg_nnf    = nnf_neg_of(ts, sub_result_raw);
-            ts.step_formula_nnf[sub.closer_idx] = sub_result_nnf;
-
-            auto snapshot = ts.seq;
-
-            lkr::Cut cut{}; cut.cut_formula = sub_result_nnf;
-            ts.emit(std::move(cut));
-            ts.seq.push_back(sub_result_nnf);
-            size_t sub_result_idx = ts.seq.size() - 1;
-
-            TRY(translate_block(ts, sub, sub_result_idx, in));
-
-            // After translate_block(sub): LEFT closed, verifier popped to
-            // parent RIGHT. Mirror RIGHT in ts.seq.
-            snapshot.push_back(sub_neg_nnf);
-            ts.seq = std::move(snapshot);
-            ts.step_to_neg_idx[sub.closer_idx] = ts.seq.size() - 1;
+            gather_hosted_inside(in, sub, host_target, plan, out);
         }
     }
+}
 
-    return emit_closer(ts, block, qed_slot, in);
+// Build the emission event list for block B (and recursively for its
+// sub-blocks). See DepsPlan / EmissionEvent comments for the ordering
+// invariant: any B-hosted flat defined inside a top-level sub-block S of
+// B precedes S's SubBlockEvent so the flat lands on B's RIGHT continuation.
+void build_events(const Program<nd::Instr>& in,
+                   const Block& B,
+                   DepsPlan& plan)
+{
+    std::vector<EmissionEvent> events;
+    for (const auto& item : B.body) {
+        if (auto* flat = std::get_if<FlatStep>(&item)) {
+            uint32_t k = flat->nd_idx;
+            const auto& instr = in.instrs[k];
+            if (std::holds_alternative<nd::Let>(instr) ||
+                std::holds_alternative<nd::NotElim>(instr)) {
+                continue;   // no LKR op; nothing to schedule
+            }
+            auto it = plan.host_block.find(k);
+            if (it != plan.host_block.end() && it->second == &B) {
+                events.emplace_back(FlatEvent{k});
+            }
+            // host elsewhere: skip; handled by the host's event list.
+        } else {
+            const Block& sub = *std::get<std::unique_ptr<Block>>(item);
+            std::vector<uint32_t> pre;
+            gather_hosted_inside(in, sub, &B, plan, pre);
+            for (uint32_t k : pre) {
+                events.emplace_back(FlatEvent{k});
+            }
+            events.emplace_back(SubBlockEvent{&sub});
+            build_events(in, sub, plan);   // recurse
+        }
+    }
+    plan.events[&B] = std::move(events);
 }
 
 // =========================================================================
-// Initial sequent setup for OUTER block
-// =========================================================================
+// Phase B — emission. See SPEC.md.
 //
-// The OUTER block's "result" is the entire claim formula. Initial verifier
-// sequent is [NNF(claim_root)]. We mirror this in ts.seq: a single entry
-// containing NNF(claim) — which serves as the OUTER block's result_idx=0.
+// All sequent positions are addressed by SequentEntry (an opaque handle);
+// Env owns the entry→position map and is the only place position
+// arithmetic lives. Multiplicative-And partitions are computed from
+// per-rule declared `left_needs` / `right_needs` (see Env::apply_and).
+// Generic structural closure (emit_close) handles all Or/And/∀/∃ duals
+// — including iff-derived NNFs — without per-iff special-case code.
+// =========================================================================
 
-util::Result<size_t> setup_outer_initial(TS& ts, GlobalContext& ctx,
-                                           const std::string& claim_name) {
-    SentenceHandle claim_sentence{};
-    if (auto cl = ctx.find_claim(claim_name)) {
-        claim_sentence = cl.value();
-    } else if (auto kn = ctx.find_known(claim_name)) {
-        claim_sentence = kn.value();
-    } else {
-        return MAKE_ERROR << "NDtoLKR: claim '" << claim_name
-                          << "' not found in context";
+// (LowerCtx and StepNegMap are declared in nd_to_lkr_internal.h.
+// close_flat is defined in close_flat.cpp.)
+
+util::ResultStatus translate_block(LowerCtx& lc, Env& env,
+                                    SequentEntry result_entry,
+                                    const Block& block,
+                                    const Program<nd::Instr>& in,
+                                    StepNegMap& step_to_neg);
+
+// emit_block_opener: mutate env so the body sees the right scope.
+// Returns the qed_entry — the SequentEntry the closer will pair against
+// the close_target's negation via emit_close. Also updates step_to_neg
+// for opener-introduced bindings (IMPLIES/NOT assumption-neg, EXISTS_ELIM
+// witness-neg).
+util::Result<SequentEntry> emit_block_opener(LowerCtx& lc, Env& env,
+                                              SequentEntry result_entry,
+                                              const Block& block,
+                                              StepNegMap& step_to_neg)
+{
+    switch (block.kind) {
+        case BlockKind::OUTER:
+            return result_entry;
+
+        case BlockKind::FORALL: {
+            TRY_ASSIGN(result_pos, env.position_of(result_entry));
+            TRY_ASSIGN(f, env.formula_at(result_entry));
+            const Formula& fg = f.get();
+            if (!fg.is_quantified() || fg.as_quantified().op != Op::Forall) {
+                return MAKE_ERROR
+                    << "emit_block_opener(FORALL): result is not ∀x.φ";
+            }
+            var_index v = block.eigen_term.as_variable();
+            uint32_t lkr_idx = static_cast<uint32_t>(lc.out.instrs.size());
+            lkr::Forall fop{}; fop.principal = result_pos; fop.eigen = v;
+            lc.out.instrs.emplace_back(std::move(fop));
+            TRY(env.apply_forall(result_entry, v, lc.builder));
+            lc.nd_to_lkr_termref[block.opener_idx] = lkr_idx;
+            return result_entry;
+        }
+
+        case BlockKind::IMPLIES: {
+            TRY_ASSIGN(result_pos, env.position_of(result_entry));
+            TRY_ASSIGN(f, env.formula_at(result_entry));
+            const Formula& fg = f.get();
+            if (!fg.is_compound() || fg.as_compound().op != Op::Or) {
+                return MAKE_ERROR
+                    << "emit_block_opener(IMPLIES): result is not (NNF(¬A) ∨ body)";
+            }
+            lkr::Or orop{}; orop.principal = result_pos;
+            lc.out.instrs.emplace_back(std::move(orop));
+            TRY_ASSIGN(body_entry, env.apply_or(result_entry));
+            // result_entry now points at NNF(¬A) — the assumption's negation
+            // visible to the body via step_to_neg[opener].
+            step_to_neg[block.opener_idx] = result_entry;
+            return body_entry;
+        }
+
+        case BlockKind::NOT: {
+            // result_entry already holds NNF(¬A). The closer is custom
+            // (uses the not_elim's two operands). No LKR op emitted at open.
+            step_to_neg[block.opener_idx] = result_entry;
+            return result_entry;
+        }
+
+        case BlockKind::EXISTS_ELIM: {
+            // The block depends on the cut-in negation of its source ∃ step,
+            // which lives at step_to_neg[block.exists_formula_step.idx] and
+            // currently holds NNF(¬∃x.φ) = ∀x.NNF(¬φ).
+            auto it = step_to_neg.find(block.exists_formula_step.idx);
+            if (it == step_to_neg.end()) {
+                return MAKE_ERROR
+                    << "emit_block_opener(EXISTS_ELIM): exists step %"
+                    << block.exists_formula_step.idx << " not cut-in";
+            }
+            SequentEntry neg_exists = it->second;
+            TRY_ASSIGN(neg_pos, env.position_of(neg_exists));
+            TRY_ASSIGN(f, env.formula_at(neg_exists));
+            const Formula& fg = f.get();
+            if (!fg.is_quantified() || fg.as_quantified().op != Op::Forall) {
+                return MAKE_ERROR
+                    << "emit_block_opener(EXISTS_ELIM): cut-in is not ∀x.¬φ";
+            }
+            var_index v = block.eigen_term.as_variable();
+            uint32_t lkr_idx = static_cast<uint32_t>(lc.out.instrs.size());
+            lkr::Forall fop{}; fop.principal = neg_pos; fop.eigen = v;
+            lc.out.instrs.emplace_back(std::move(fop));
+            TRY(env.apply_forall(neg_exists, v, lc.builder));
+            lc.nd_to_lkr_termref[block.opener_idx] = lkr_idx;
+            step_to_neg[block.opener_idx] = neg_exists;
+
+            // If compute_block_formulas wrapped the close_target in ∃x. …
+            // (because the target mentioned the witness eigen), the
+            // sub-block cut formula is one quantifier deeper than the
+            // close_target's negation. Reduce it back to body[w] by
+            // applying Exists with witness=w, so emit_block_closer's
+            // emit_close can pair structurally with NNF(¬body[w]).
+            //
+            // We detect "was abstracted" by checking whether the
+            // close_target itself mentions the witness eigen — exactly
+            // the predicate compute_block_formulas used.
+            auto target_it = lc.step_formula.find(block.close_target_idx);
+            if (target_it == lc.step_formula.end()) {
+                return MAKE_ERROR
+                    << "emit_block_opener(EXISTS_ELIM): close_target step %"
+                    << block.close_target_idx << " has no formula";
+            }
+            if (formula_contains_fixed_var(target_it->second, v)) {
+                TRY_ASSIGN(result_pos, env.position_of(result_entry));
+                lkr::Exists ex{};
+                ex.principal = result_pos;
+                ex.witness   = TermRef{lkr_idx};
+                lc.out.instrs.emplace_back(std::move(ex));
+                TRY(env.apply_exists(result_entry, Term::fixed(v), lc.builder));
+            }
+
+            return result_entry;
+        }
     }
-    FormulaHandle nnf_claim = ts.builder.to_nnf(claim_sentence.get().root());
-    ts.seq.clear();
-    ts.seq.push_back(nnf_claim);
-    return size_t{0};
+    return MAKE_ERROR << "emit_block_opener: unhandled block kind";
+}
+
+util::ResultStatus emit_block_closer(LowerCtx& lc, Env& env,
+                                      SequentEntry qed_entry,
+                                      const Block& block,
+                                      const Program<nd::Instr>& in,
+                                      const StepNegMap& step_to_neg)
+{
+    if (block.kind == BlockKind::NOT) {
+        // close_target is a not_elim deriving ⊥. Pair the negs of its two
+        // operands (which are duals of each other).
+        const auto& closer_instr = in.instrs[block.close_target_idx];
+        const nd::NotElim* ne = std::get_if<nd::NotElim>(&closer_instr);
+        if (!ne) {
+            return MAKE_ERROR
+                << "emit_block_closer(NOT): close_target #"
+                << block.close_target_idx << " is not a not_elim";
+        }
+        auto neg_it = step_to_neg.find(ne->negation.idx);
+        auto pos_it = step_to_neg.find(ne->formula.idx);
+        if (neg_it == step_to_neg.end() || pos_it == step_to_neg.end()) {
+            return MAKE_ERROR
+                << "emit_block_closer(NOT): not_elim's operands not cut-in";
+        }
+        return emit_close(env, neg_it->second, pos_it->second,
+                          lc.eigens, lc.builder, lc.out);
+    }
+
+    auto neg_it = step_to_neg.find(block.close_target_idx);
+    if (neg_it == step_to_neg.end()) {
+        return MAKE_ERROR
+            << "emit_block_closer: close_target step %"
+            << block.close_target_idx << " not cut-in";
+    }
+    return emit_close(env, qed_entry, neg_it->second,
+                      lc.eigens, lc.builder, lc.out);
+}
+
+// Cut-spine for one flat step. Mutates env to reflect the post-cut RIGHT
+// subgoal and registers step_to_neg[k] = ¬F_k entry.
+util::ResultStatus translate_flat_step(LowerCtx& lc, Env& env, uint32_t k,
+                                        const Program<nd::Instr>& in,
+                                        StepNegMap& step_to_neg)
+{
+    const auto& instr = in.instrs[k];
+
+    // Let / NotElim emit no LKR ops; their formulas are recorded in
+    // step_formula_nnf at compute_block_formulas time and are consumed by
+    // downstream ops (or_intro, bottom_elim, NOT-block closer).
+    if (std::holds_alternative<nd::Let>(instr) ||
+        std::holds_alternative<nd::NotElim>(instr)) {
+        return util::Ok();
+    }
+
+    auto it = lc.step_formula_nnf.find(k);
+    if (it == lc.step_formula_nnf.end()) {
+        return MAKE_ERROR
+            << "translate_flat_step: step %" << k << " has no NNF formula";
+    }
+    FormulaHandle F_k_nnf = it->second;
+
+    auto cut = env.apply_cut(F_k_nnf, lc.builder);
+    lkr::Cut cut_op{}; cut_op.cut_formula = F_k_nnf;
+    lc.out.instrs.emplace_back(std::move(cut_op));
+
+    // Close LEFT.
+    Env left_env = std::move(cut.left);
+    TRY(close_flat(lc, left_env, k, in, cut.left_phi, step_to_neg));
+
+    // Continue on RIGHT; ¬F_k is now visible to subsequent steps.
+    env = std::move(cut.right);
+    step_to_neg[k] = cut.right_neg_phi;
+    return util::Ok();
+}
+
+util::ResultStatus translate_block(LowerCtx& lc, Env& env,
+                                    SequentEntry result_entry,
+                                    const Block& block,
+                                    const Program<nd::Instr>& in,
+                                    StepNegMap& step_to_neg)
+{
+    TRY_ASSIGN(qed_entry,
+        emit_block_opener(lc, env, result_entry, block, step_to_neg));
+
+    // Drive emission off the per-block event list. Events are ordered so
+    // that B-hosted flats whose definition lives inside a top-level sub-
+    // block S of B precede S's SubBlock event — putting their cut on B's
+    // RIGHT continuation, where every nested context can see it. Flats
+    // hosted at ancestors of B are already cut (via the ancestor's events)
+    // and do not appear here; flats hosted at descendants of B appear in
+    // those descendants' event lists.
+    auto ev_it = lc.plan.events.find(&block);
+    if (ev_it == lc.plan.events.end()) {
+        return MAKE_ERROR
+            << "translate_block: no event list for block at depth "
+            << block.depth;
+    }
+    for (const EmissionEvent& ev : ev_it->second) {
+        TRY(std::visit(overloaded{
+            [&](const FlatEvent& fe) -> util::ResultStatus {
+                return translate_flat_step(lc, env, fe.flat_idx, in, step_to_neg);
+            },
+            [&](const SubBlockEvent& se) -> util::ResultStatus {
+                const Block& sub = *se.sub_block;
+                auto sf_it = lc.step_formula.find(sub.closer_idx);
+                if (sf_it == lc.step_formula.end()) {
+                    return MAKE_ERROR
+                        << "translate_block: sub-block closer #"
+                        << sub.closer_idx << " has no formula";
+                }
+                FormulaHandle sub_result_nnf = lc.builder.to_nnf(sf_it->second);
+                lc.step_formula_nnf[sub.closer_idx] = sub_result_nnf;
+
+                auto cut = env.apply_cut(sub_result_nnf, lc.builder);
+                lkr::Cut cut_op{}; cut_op.cut_formula = sub_result_nnf;
+                lc.out.instrs.emplace_back(std::move(cut_op));
+
+                StepNegMap sub_step_to_neg = step_to_neg;
+                Env left_env = std::move(cut.left);
+                TRY(translate_block(lc, left_env, cut.left_phi, sub, in,
+                                    sub_step_to_neg));
+
+                env = std::move(cut.right);
+                step_to_neg[sub.closer_idx] = cut.right_neg_phi;
+                return util::Ok();
+            },
+        }, ev));
+    }
+
+    return emit_block_closer(lc, env, qed_entry, block, in, step_to_neg);
 }
 
 }  // namespace
@@ -1473,38 +1103,55 @@ util::Result<Program<lkr::Instr>> NDtoLKR::apply(const Program<nd::Instr>& in) {
     Program<lkr::Instr> out;
     out.claim_name = in.claim_name;
 
-    TS ts(*ctx_, out);
+    FormulaBuilder                        builder(*ctx_);
+    EigenSupply                           eigens(builder);
+    StepFormulaMap                        step_formula;
+    StepFormulaMap                        step_formula_nnf;
+    std::unordered_map<uint32_t, Term>    term_for_idx;
+    std::unordered_map<uint32_t, uint32_t> nd_to_lkr_termref;
+    std::unordered_map<std::string, Term> name_table;
+    std::unordered_map<var_index, int>    var_to_depth;
 
-    // Wrap the three passes in a try-block: any std::out_of_range or
-    // similar exception (e.g., from a missing step_formula entry) is
-    // converted to a translator error rather than aborting the process.
-    // This is defensive — translator invariants should mean these
-    // exceptions don't fire in practice — but it preserves the contract
-    // that NDtoLKR::apply returns Result, never throws.
-    try {
-        // Pass 1: decompose the flat ND IR into a Block tree.
-        auto outer_r = decompose_blocks(in, *ctx_, ts.builder,
-                                         ts.name_table, ts.term_for_idx);
-        if (!outer_r.ok()) return outer_r.error();
-        std::unique_ptr<Block> outer = std::move(outer_r).unwrap();
+    auto outer_r = decompose_blocks(in, *ctx_, builder, name_table,
+                                     term_for_idx, var_to_depth);
+    if (!outer_r.ok()) return outer_r.error();
+    std::unique_ptr<Block> outer = std::move(outer_r).unwrap();
 
-        // Pass 2: compute each ND step's derived raw formula (and NNF form).
-        TRY(compute_block_formulas(in, *outer, ts.builder, *ctx_,
-                                    ts.step_formula, ts.step_formula_nnf,
-                                    ts.term_for_idx, ts.name_table));
+    TRY(compute_block_formulas(in, *outer, builder, *ctx_,
+                                step_formula, step_formula_nnf,
+                                term_for_idx, name_table));
 
-        // Initial sequent: [NNF(claim_root)] at index 0.
-        TRY_ASSIGN(outer_result_idx, setup_outer_initial(ts, *ctx_, in.claim_name));
+    // Pre-pass: compute scope-deps for every step and determine each
+    // flat step's host block (the deepest ancestor whose depth equals
+    // step_deps.deepest(); OUTER if deps empty). The lowerer emits each
+    // hosted flat's Cut at the start of its host block's body, so the
+    // step is in scope for every descendant — even after sub-blocks close.
+    DepsPlan plan;
+    TRY(compute_deps_plan(in, *outer, step_formula, term_for_idx,
+                           var_to_depth, plan));
+    build_events(in, *outer, plan);
 
-        // Pass 3: recursive emit.
-        TRY(translate_block(ts, *outer, outer_result_idx, in));
-
-        return out;
-    } catch (const std::out_of_range& e) {
-        return MAKE_ERROR << "NDtoLKR: internal map lookup miss: " << e.what();
-    } catch (const std::exception& e) {
-        return MAKE_ERROR << "NDtoLKR: internal exception: " << e.what();
+    // Resolve the claim formula and seed the initial sequent.
+    SentenceHandle claim_sentence{};
+    if (auto cl = ctx_->find_claim(in.claim_name)) {
+        claim_sentence = cl.value();
+    } else if (auto kn = ctx_->find_known(in.claim_name)) {
+        claim_sentence = kn.value();
+    } else {
+        return MAKE_ERROR << "NDtoLKR: claim '" << in.claim_name
+                          << "' not found in context";
     }
+    FormulaHandle nnf_claim = builder.to_nnf(claim_sentence.get().root());
+
+    Env env;
+    SequentEntry result_entry = env.seed(nnf_claim);
+
+    LowerCtx lc{*ctx_, builder, eigens, step_formula, step_formula_nnf,
+                 term_for_idx, nd_to_lkr_termref, plan, out};
+    StepNegMap step_to_neg;
+    TRY(translate_block(lc, env, result_entry, *outer, in, step_to_neg));
+
+    return out;
 }
 
 util::ResultStatus translate_and_verify(

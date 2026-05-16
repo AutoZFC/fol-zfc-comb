@@ -578,4 +578,19 @@ FormulaHandle parse_formula_with_vars(
     return converter.convert(ast);
 }
 
+util::Result<FormulaHandle> try_parse_formula_with_vars(
+    const ASTNode* ast,
+    GlobalContext& ctx,
+    FormulaBuilder& builder,
+    const std::unordered_map<std::string, Term>& external_vars,
+    const std::unordered_map<std::string, size_t>& schema_vars,
+    const std::unordered_map<std::string, size_t>& schema_arities) {
+    try {
+        return parse_formula_with_vars(ast, ctx, builder,
+                                        external_vars, schema_vars, schema_arities);
+    } catch (const std::exception& e) {
+        return MAKE_ERROR << "parse_formula: " << e.what();
+    }
+}
+
 }  // namespace logic

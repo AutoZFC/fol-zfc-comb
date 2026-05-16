@@ -27,8 +27,8 @@
 #include "proof.h"
 #include "verifier.h"
 
-#include "../core/formula.h"
-#include "../util/error.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
 
 #include <array>
 #include <memory>

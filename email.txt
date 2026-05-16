@@ -1,0 +1,16 @@
+Hello Prof. Chen,
+
+I hope this email finds you well. Thank you for your recommendation letter last semester.
+
+I wanted to share a project I've been working on: a proof engine for formalizing mathematics directly in first-order logic. My hope is that if AI can understand first-order logic structurally (rather than as text, the way LLMs do), it could help humans derive theorems much faster. Most modern proof assistants are built on type theory, whose meta-logic is not fully first-order; Metamath uses a Hilbert-style system where first-order logic is defined in the meta-language rather than built in. Your MATH 582 last year inspired me to build a system where first-order logic is the only primitive and all objects are sets, with ZFC as axioms and natural deduction as the proof calculus. I haven't seen this approach taken before, but I also don't see any fundamental blockers — most of modern mathematics should be provable from ZFC in first-order logic alone, right?
+
+One question I've run into: working constructively feels cleanest, since every formula is derived from previously derived formulas. But many theorems seem to require classical reasoning via excluded middle. Since predicates can be encoded as sets in ZFC, I was wondering whether adding the axiom
+
+    forall x. forall Y. elem(x, Y) | ~elem(x, Y)
+
+would recover the full power of classical logic, or whether this is already provable in constructive ZFC?
+
+I'd really appreciate any thoughts you might have. Let me know if you'd like updates on this in the future — I plan to keep working on it unless the approach turns out to be flawed.
+
+Thank you,
+Arthur Wang

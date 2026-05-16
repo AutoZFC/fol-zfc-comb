@@ -1,9 +1,7 @@
 #pragma once
 
-// NDtoLKR — translate Natural Deduction proofs into Extended LKR (Hughes
-// 2019 §11 core + admissible extensions Cut, AxiomGen, UseTheorem,
-// SchemaInst — see src/proof/lkr/ops.h for the layering and elimination
-// theorems).
+// NDtoLKR — translate Natural Deduction proofs into LKR (Hughes 2019 §11)
+// extended only with Cut and CloseByLemma (the lemma-as-cut realizer).
 //
 // Strategy ("cut spine"):
 //   * NNF the claim. Outer ∀ become LKR Forall ops; outer → become Or ops
@@ -13,23 +11,21 @@
 //     (other ¬F_j, ¬A_i, the to-prove disjunct B, and known theorems).
 //     RIGHT subgoal carries ¬F_k_nnf forward as a new "premise disjunct"
 //     in the goal.
-//   * Final close: AxiomGen between the qed-target body step's positive
-//     F_target_nnf (carried in via cut) and the original goal-disjunct
-//     B in the bottom-most RIGHT subgoal.
+//   * Final close: structural decomposition via Hughes' ∧/∨/∀/∃ rules
+//     down to atomic literals, where AxiomLit closes. The decomposition
+//     macro `emit_axiom_decomp` walks both NNF-dual formulas in lockstep.
 //
-// Hughes-core reduction (future work): translator output is in Extended
-// LKR. To produce a pure-Hughes-core proof (required for combinatorial
-// proofs per Hughes §11.1), apply the elimination passes documented in
-// lkr/ops.h: cut-elimination (Hauptsatz), AxiomGen → AxiomLit structural
-// reduction, UseTheorem/SchemaInst proof-inlining.
+// Lemma-as-cut: each `nd::Use(L)` is translated into `Cut(φ_L); CloseByLemma(L)`.
+// The verifier resolves L against the registry; since theorems enter the
+// registry only when their proofs have been verified, this is sound.
 //
 // Soundness: the translator is not trusted. Its output is verified by
 // LKRVerifier; a buggy emission yields a verification failure on the
 // output, not a soundness loss in the framework.
 
-#include "../../core/formula.h"
-#include "../../util/error.h"
-#include "../proof.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
+#include "src/proof/proof.h"
 #include "pass.h"
 
 namespace logic::proof::translate {

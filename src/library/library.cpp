@@ -638,8 +638,17 @@ util::Result<FolLibrary::PredHandles> FolLibrary::link_predicates(
         r.read_u32();  // local_id (not used during loading)
         std::string name = r.read_str();
         uint32_t arity = r.read_u32();
-        auto h = ctx.add_predicate(std::move(name), arity);
-        result.exported.push_back(h);
+        // add_predicate goes through PredicateRegistry (a KeyedRegistry),
+        // which throws ConflictError when the same name is re-registered
+        // with a different arity. Translate that to a Result error so the
+        // library loader stays exception-free at its public boundary.
+        try {
+            auto h = ctx.add_predicate(std::string(name), arity);
+            result.exported.push_back(h);
+        } catch (const PredicateRegistry::ConflictError& e) {
+            return MAKE_ERROR << "predicate conflict on import: '"
+                              << name << "/" << arity << "': " << e.what();
+        }
     }
 
     return result;

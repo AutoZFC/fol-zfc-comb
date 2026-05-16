@@ -104,8 +104,13 @@ proof id_func_from_to:
     h_cond2 = iff_elim_l h_vab2, h_rel
     h_va_x = and_elim_l h_cond2
     h_eq_ab = and_elim_r h_cond2
-    # elem(va, x) and eq(va, vb) -> elem(vb, x) via eq_subst
-    h_vb_x = eq_subst h_eq_ab, h_va_x
+    # eq_elem_l: eq(va, vb) & elem(va, x) -> elem(vb, x)
+    eel = use eq_elem_l
+    eel1 = forall_elim eel, va
+    eel2 = forall_elim eel1, vb
+    eel3 = forall_elim eel2, x
+    h_vb_conj = and_intro h_eq_ab, h_va_x
+    h_vb_x = implies_elim eel3, h_vb_conj
     h_rng_impl = implies_intro h_vb_x
     h_rng_b = forall_intro h_rng_impl
     h_rng_a = forall_intro h_rng_b
@@ -206,7 +211,13 @@ proof id_func_bijective:
     sym1 = forall_elim sym, w
     sym2 = forall_elim sym1, b
     h_bw = implies_elim sym2, h_wb
-    h_wx = eq_subst h_bw, h_bx
+    # eq_elem_l: eq(b, w) & elem(b, x) -> elem(w, x)
+    eel = use eq_elem_l
+    eel_bw1 = forall_elim eel, b
+    eel_bw2 = forall_elim eel_bw1, w
+    eel_bw3 = forall_elim eel_bw2, x
+    h_wx_conj = and_intro h_bw, h_bx
+    h_wx = implies_elim eel_bw3, h_wx_conj
     # Get rel_elem(i, w, b) from id_func_def: elem(w, x) & eq(w, b)
     h_wb_inst = forall_elim h_body, w
     h_wb_inst2 = forall_elim h_wb_inst, b
@@ -287,11 +298,21 @@ proof compose_id_right:
     h_id_inst2 = forall_elim h_id_inst, wb
     h_id_cond = iff_elim_l h_id_inst2, h_id_awb
     h_eq_awb = and_elim_r h_id_cond
-    # eq_symmetric: eq(wb, a), then eq_subst to get rel_elem(f, a, c)
+    # eq_symmetric: eq(wb, a). Then rel_elem_eq with eq_refl on c-position.
     sym1 = forall_elim sym, a
     sym2 = forall_elim sym1, wb
     h_eq_wba = implies_elim sym2, h_eq_awb
-    h_fac = eq_subst h_eq_wba, h_f_wbc
+    # rel_elem_eq: rel_elem(f, wb, c) & eq(wb, a) & eq(c, c) -> rel_elem(f, a, c)
+    ree = use rel_elem_eq
+    ree1 = forall_elim ree, f
+    ree2 = forall_elim ree1, wb
+    ree3 = forall_elim ree2, c
+    ree4 = forall_elim ree3, a
+    ree5 = forall_elim ree4, c
+    refl_c1 = forall_elim refl, c
+    h_ree_left = and_intro h_f_wbc, h_eq_wba
+    h_ree_conj = and_intro h_ree_left, refl_c1
+    h_fac = implies_elim ree5, h_ree_conj
     h_close_wb = exists_intro h_fac
     h_fwd = implies_intro h_close_wb
     # Backward: rel_elem(f, a, c) -> rel_elem(h, a, c)
@@ -322,8 +343,17 @@ proof compose_id_right:
     h_id_inst4 = forall_elim h_id_inst3, w
     h_id_cond2 = and_intro h_ax, h_aw
     h_rel_id = iff_elim_r h_id_inst4, h_id_cond2
-    # Build rel_elem(f, w, c)
-    h_fwc = eq_subst h_aw, h_fac2
+    # Build rel_elem(f, w, c) via rel_elem_eq: eq(a, w) & eq(c, c) substitution.
+    ree_fwc = use rel_elem_eq
+    ree_fwc1 = forall_elim ree_fwc, f
+    ree_fwc2 = forall_elim ree_fwc1, a
+    ree_fwc3 = forall_elim ree_fwc2, c
+    ree_fwc4 = forall_elim ree_fwc3, w
+    ree_fwc5 = forall_elim ree_fwc4, c
+    refl_c_fwc = forall_elim refl, c
+    h_fwc_left = and_intro h_fac2, h_aw
+    h_fwc_conj = and_intro h_fwc_left, refl_c_fwc
+    h_fwc = implies_elim ree_fwc5, h_fwc_conj
     # Conjunction + existential
     h_conj = and_intro h_rel_id, h_fwc
     h_ex2 = exists_intro h_conj, w
@@ -387,8 +417,17 @@ proof compose_id_left:
     h_id_inst2 = forall_elim h_id_inst, c
     h_id_cond = iff_elim_l h_id_inst2, h_id_wbc
     h_eq_wbc = and_elim_r h_id_cond
-    # eq_subst: eq(wb, c), rel_elem(f, a, wb) -> rel_elem(f, a, c)
-    h_fac = eq_subst h_eq_wbc, h_f_awb
+    # rel_elem_eq: rel_elem(f, a, wb) & eq(a, a) & eq(wb, c) -> rel_elem(f, a, c)
+    ree_fac = use rel_elem_eq
+    ree_fac1 = forall_elim ree_fac, f
+    ree_fac2 = forall_elim ree_fac1, a
+    ree_fac3 = forall_elim ree_fac2, wb
+    ree_fac4 = forall_elim ree_fac3, a
+    ree_fac5 = forall_elim ree_fac4, c
+    refl_a_fac = forall_elim refl, a
+    h_fac_left = and_intro h_f_awb, refl_a_fac
+    h_fac_conj = and_intro h_fac_left, h_eq_wbc
+    h_fac = implies_elim ree_fac5, h_fac_conj
     h_close_wb = exists_intro h_fac
     h_fwd = implies_intro h_close_wb
     # Backward: rel_elem(f, a, c) -> rel_elem(h, a, c)
@@ -408,10 +447,24 @@ proof compose_id_left:
     sym1 = forall_elim sym, w
     sym2 = forall_elim sym1, c
     h_cw = implies_elim sym2, h_wc
-    # Build rel_elem(f, a, w)
-    h_faw = eq_subst h_cw, h_fac2
-    # Build elem(w, y)
-    h_wy = eq_subst h_cw, h_cy
+    # rel_elem_eq: rel_elem(f, a, c) & eq(a, a) & eq(c, w) -> rel_elem(f, a, w)
+    ree_faw = use rel_elem_eq
+    ree_faw1 = forall_elim ree_faw, f
+    ree_faw2 = forall_elim ree_faw1, a
+    ree_faw3 = forall_elim ree_faw2, c
+    ree_faw4 = forall_elim ree_faw3, a
+    ree_faw5 = forall_elim ree_faw4, w
+    refl_a_faw = forall_elim refl, a
+    h_faw_left = and_intro h_fac2, refl_a_faw
+    h_faw_conj = and_intro h_faw_left, h_cw
+    h_faw = implies_elim ree_faw5, h_faw_conj
+    # Build elem(w, y) via eq_elem_l: eq(c, w) & elem(c, y) -> elem(w, y)
+    eel = use eq_elem_l
+    eel_cw1 = forall_elim eel, c
+    eel_cw2 = forall_elim eel_cw1, w
+    eel_cw3 = forall_elim eel_cw2, y
+    h_wy_conj = and_intro h_cw, h_cy
+    h_wy = implies_elim eel_cw3, h_wy_conj
     # Build rel_elem(id, w, c)
     h_id_inst3 = forall_elim h_idbody, w
     h_id_inst4 = forall_elim h_id_inst3, c

@@ -15,8 +15,8 @@
 // any op — the producing instruction's index *is* the StepRef/TermRef the
 // op binds.
 
-#include "../../parser/formula_ast.h"   // ASTNode (deferred formula payloads)
-#include "../ir.h"
+#include "src/parser/formula_ast.h"   // ASTNode (deferred formula payloads)
+#include "src/proof/ir.h"
 
 #include <memory>
 #include <optional>

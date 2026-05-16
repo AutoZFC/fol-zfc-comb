@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../util/registry.h"
+#include "src/util/registry.h"
 
 #include <functional>
 #include <memory>

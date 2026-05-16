@@ -67,7 +67,8 @@ proof eq_elem_r:
     h1 = forall_intro h2
     qed h1
 
-# Proof of eq_elem_l: from eq(x,y) and elem(x,s), derive elem(y,s) via eq_subst.
+# Proof of eq_elem_l: from eq(x,y) and elem(x,s), derive elem(y,s) via the
+# `elem_subst` axiom. Pure FOL — no eq_subst rule used.
 proof eq_elem_l:
     fix x
     fix y
@@ -75,7 +76,15 @@ proof eq_elem_l:
     h = assume eq(x, y) & elem(x, s)
     h_eq = and_elim_l h
     h_elem = and_elim_r h
-    h_result = eq_subst h_eq, h_elem
+    # Instantiate elem_subst at (x, y, s):
+    #   eq(x, y) -> (elem(x, s) <-> elem(y, s))
+    es = use elem_subst
+    es1 = forall_elim es, x
+    es2 = forall_elim es1, y
+    es3 = forall_elim es2, s
+    # Apply: from eq(x, y), get (elem(x, s) <-> elem(y, s)); then forward.
+    h_iff = implies_elim es3, h_eq
+    h_result = iff_elim_l h_iff, h_elem
     h_impl = implies_intro h_result
     h3 = forall_intro h_impl
     h2 = forall_intro h3
@@ -117,6 +126,44 @@ proof eq_trans:
     h_eq_xz = iff_elim_r ext_xz, h_all
     h_impl = implies_intro h_eq_xz
     h3 = forall_intro h_impl
+    h2 = forall_intro h3
+    h1 = forall_intro h2
+    qed h1
+
+# Proof of eq_iff_eq: from eq(a, b), derive eq(w, a) <-> eq(w, b) for any w.
+# Forward via eq_trans(eq(w, a), eq(a, b)); backward via eq_symmetric then
+# eq_trans(eq(w, b), eq(b, a)). Pure FOL.
+proof eq_iff_eq:
+    fix a
+    fix b
+    fix w
+    h_eq = assume eq(a, b)
+    et = use eq_trans
+    es = use eq_symmetric
+    # eq(b, a) via eq_symmetric
+    es1 = forall_elim es, a
+    es2 = forall_elim es1, b
+    h_eq_rev = implies_elim es2, h_eq
+    # forward: eq(w, a) -> eq(w, b)
+    h_fw = assume eq(w, a)
+    et_fw1 = forall_elim et, w
+    et_fw2 = forall_elim et_fw1, a
+    et_fw3 = forall_elim et_fw2, b
+    h_fw_conj = and_intro h_fw, h_eq
+    h_fw_res = implies_elim et_fw3, h_fw_conj
+    h_fw_impl = implies_intro h_fw_res
+    # backward: eq(w, b) -> eq(w, a)
+    h_bw = assume eq(w, b)
+    et_bw1 = forall_elim et, w
+    et_bw2 = forall_elim et_bw1, b
+    et_bw3 = forall_elim et_bw2, a
+    h_bw_conj = and_intro h_bw, h_eq_rev
+    h_bw_res = implies_elim et_bw3, h_bw_conj
+    h_bw_impl = implies_intro h_bw_res
+    # iff
+    h_iff = iff_intro h_fw_impl, h_bw_impl
+    h_outer = implies_intro h_iff
+    h3 = forall_intro h_outer
     h2 = forall_intro h3
     h1 = forall_intro h2
     qed h1
@@ -972,6 +1019,296 @@ proof pair_unique:
     ext2 = forall_elim ext1, q
     h_eq = iff_elim_r ext2, h_all
     h_impl = implies_intro h_eq
+    h4 = forall_intro h_impl
+    h3 = forall_intro h4
+    h2 = forall_intro h3
+    h1 = forall_intro h2
+    qed h1
+
+# Proof of pair_eq_a: substituting equal first components in a pair.
+# Strategy: unfold pair_def at (p, a, b) and (p, a2, b); show membership
+# characterizations are equivalent via eq_iff_eq applied at each occurrence
+# of eq(_, a); fold back via pair_def.
+proof pair_eq_a:
+    fix p
+    fix a
+    fix a2
+    fix b
+    h = assume eq(a, a2) & pair(p, a, b)
+    h_eq = and_elim_l h
+    h_pair = and_elim_r h
+    pdef = use pair_def
+    eie = use eq_iff_eq
+    eie1 = forall_elim eie, a
+    eie2 = forall_elim eie1, a2
+    # Unfold pair_def at (p, a, b).
+    pdef_p = forall_elim pdef, p
+    pdef_pa = forall_elim pdef_p, a
+    pdef_pab = forall_elim pdef_pa, b
+    h_memb = iff_elim_l pdef_pab, h_pair
+    # Setup pair_def at (p, a2, b) for fold-back.
+    pdef2_p = forall_elim pdef, p
+    pdef2_pa2 = forall_elim pdef2_p, a2
+    pdef2_pa2b = forall_elim pdef2_pa2, b
+    # Show forall z. (elem(z,p) <-> S1(z, a2) | S2(z, a2, b)).
+    fix z
+    h_z_iff = forall_elim h_memb, z
+    # ===== Forward: elem(z, p) -> S1(z, a2) | S2(z, a2, b) =====
+    h_f_in = assume elem(z, p)
+    h_f_disj = iff_elim_l h_z_iff, h_f_in
+    # case S1(z, a) -> S1(z, a2)
+    h_s1a = assume forall w. (elem(w, z) <-> eq(w, a))
+    fix w
+    h_s1a_w = forall_elim h_s1a, w
+    eie_w = forall_elim eie2, w
+    h_eq_iff = implies_elim eie_w, h_eq
+    h_fw_e = assume elem(w, z)
+    h_fw_ea = iff_elim_l h_s1a_w, h_fw_e
+    h_fw_ea2 = iff_elim_l h_eq_iff, h_fw_ea
+    h_fw_impl = implies_intro h_fw_ea2
+    h_bw_ea2 = assume eq(w, a2)
+    h_bw_ea = iff_elim_r h_eq_iff, h_bw_ea2
+    h_bw_e = iff_elim_r h_s1a_w, h_bw_ea
+    h_bw_impl = implies_intro h_bw_e
+    h_w_iff = iff_intro h_fw_impl, h_bw_impl
+    h_s1a2 = forall_intro h_w_iff
+    let_s2_a2b = let forall w. (elem(w, z) <-> (eq(w, a2) | eq(w, b)))
+    h_disj_s1 = or_intro_l h_s1a2, let_s2_a2b
+    h_case_s1 = implies_intro h_disj_s1
+    # case S2(z, a, b) -> S2(z, a2, b)
+    h_s2ab = assume forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b)))
+    fix w_s2
+    h_s2_w = forall_elim h_s2ab, w_s2
+    eie_w_s2 = forall_elim eie2, w_s2
+    h_eq_iff_s2 = implies_elim eie_w_s2, h_eq
+    h_s2_fw_e = assume elem(w_s2, z)
+    h_s2_fw_disj = iff_elim_l h_s2_w, h_s2_fw_e
+    h_s2_ca = assume eq(w_s2, a)
+    h_s2_ca_a2 = iff_elim_l h_eq_iff_s2, h_s2_ca
+    let_eq_b1 = let eq(w_s2, b)
+    h_s2_ca_disj = or_intro_l h_s2_ca_a2, let_eq_b1
+    h_s2_ca_close = implies_intro h_s2_ca_disj
+    h_s2_cb = assume eq(w_s2, b)
+    let_eq_a2_1 = let eq(w_s2, a2)
+    h_s2_cb_disj = or_intro_r let_eq_a2_1, h_s2_cb
+    h_s2_cb_close = implies_intro h_s2_cb_disj
+    h_s2_fw_disj_a2 = or_elim h_s2_fw_disj, h_s2_ca_close, h_s2_cb_close
+    h_s2_fw_impl = implies_intro h_s2_fw_disj_a2
+    h_s2_bw_disj = assume eq(w_s2, a2) | eq(w_s2, b)
+    h_s2_bca = assume eq(w_s2, a2)
+    h_s2_bca_a = iff_elim_r h_eq_iff_s2, h_s2_bca
+    let_eq_b2 = let eq(w_s2, b)
+    h_s2_bca_disj = or_intro_l h_s2_bca_a, let_eq_b2
+    h_s2_bca_close = implies_intro h_s2_bca_disj
+    h_s2_bcb = assume eq(w_s2, b)
+    let_eq_a_1 = let eq(w_s2, a)
+    h_s2_bcb_disj = or_intro_r let_eq_a_1, h_s2_bcb
+    h_s2_bcb_close = implies_intro h_s2_bcb_disj
+    h_s2_bw_disj_a = or_elim h_s2_bw_disj, h_s2_bca_close, h_s2_bcb_close
+    h_s2_bw_e = iff_elim_r h_s2_w, h_s2_bw_disj_a
+    h_s2_bw_impl = implies_intro h_s2_bw_e
+    h_s2_w_iff = iff_intro h_s2_fw_impl, h_s2_bw_impl
+    h_s2a2b = forall_intro h_s2_w_iff
+    let_s1_a2 = let forall w. (elem(w, z) <-> eq(w, a2))
+    h_disj_s2 = or_intro_r let_s1_a2, h_s2a2b
+    h_case_s2 = implies_intro h_disj_s2
+    h_f_disj_a2b = or_elim h_f_disj, h_case_s1, h_case_s2
+    h_fwd_impl = implies_intro h_f_disj_a2b
+    # ===== Backward: S1(z, a2) | S2(z, a2, b) -> elem(z, p) =====
+    h_b_disj_a2b = assume (forall w. (elem(w, z) <-> eq(w, a2))) | (forall w. (elem(w, z) <-> (eq(w, a2) | eq(w, b))))
+    # case S1(z, a2) -> S1(z, a)
+    h_bs1a2 = assume forall w. (elem(w, z) <-> eq(w, a2))
+    fix wb
+    h_bs1_w = forall_elim h_bs1a2, wb
+    eie_wb = forall_elim eie2, wb
+    h_eq_iff_b1 = implies_elim eie_wb, h_eq
+    h_bf_e = assume elem(wb, z)
+    h_bf_ea2 = iff_elim_l h_bs1_w, h_bf_e
+    h_bf_ea = iff_elim_r h_eq_iff_b1, h_bf_ea2
+    h_bf_impl = implies_intro h_bf_ea
+    h_bb_ea = assume eq(wb, a)
+    h_bb_ea2 = iff_elim_l h_eq_iff_b1, h_bb_ea
+    h_bb_e = iff_elim_r h_bs1_w, h_bb_ea2
+    h_bb_impl = implies_intro h_bb_e
+    h_b_w_iff = iff_intro h_bf_impl, h_bb_impl
+    h_bs1a = forall_intro h_b_w_iff
+    let_bs2 = let forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b)))
+    h_b_disj_s1 = or_intro_l h_bs1a, let_bs2
+    h_b_case_s1 = implies_intro h_b_disj_s1
+    # case S2(z, a2, b) -> S2(z, a, b)
+    h_bs2 = assume forall w. (elem(w, z) <-> (eq(w, a2) | eq(w, b)))
+    fix wb_s2
+    h_bs2_w = forall_elim h_bs2, wb_s2
+    eie_wb_s2 = forall_elim eie2, wb_s2
+    h_eq_iff_b2 = implies_elim eie_wb_s2, h_eq
+    h_bs2_fw_e = assume elem(wb_s2, z)
+    h_bs2_fw_disj = iff_elim_l h_bs2_w, h_bs2_fw_e
+    h_bs2_ca = assume eq(wb_s2, a2)
+    h_bs2_ca_a = iff_elim_r h_eq_iff_b2, h_bs2_ca
+    let_eq_wbs2_b1 = let eq(wb_s2, b)
+    h_bs2_ca_disj = or_intro_l h_bs2_ca_a, let_eq_wbs2_b1
+    h_bs2_ca_close = implies_intro h_bs2_ca_disj
+    h_bs2_cb = assume eq(wb_s2, b)
+    let_eq_wbs2_a1 = let eq(wb_s2, a)
+    h_bs2_cb_disj = or_intro_r let_eq_wbs2_a1, h_bs2_cb
+    h_bs2_cb_close = implies_intro h_bs2_cb_disj
+    h_bs2_fw_disj_a = or_elim h_bs2_fw_disj, h_bs2_ca_close, h_bs2_cb_close
+    h_bs2_fw_impl = implies_intro h_bs2_fw_disj_a
+    h_bs2_bw_disj = assume eq(wb_s2, a) | eq(wb_s2, b)
+    h_bs2_bca = assume eq(wb_s2, a)
+    h_bs2_bca_a2 = iff_elim_l h_eq_iff_b2, h_bs2_bca
+    let_eq_wbs2_b2 = let eq(wb_s2, b)
+    h_bs2_bca_disj = or_intro_l h_bs2_bca_a2, let_eq_wbs2_b2
+    h_bs2_bca_close = implies_intro h_bs2_bca_disj
+    h_bs2_bcb = assume eq(wb_s2, b)
+    let_eq_wbs2_a2 = let eq(wb_s2, a2)
+    h_bs2_bcb_disj = or_intro_r let_eq_wbs2_a2, h_bs2_bcb
+    h_bs2_bcb_close = implies_intro h_bs2_bcb_disj
+    h_bs2_bw_disj_a2 = or_elim h_bs2_bw_disj, h_bs2_bca_close, h_bs2_bcb_close
+    h_bs2_bw_e = iff_elim_r h_bs2_w, h_bs2_bw_disj_a2
+    h_bs2_bw_impl = implies_intro h_bs2_bw_e
+    h_bs2_w_iff = iff_intro h_bs2_fw_impl, h_bs2_bw_impl
+    h_bs2ab = forall_intro h_bs2_w_iff
+    let_bs1 = let forall w. (elem(w, z) <-> eq(w, a))
+    h_b_disj_s2 = or_intro_r let_bs1, h_bs2ab
+    h_b_case_s2 = implies_intro h_b_disj_s2
+    h_b_disj_ab = or_elim h_b_disj_a2b, h_b_case_s1, h_b_case_s2
+    h_bwd_in = iff_elim_r h_z_iff, h_b_disj_ab
+    h_bwd_impl = implies_intro h_bwd_in
+    # Combine into elem(z, p) <-> S1(z, a2) | S2(z, a2, b).
+    h_z_iff_a2 = iff_intro h_fwd_impl, h_bwd_impl
+    h_memb_a2 = forall_intro h_z_iff_a2
+    # Fold via pair_def at (p, a2, b).
+    h_result = iff_elim_r pdef2_pa2b, h_memb_a2
+    h_impl = implies_intro h_result
+    h4 = forall_intro h_impl
+    h3 = forall_intro h4
+    h2 = forall_intro h3
+    h1 = forall_intro h2
+    qed h1
+
+# Proof of pair_eq_b: substituting equal second components in a pair.
+# Strategy mirrors pair_eq_a, but the substitution only enters the S2 clause
+# of pair_def (S1 doesn't mention `b`); the S1 disjunct is unchanged.
+proof pair_eq_b:
+    fix p
+    fix a
+    fix b
+    fix b2
+    h = assume eq(b, b2) & pair(p, a, b)
+    h_eq = and_elim_l h
+    h_pair = and_elim_r h
+    pdef = use pair_def
+    eie = use eq_iff_eq
+    eie1 = forall_elim eie, b
+    eie2 = forall_elim eie1, b2
+    pdef_p = forall_elim pdef, p
+    pdef_pa = forall_elim pdef_p, a
+    pdef_pab = forall_elim pdef_pa, b
+    h_memb = iff_elim_l pdef_pab, h_pair
+    pdef2_p = forall_elim pdef, p
+    pdef2_pa = forall_elim pdef2_p, a
+    pdef2_pab2 = forall_elim pdef2_pa, b2
+    fix z
+    h_z_iff = forall_elim h_memb, z
+    # ===== Forward: elem(z, p) -> S1(z, a) | S2(z, a, b2) =====
+    h_f_in = assume elem(z, p)
+    h_f_disj = iff_elim_l h_z_iff, h_f_in
+    # case S1(z, a) -> S1(z, a) (unchanged; just rebuild as the LEFT disjunct)
+    h_s1a = assume forall w. (elem(w, z) <-> eq(w, a))
+    let_s2_ab2 = let forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b2)))
+    h_disj_s1 = or_intro_l h_s1a, let_s2_ab2
+    h_case_s1 = implies_intro h_disj_s1
+    # case S2(z, a, b) -> S2(z, a, b2)
+    h_s2ab = assume forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b)))
+    fix w_s2
+    h_s2_w = forall_elim h_s2ab, w_s2
+    eie_w_s2 = forall_elim eie2, w_s2
+    h_eq_iff_s2 = implies_elim eie_w_s2, h_eq
+    h_s2_fw_e = assume elem(w_s2, z)
+    h_s2_fw_disj = iff_elim_l h_s2_w, h_s2_fw_e
+    h_s2_ca = assume eq(w_s2, a)
+    let_eq_b2_1 = let eq(w_s2, b2)
+    h_s2_ca_disj = or_intro_l h_s2_ca, let_eq_b2_1
+    h_s2_ca_close = implies_intro h_s2_ca_disj
+    h_s2_cb = assume eq(w_s2, b)
+    h_s2_cb_b2 = iff_elim_l h_eq_iff_s2, h_s2_cb
+    let_eq_a_1 = let eq(w_s2, a)
+    h_s2_cb_disj = or_intro_r let_eq_a_1, h_s2_cb_b2
+    h_s2_cb_close = implies_intro h_s2_cb_disj
+    h_s2_fw_disj_b2 = or_elim h_s2_fw_disj, h_s2_ca_close, h_s2_cb_close
+    h_s2_fw_impl = implies_intro h_s2_fw_disj_b2
+    h_s2_bw_disj = assume eq(w_s2, a) | eq(w_s2, b2)
+    h_s2_bca = assume eq(w_s2, a)
+    let_eq_b_1 = let eq(w_s2, b)
+    h_s2_bca_disj = or_intro_l h_s2_bca, let_eq_b_1
+    h_s2_bca_close = implies_intro h_s2_bca_disj
+    h_s2_bcb = assume eq(w_s2, b2)
+    h_s2_bcb_b = iff_elim_r h_eq_iff_s2, h_s2_bcb
+    let_eq_a_2 = let eq(w_s2, a)
+    h_s2_bcb_disj = or_intro_r let_eq_a_2, h_s2_bcb_b
+    h_s2_bcb_close = implies_intro h_s2_bcb_disj
+    h_s2_bw_disj_b = or_elim h_s2_bw_disj, h_s2_bca_close, h_s2_bcb_close
+    h_s2_bw_e = iff_elim_r h_s2_w, h_s2_bw_disj_b
+    h_s2_bw_impl = implies_intro h_s2_bw_e
+    h_s2_w_iff = iff_intro h_s2_fw_impl, h_s2_bw_impl
+    h_s2ab2 = forall_intro h_s2_w_iff
+    let_s1_a = let forall w. (elem(w, z) <-> eq(w, a))
+    h_disj_s2 = or_intro_r let_s1_a, h_s2ab2
+    h_case_s2 = implies_intro h_disj_s2
+    h_f_disj_ab2 = or_elim h_f_disj, h_case_s1, h_case_s2
+    h_fwd_impl = implies_intro h_f_disj_ab2
+    # ===== Backward: S1(z, a) | S2(z, a, b2) -> elem(z, p) =====
+    h_b_disj_ab2 = assume (forall w. (elem(w, z) <-> eq(w, a))) | (forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b2))))
+    # case S1(z, a) -> S1(z, a) (unchanged)
+    h_bs1 = assume forall w. (elem(w, z) <-> eq(w, a))
+    let_bs2 = let forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b)))
+    h_b_disj_s1 = or_intro_l h_bs1, let_bs2
+    h_b_case_s1 = implies_intro h_b_disj_s1
+    # case S2(z, a, b2) -> S2(z, a, b)
+    h_bs2 = assume forall w. (elem(w, z) <-> (eq(w, a) | eq(w, b2)))
+    fix wb_s2
+    h_bs2_w = forall_elim h_bs2, wb_s2
+    eie_wb_s2 = forall_elim eie2, wb_s2
+    h_eq_iff_b2 = implies_elim eie_wb_s2, h_eq
+    h_bs2_fw_e = assume elem(wb_s2, z)
+    h_bs2_fw_disj = iff_elim_l h_bs2_w, h_bs2_fw_e
+    h_bs2_ca = assume eq(wb_s2, a)
+    let_eq_wbs2_b1 = let eq(wb_s2, b)
+    h_bs2_ca_disj = or_intro_l h_bs2_ca, let_eq_wbs2_b1
+    h_bs2_ca_close = implies_intro h_bs2_ca_disj
+    h_bs2_cb = assume eq(wb_s2, b2)
+    h_bs2_cb_b = iff_elim_r h_eq_iff_b2, h_bs2_cb
+    let_eq_wbs2_a1 = let eq(wb_s2, a)
+    h_bs2_cb_disj = or_intro_r let_eq_wbs2_a1, h_bs2_cb_b
+    h_bs2_cb_close = implies_intro h_bs2_cb_disj
+    h_bs2_fw_disj_b = or_elim h_bs2_fw_disj, h_bs2_ca_close, h_bs2_cb_close
+    h_bs2_fw_impl = implies_intro h_bs2_fw_disj_b
+    h_bs2_bw_disj = assume eq(wb_s2, a) | eq(wb_s2, b)
+    h_bs2_bca = assume eq(wb_s2, a)
+    let_eq_wbs2_b2 = let eq(wb_s2, b2)
+    h_bs2_bca_disj = or_intro_l h_bs2_bca, let_eq_wbs2_b2
+    h_bs2_bca_close = implies_intro h_bs2_bca_disj
+    h_bs2_bcb = assume eq(wb_s2, b)
+    h_bs2_bcb_b2 = iff_elim_l h_eq_iff_b2, h_bs2_bcb
+    let_eq_wbs2_a2 = let eq(wb_s2, a)
+    h_bs2_bcb_disj = or_intro_r let_eq_wbs2_a2, h_bs2_bcb_b2
+    h_bs2_bcb_close = implies_intro h_bs2_bcb_disj
+    h_bs2_bw_disj_b2 = or_elim h_bs2_bw_disj, h_bs2_bca_close, h_bs2_bcb_close
+    h_bs2_bw_e = iff_elim_r h_bs2_w, h_bs2_bw_disj_b2
+    h_bs2_bw_impl = implies_intro h_bs2_bw_e
+    h_bs2_w_iff = iff_intro h_bs2_fw_impl, h_bs2_bw_impl
+    h_bs2ab = forall_intro h_bs2_w_iff
+    let_bs1_alt = let forall w. (elem(w, z) <-> eq(w, a))
+    h_b_disj_s2 = or_intro_r let_bs1_alt, h_bs2ab
+    h_b_case_s2 = implies_intro h_b_disj_s2
+    h_b_disj_ab = or_elim h_b_disj_ab2, h_b_case_s1, h_b_case_s2
+    h_bwd_in = iff_elim_r h_z_iff, h_b_disj_ab
+    h_bwd_impl = implies_intro h_bwd_in
+    h_z_iff_b2 = iff_intro h_fwd_impl, h_bwd_impl
+    h_memb_b2 = forall_intro h_z_iff_b2
+    h_result = iff_elim_r pdef2_pab2, h_memb_b2
+    h_impl = implies_intro h_result
     h4 = forall_intro h_impl
     h3 = forall_intro h4
     h2 = forall_intro h3

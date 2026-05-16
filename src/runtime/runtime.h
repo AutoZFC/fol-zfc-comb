@@ -1,10 +1,10 @@
 #pragma once
 
-#include "../core/formula.h"
-#include "../proof/nd/stack.h"
-#include "../parser/parser.h"
-#include "../proof/runner.h"
-#include "../util/error.h"
+#include "src/core/formula.h"
+#include "src/proof/nd/stack.h"
+#include "src/parser/parser.h"
+#include "src/proof/runner.h"
+#include "src/util/error.h"
 
 #include <string>
 #include <string_view>

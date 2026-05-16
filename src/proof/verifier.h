@@ -2,24 +2,32 @@
 
 // Verifier — abstract interface for per-system proof checkers.
 //
-// Each concrete verifier (NDVerifier in Phase 3, LKRVerifier in Phase 5)
-// is an interpreter of a typed instruction stream. It owns no state across
-// invocations: every verify() call constructs its own private Session.
+// Each concrete verifier consumes a Proof artefact and reports a polynomial-
+// time verdict on whether it witnesses validity of `goal_formula`. The
+// artefact's presentation is system-dependent:
+//   * NDVerifier and LKRVerifier interpret typed instruction streams.
+//   * CombVerifier checks structural conditions on a graph object
+//     (a fonet + fograph + skew bifibration) — no instructions to interpret.
+// The interface is agnostic to that choice: a proof is information that
+// the verifier validates in polynomial time.
+//
+// State: each verify() call constructs its own private state; verifiers own
+// nothing across invocations beyond the last_used_names cache.
 //
 // Soundness contract:
 //   * The verifier must not register theorems or modify GlobalContext's
-//     named registries. The dispatcher (ProofRunner, Phase 4) is the only
-//     site of theorem registration and uses the dispatcher-resolved
-//     SentenceHandle for the claim_name.
-//   * verify() returns Ok if and only if the proof's instructions, executed
-//     in order, derive the goal_formula under the system's success
-//     predicate Φ. On failure, returns an Error with diagnostic context.
+//     named registries. The dispatcher (ProofRunner) is the only site of
+//     theorem registration and uses the dispatcher-resolved SentenceHandle
+//     for the claim_name.
+//   * verify() returns Ok if and only if the proof's data witnesses validity
+//     of goal_formula under the system's success predicate Φ. On failure,
+//     returns an Error with diagnostic context.
 
 #include "ir.h"
 #include "proof.h"
 
-#include "../core/formula.h"
-#include "../util/error.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
 
 #include <string>
 #include <unordered_set>

@@ -1,5 +1,5 @@
-#include "../library/library.h"
-#include "../runtime/runtime.h"
+#include "src/library/library.h"
+#include "src/runtime/runtime.h"
 #include "src/util/profiler.h"
 
 #include <algorithm>

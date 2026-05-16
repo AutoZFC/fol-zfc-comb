@@ -16,17 +16,33 @@ cc_library(
     ],
 )
 
-# proof_value: the system-tagged Proof umbrella plus NDProgram/LKRProgram
-# typedefs. Pulls in the per-system ops headers so the std::variant has
-# complete types.
+# proof_value: the system-tagged Proof umbrella plus per-system body
+# typedefs (NDProgram, LKRProgram, CombProof). Pulls in each per-system
+# body header so the std::variant has complete alternatives.
 cc_library(
     name = "proof_value",
     hdrs = ["proof.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":ir",
+        "//src/proof/comb:comb_proof",
         "//src/proof/lkr:ops",
         "//src/proof/nd:ops",
+    ],
+)
+
+# Schema-instantiation resolver — shared between LKR verifier and the
+# ND→LKR translator (and future passes that consume SchemaInstData).
+cc_library(
+    name = "schema_resolve",
+    srcs = ["schema_resolve.cpp"],
+    hdrs = ["schema_resolve.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ir",
+        "//src/core:formula",
+        "//src/parser",
+        "//src/util:error",
     ],
 )
 
@@ -54,6 +70,7 @@ cc_library(
         ":proof_value",
         ":verifier",
         "//src/core:formula",
+        "//src/proof/comb:verifier",
         "//src/proof/lkr:verifier",
         "//src/proof/nd:verifier",
         "//src/util:error",

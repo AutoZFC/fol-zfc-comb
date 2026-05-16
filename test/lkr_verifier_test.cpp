@@ -77,14 +77,14 @@ void test_axiom_self_implication() {
 }
 
 // =========================================================================
-// And rule: prove ⊢ (P ∧ Q) → (Q ∧ P).
+// And rule (multiplicative): prove ⊢ (P ∧ Q) → (Q ∧ P).
 // NNF: (¬P ∨ ¬Q) ∨ (Q ∧ P).
 // Or(0) → [(¬P ∨ ¬Q), (Q ∧ P)].
 // Or(0) on (¬P ∨ ¬Q) replaces idx 0 with ¬P and appends ¬Q at the end:
 //   → [¬P, (Q ∧ P), ¬Q].
-// And(1) splits on (Q ∧ P):
-//   LEFT  [¬P, Q, ¬Q]  — AxiomLit(1, 2) on (Q, ¬Q).
-//   RIGHT [¬P, P, ¬Q]  — AxiomLit(0, 1) on (¬P, P).
+// And(principal=1, left_partition={2}) splits on (Q ∧ P):
+//   LEFT  = entries[2] then φ=Q   = [¬Q, Q]   — AxiomLit(0, 1).
+//   RIGHT = entries[0] then θ=P   = [¬P, P]   — AxiomLit(0, 1).
 // =========================================================================
 void test_and_commute() {
     Runtime rt;
@@ -97,8 +97,8 @@ void test_and_commute() {
     prog.claim_name = "and_commute";
     prog.instrs.push_back(lkr::Or{{}, 0});
     prog.instrs.push_back(lkr::Or{{}, 0});
-    prog.instrs.push_back(lkr::And{{}, 1});
-    prog.instrs.push_back(lkr::AxiomLit{{}, 1, 2});
+    prog.instrs.push_back(lkr::And{{}, 1, {2}});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
     prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     Proof p{System::LKR, std::move(prog)};
@@ -107,17 +107,15 @@ void test_and_commute() {
 }
 
 // =========================================================================
-// Modus ponens packed: ⊢ ((P → Q) ∧ P) → Q.
+// Modus ponens packed (multiplicative): ⊢ ((P → Q) ∧ P) → Q.
 // NNF builds `Or(Or(And(P, ¬Q), ¬P), Q)` (left-associated by the NNF
 // implementation's bottom-up assembly).
 // Initial: [Or(Or(And(P, ¬Q), ¬P), Q)].
-// Or(0): replaces idx 0 with phi=`Or(And(P, ¬Q), ¬P)`; appends psi=`Q`.
-//        → [Or(And(P, ¬Q), ¬P), Q].
-// Or(0): replaces idx 0 with phi=`And(P, ¬Q)`; appends psi=`¬P`.
-//        → [And(P, ¬Q), Q, ¬P].
-// And(0) splits And(P, ¬Q):
-//   LEFT  [P, Q, ¬P]   — AxiomLit(0, 2) on (P, ¬P).
-//   RIGHT [¬Q, Q, ¬P]  — AxiomLit(0, 1) on (¬Q, Q).
+// Or(0): → [Or(And(P, ¬Q), ¬P), Q].
+// Or(0): → [And(P, ¬Q), Q, ¬P].
+// And(principal=0, left_partition={2}) splits And(P, ¬Q):
+//   LEFT  = entries[2] then P  = [¬P, P]  — AxiomLit(0, 1).
+//   RIGHT = entries[1] then ¬Q = [Q, ¬Q]  — AxiomLit(0, 1).
 // =========================================================================
 void test_implies_packed() {
     Runtime rt;
@@ -130,8 +128,8 @@ void test_implies_packed() {
     prog.claim_name = "modus_ponens_packed";
     prog.instrs.push_back(lkr::Or{{}, 0});
     prog.instrs.push_back(lkr::Or{{}, 0});
-    prog.instrs.push_back(lkr::And{{}, 0});
-    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});
+    prog.instrs.push_back(lkr::And{{}, 0, {2}});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
     prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     Proof p{System::LKR, std::move(prog)};
@@ -156,10 +154,10 @@ void test_forall_round_trip() {
 
     LKRProgram prog;
     prog.claim_name = "forall_round_trip";
-    prog.instrs.push_back(lkr::Or{{}, 0});                 // instr 0
-    prog.instrs.push_back(lkr::Forall{{}, 1});             // instr 1: binds TermRef{1}
-    prog.instrs.push_back(lkr::Exists{{}, 0, TermRef{1}}); // instr 2
-    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});        // instr 3
+    prog.instrs.push_back(lkr::Or{{}, 0});                    // instr 0
+    prog.instrs.push_back(lkr::Forall{{}, 1, /*eigen=*/0});   // instr 1: binds TermRef{1} → f_0
+    prog.instrs.push_back(lkr::Exists{{}, 0, TermRef{1}});    // instr 2
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});           // instr 3
 
     Proof p{System::LKR, std::move(prog)};
     lkr::LKRVerifier v;
@@ -187,8 +185,8 @@ void test_axiom_lit_rejects_non_duals() {
 }
 
 // =========================================================================
-// Cross-system theorem reuse: prove a theorem in ND, then UseTheorem from
-// LKR. UseTheorem closes if some entry equals NNF(theorem).
+// Cross-system theorem reuse: prove a theorem in ND, then close from LKR
+// via CloseByLemma. The op closes if some entry equals NNF(theorem).
 // =========================================================================
 void test_cross_system_use_theorem() {
     Runtime rt;
@@ -214,7 +212,7 @@ void test_cross_system_use_theorem() {
     FormulaHandle goal = thm.value().get().root();
     LKRProgram prog;
     prog.claim_name = "lkr_uses_my_thm";
-    prog.instrs.push_back(lkr::UseTheorem{{}, AxiomRef{"my_thm"}});
+    prog.instrs.push_back(lkr::CloseByLemma{{}, AxiomRef{"my_thm"}, {}});
 
     Proof p{System::LKR, std::move(prog)};
     lkr::LKRVerifier v;
@@ -256,6 +254,292 @@ void test_cut() {
     // RIGHT = [(¬P ∨ P), ¬P]. Or(0) → [¬P, ¬P, P]. AxiomLit(0, 2).
     prog.instrs.push_back(lkr::Or{{}, 0});
     prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// One: ⊢ ¬⊥ closes via the truth-constant rule. Build the goal directly
+// from the builder so it's exactly ¬⊥ (parsing keywords for ⊤/⊥ aren't
+// part of the surface syntax).
+// =========================================================================
+void test_one_closes_truth_literal() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle bot     = b.make_bottom();
+    FormulaHandle not_bot = b.make_not(bot);
+
+    LKRProgram prog;
+    prog.claim_name = "one_closes";
+    prog.instrs.push_back(lkr::One{{}, /*idx=*/0});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, not_bot, p));
+}
+
+// =========================================================================
+// One rejection: a non-truth-literal entry must not close.
+// Goal P → P (NNF: ¬P ∨ P) — applying One(0) on the disjunction is bogus.
+// =========================================================================
+void test_one_rejects_non_truth_literal() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "one_reject";
+    prog.instrs.push_back(lkr::One{{}, 0});  // entry is ¬P ∨ P, not ¬⊥
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Exchange: swap entries before AxiomLit. Goal P → P (NNF ¬P ∨ P).
+// Or(0) → [¬P, P]. Exchange(0,1) → [P, ¬P]. AxiomLit(0,1) closes.
+// =========================================================================
+void test_exchange_swaps_entries() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "exchange_swap";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Exchange{{}, 0, 1});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Exchange with i==j is a no-op (must not error and must not change state).
+// =========================================================================
+void test_exchange_self_is_noop() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "exchange_noop";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Exchange{{}, 1, 1});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Exchange OOB rejection.
+// =========================================================================
+void test_exchange_rejects_oob() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "exchange_oob";
+    prog.instrs.push_back(lkr::Or{{}, 0});            // [¬P, P]
+    prog.instrs.push_back(lkr::Exchange{{}, 0, 5});   // 5 is OOB
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Weakening appends a new formula to the sequent. Goal P → P (NNF ¬P ∨ P).
+// Or(0) → [¬P, P]. Weakening(Q) → [¬P, P, Q]. AxiomLit(0,1) still closes.
+// =========================================================================
+void test_weakening_appends() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaHandle Q    = parse_root(ctx, "Q");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Weakening{{}, Q});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Contraction merges two equal entries. Goal P → P (NNF ¬P ∨ P).
+// Or(0) → [¬P, P]. Weakening(P) → [¬P, P, P]. Contraction(1,2) → [¬P, P].
+// AxiomLit(0,1) closes.
+// =========================================================================
+void test_contraction_merges_duplicates() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaHandle P    = parse_root(ctx, "P");
+
+    LKRProgram prog;
+    prog.claim_name = "contraction_merge";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Weakening{{}, P});
+    prog.instrs.push_back(lkr::Contraction{{}, 1, 2});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Contraction rejects when the two entries differ. After Or(0) the sequent
+// is [¬P, P]; entries[0] != entries[1], so Contraction(0,1) must fail.
+// =========================================================================
+void test_contraction_rejects_unequal() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "contraction_reject";
+    prog.instrs.push_back(lkr::Or{{}, 0});             // [¬P, P]
+    prog.instrs.push_back(lkr::Contraction{{}, 0, 1}); // unequal
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Contraction rejects when i == j (the rule requires two distinct indices).
+// =========================================================================
+void test_contraction_rejects_same_index() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+
+    LKRProgram prog;
+    prog.claim_name = "contraction_same_index";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Contraction{{}, 0, 0});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Forall freshness rejection: if the eigenvariable already occurs free in
+// another entry, the rule must fail. We can't construct that scenario from
+// the surface syntax cleanly, but we can exercise the order-of-validation
+// fix by binding eigen=0 twice in a row over the same goal — the second
+// Forall sees an entry containing f_0 (the body instantiated by the first
+// Forall) and must reject.
+//
+// Goal: (∀x. P(x)) ∨ (∀y. Q(y))  (already a positive disjunction; no NNF
+// flip needed because all subformulas are positive).
+//
+// Initial: [(∀x.P) ∨ (∀y.Q)].
+// Or(0) → [∀x.P, ∀y.Q].
+// Forall(0, eigen=0) → [P(f_0), ∀y.Q].
+// Forall(1, eigen=0) → tries to use f_0 again, but f_0 is free in entry 0
+// (P(f_0)), so freshness fails.
+// =========================================================================
+void test_forall_eigen_freshness_rejection() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "(forall x. P(x)) | (forall y. Q(y))");
+
+    LKRProgram prog;
+    prog.claim_name = "forall_freshness";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});
+    prog.instrs.push_back(lkr::Forall{{}, 1, /*eigen=*/0});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// CloseByLemma with arity-N schema bindings: prove an arity-1 schema in
+// ND, then close an LKR goal via CloseByLemma supplying a lambda binding.
+// schema_resolve must substitute P(x) → eq(x, x) at every site in the
+// schema body before the close-formula is matched against the goal.
+// =========================================================================
+void test_close_by_lemma_arity_n_schema() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        schema unary_self_impl [P(1)]: forall x. (P(x) -> P(x))
+
+        proof unary_self_impl:
+            fix x
+            h_assume = assume P(x)
+            h_impl = implies_intro h_assume
+            h_all = forall_intro h_impl
+            qed h_all
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    EXPECT_OK(rt.execute_all_proofs(parsed.value()));
+
+    auto& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "forall x. (eq(x, x) -> eq(x, x))");
+
+    // Build a SchemaBinding payload manually: bind P to \y. eq(y, y).
+    // We can't easily construct an AST without going through the parser,
+    // so we parse a helper sentence and steal its formula AST.
+    auto helper = parse_with_proofs(
+        R"(claim _h: forall x. (P -> P)
+           proof _h:
+               h = schema_inst unary_self_impl { P: \y. eq(y, y) }
+               qed h
+        )",
+        ctx);
+    if (helper.proofs.empty() || helper.proofs[0].steps.empty()) {
+        ++g_failed; return;
+    }
+    const auto& step0 = helper.proofs[0].steps[0];
+    if (step0.kind != ParsedProofStep::Kind::SchemaInst ||
+        step0.schema_bindings.size() != 1) {
+        ++g_failed; return;
+    }
+
+    LKRProgram prog;
+    prog.claim_name = "lkr_arity_n_close";
+    prog.instrs.push_back(lkr::CloseByLemma{
+        {}, AxiomRef{"unary_self_impl"}, step0.schema_bindings});
 
     Proof p{System::LKR, std::move(prog)};
     lkr::LKRVerifier v;
@@ -313,6 +597,17 @@ int main() {
     test_axiom_lit_rejects_non_duals();
     test_cross_system_use_theorem();
     test_cut();
+    test_one_closes_truth_literal();
+    test_one_rejects_non_truth_literal();
+    test_exchange_swaps_entries();
+    test_exchange_self_is_noop();
+    test_exchange_rejects_oob();
+    test_weakening_appends();
+    test_contraction_merges_duplicates();
+    test_contraction_rejects_unequal();
+    test_contraction_rejects_same_index();
+    test_forall_eigen_freshness_rejection();
+    test_close_by_lemma_arity_n_schema();
     test_unfinished_proof_rejected();
     test_dispatcher_routes_lkr();
 

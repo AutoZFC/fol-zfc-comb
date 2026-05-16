@@ -45,10 +45,22 @@ proof rel_elem_eq:
     # h_wit: pair(w, a, b) & elem(w, f)
     h_pair_ab = and_elim_l h_wit
     h_elem_wf = and_elim_r h_wit
-    # eq_subst: eq(a, c), pair(w, a, b) => pair(w, c, b)
-    h_pair_cb = eq_subst h_eq_ac, h_pair_ab
-    # eq_subst: eq(b, d), pair(w, c, b) => pair(w, c, d)
-    h_pair_cd = eq_subst h_eq_bd, h_pair_cb
+    # pair_eq_a: eq(a, c) & pair(w, a, b) -> pair(w, c, b)
+    pea = use pair_eq_a
+    pea1 = forall_elim pea, w
+    pea2 = forall_elim pea1, a
+    pea3 = forall_elim pea2, c
+    pea4 = forall_elim pea3, b
+    h_pea_conj = and_intro h_eq_ac, h_pair_ab
+    h_pair_cb = implies_elim pea4, h_pea_conj
+    # pair_eq_b: eq(b, d) & pair(w, c, b) -> pair(w, c, d)
+    peb = use pair_eq_b
+    peb1 = forall_elim peb, w
+    peb2 = forall_elim peb1, c
+    peb3 = forall_elim peb2, b
+    peb4 = forall_elim peb3, d
+    h_peb_conj = and_intro h_eq_bd, h_pair_cb
+    h_pair_cd = implies_elim peb4, h_peb_conj
     # Rebuild: pair(w, c, d) & elem(w, f)
     h_conj = and_intro h_pair_cd, h_elem_wf
     # exists_intro to get exists p. (pair(p, c, d) & elem(p, f))

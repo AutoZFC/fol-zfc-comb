@@ -3,8 +3,37 @@
 #             eq(x, y) means x equals y
 
 # 1. Extensionality (definition of equality)
-# Two sets are equal iff they have the same elements
+# Two sets are equal iff they have the same elements.
+# This says: x = y iff x and y have the same members. Together with
+# `elem_subst` below, it fully axiomatizes equality for the {eq, elem}
+# signature in pure FOL (i.e., without an `eq_subst` rule built into the
+# calculus).
+#
+# Substitution coverage. Extensionality lets us substitute into `elem`'s
+# *second* argument — from eq(s, t) and elem(x, s), derive elem(x, t)
+# (proof: forall_elim extensionality at (s, t), iff_elim_l on the eq, then
+# iff_elim_l on the resulting forall-of-iff at the witness x). Substitution
+# into `elem`'s *first* argument is NOT derivable from extensionality
+# alone — that requires the next axiom.
 axiom extensionality: forall x. forall y. (eq(x, y) <-> forall z. (elem(z, x) <-> elem(z, y)))
+
+# 1b. Element-position substitution
+# If x = y, then x and y have the same memberships.
+#
+# This is the half of equality that extensionality does not cover.
+# Extensionality (axiom 1) handles the *set* position of `elem`; this
+# handles the *element* position. Together with extensionality, the two
+# axioms suffice to prove every concrete instance of equality
+# substitution in the {eq, elem} signature, removing the need for
+# `eq_subst` as a primitive proof rule.
+#
+# Why this can't be derived from extensionality: extensionality says
+# eq(x, y) ⟺ ∀z. (elem(z, x) ↔ elem(z, y)) — it relates equality to what
+# x and y *contain*, not to where x and y *are contained*. There is no
+# chain in pure FOL from "x and y have the same elements" to "x and y
+# belong to the same sets"; that's a separate first-order fact about how
+# `elem` interacts with `eq`. Hence the extra axiom.
+axiom elem_subst: forall x. forall y. forall s. (eq(x, y) -> (elem(x, s) <-> elem(y, s)))
 
 # 2. Empty Set
 # There exists a set with no elements

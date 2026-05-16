@@ -1,0 +1,64 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# comb_proof: data types for combinatorial proofs (paper §3-§6).
+#
+# Header-only at present; the explicit Fograph(FormulaHandle) constructor
+# is declared but lives in fograph.cpp once implemented.
+cc_library(
+    name = "comb_proof",
+    srcs = ["fograph.cpp"],
+    hdrs = ["comb_proof.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+    ],
+)
+
+# Cotree: modular decomposition tree of a cograph (paper §3). Used by
+# verify_fonet (2A.3 binder legality, 2C dependency detection) and by
+# the future LKR→Comb translator's scope queries.
+cc_library(
+    name = "cotree",
+    srcs = ["cotree.cpp"],
+    hdrs = ["cotree.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/util:error",
+    ],
+)
+
+# Leap: leap-graph construction + bimatching-freeness via the Lemma
+# 10.21/10.22 decomposition (paper §5, §14). Used by verify_fonet's
+# Phase 2C.
+cc_library(
+    name = "leap",
+    srcs = ["leap.cpp"],
+    hdrs = ["leap.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":comb_proof",
+        ":cotree",
+        "//src/core:formula",
+        "//src/util:error",
+    ],
+)
+
+# CombVerifier: structural checker for CombProof artefacts. Implements
+# the four verification phases (well-formedness, target-equals-G(φ),
+# fonet validity, skew bifibration).
+cc_library(
+    name = "verifier",
+    srcs = ["verifier.cpp"],
+    hdrs = ["verifier.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":comb_proof",
+        ":cotree",
+        ":leap",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof:verifier",
+        "//src/util:error",
+    ],
+)

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../core/formula.h"
-#include "../util/error.h"
+#include "src/core/formula.h"
+#include "src/util/error.h"
 
 #include <cstdint>
 #include <string>

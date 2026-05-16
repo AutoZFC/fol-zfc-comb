@@ -1,8 +1,8 @@
 #include "runtime.h"
-#include "../library/library.h"
-#include "../proof/nd/lowering.h"
-#include "../proof/nd/verifier.h"
-#include "../proof/proof.h"
+#include "src/library/library.h"
+#include "src/proof/nd/lowering.h"
+#include "src/proof/nd/verifier.h"
+#include "src/proof/proof.h"
 
 #include <filesystem>
 #include <fstream>

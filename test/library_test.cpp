@@ -1,7 +1,7 @@
 // Library serialization round-trip tests
 
-#include "../src/library/library.h"
-#include "../src/runtime/runtime.h"
+#include "src/library/library.h"
+#include "src/runtime/runtime.h"
 
 #include <cstdio>
 #include <functional>

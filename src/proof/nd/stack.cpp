@@ -129,7 +129,11 @@ int ProofStack::find_scope_for_term(Term const& t) const {
     if (t.is_description()) {
         return -1;
     }
-    // Fixed vars: find the FixVarScope that introduced it
+    // Fixed vars: find the FixVarScope that introduced it. Linear scan over
+    // the scope stack; in practice scope depth stays small (proofs rarely
+    // nest beyond a handful of fix/assume/exists_elim layers), so an index
+    // map would be overkill. If deep nesting becomes common, switch to a
+    // var_index→scope hash map maintained on push/pop.
     var_index var_idx = t.as_variable();
     for (size_t i = 0; i < scopes.size(); ++i) {
         if (std::holds_alternative<FixVarScope>(scopes[i])) {

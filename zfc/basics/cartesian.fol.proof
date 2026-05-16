@@ -158,10 +158,19 @@ proof rel_elem_in_cart_prod:
     sym_yv1 = forall_elim sym, y
     sym_yv2 = forall_elim sym_yv1, v
     h_eq_vy = implies_elim sym_yv2, h_eq_yv
-    # eq_subst: eq(u, x), elem(u, a) -> elem(x, a)
-    h_xa = eq_subst h_eq_ux, h_ua
-    # eq_subst: eq(v, y), elem(v, b) -> elem(y, b)
-    h_yb = eq_subst h_eq_vy, h_vb
+    # eq_elem_l: eq(u, x) & elem(u, a) -> elem(x, a)
+    eel = use eq_elem_l
+    eel_ux1 = forall_elim eel, u
+    eel_ux2 = forall_elim eel_ux1, x
+    eel_ux3 = forall_elim eel_ux2, a
+    h_xa_conj = and_intro h_eq_ux, h_ua
+    h_xa = implies_elim eel_ux3, h_xa_conj
+    # eq_elem_l: eq(v, y) & elem(v, b) -> elem(y, b)
+    eel_vy1 = forall_elim eel, v
+    eel_vy2 = forall_elim eel_vy1, y
+    eel_vy3 = forall_elim eel_vy2, b
+    h_yb_conj = and_intro h_eq_vy, h_vb
+    h_yb = implies_elim eel_vy3, h_yb_conj
     h_result = and_intro h_xa, h_yb
     # Close three exists scopes (result doesn't contain v, u, or w)
     h_close_v = exists_intro h_result

@@ -1,5 +1,5 @@
 // Simple file verifier: loads and executes proofs from a file
-#include "../src/runtime/runtime.h"
+#include "src/runtime/runtime.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>

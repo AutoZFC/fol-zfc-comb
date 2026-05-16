@@ -289,8 +289,18 @@ proof compose_func_from_to:
     h_fu_f = and_intro h_func_f, h_fam1
     h_fu_f2 = and_intro h_fu_f, h_fam2
     h_m1m2 = implies_elim fu_f4, h_fu_f2
-    # eq_subst: eq(m1,m2), rel_elem(g,m1,b1) -> rel_elem(g,m2,b1)
-    h_gm2b1 = eq_subst h_m1m2, h_gm1b1
+    # rel_elem_eq: rel_elem(g, m1, b1) & eq(m1, m2) & eq(b1, b1) -> rel_elem(g, m2, b1)
+    ree_gm = use rel_elem_eq
+    ree_gm1 = forall_elim ree_gm, g
+    ree_gm2 = forall_elim ree_gm1, m1
+    ree_gm3 = forall_elim ree_gm2, b1
+    ree_gm4 = forall_elim ree_gm3, m2
+    ree_gm5 = forall_elim ree_gm4, b1
+    refl_gm = use eq_refl
+    refl_b1_gm = forall_elim refl_gm, b1
+    h_gm_left = and_intro h_gm1b1, h_m1m2
+    h_gm_conj = and_intro h_gm_left, refl_b1_gm
+    h_gm2b1 = implies_elim ree_gm5, h_gm_conj
     # func_unique(g): rel_elem(g,m2,b1) & rel_elem(g,m2,b2) -> eq(b1,b2)
     fu_g1 = forall_elim fu, g
     fu_g2 = forall_elim fu_g1, m2
@@ -476,8 +486,18 @@ proof compose_injective:
     h_g_conj = and_intro h_inj_g, h_gm1c
     h_g_conj2 = and_intro h_g_conj, h_gm2c
     h_m1m2 = implies_elim ifui_g4, h_g_conj2
-    # eq_subst: eq(m1,m2), rel_elem(f,a,m1) -> rel_elem(f,a,m2)
-    h_fam2 = eq_subst h_m1m2, h_fam1
+    # rel_elem_eq: rel_elem(f, a, m1) & eq(a, a) & eq(m1, m2) -> rel_elem(f, a, m2)
+    ree_fam = use rel_elem_eq
+    ree_fam1 = forall_elim ree_fam, f
+    ree_fam2 = forall_elim ree_fam1, a
+    ree_fam3 = forall_elim ree_fam2, m1
+    ree_fam4 = forall_elim ree_fam3, a
+    ree_fam5 = forall_elim ree_fam4, m2
+    refl_fam = use eq_refl
+    refl_a_fam = forall_elim refl_fam, a
+    h_fam_left = and_intro h_fam1, refl_a_fam
+    h_fam_conj = and_intro h_fam_left, h_m1m2
+    h_fam2 = implies_elim ree_fam5, h_fam_conj
     # injective(f): rel_elem(f,a,m2) & rel_elem(f,b,m2) -> eq(a,b)
     ifui_f1 = forall_elim ifui, f
     ifui_f2 = forall_elim ifui_f1, a

@@ -1,9 +1,10 @@
 #include "runner.h"
 
+#include "comb/verifier.h"
 #include "lkr/verifier.h"
 #include "nd/verifier.h"
 
-#include "../util/error.h"
+#include "src/util/error.h"
 
 #include <string>
 #include <variant>
@@ -12,11 +13,12 @@ namespace logic::proof {
 
 namespace {
 
-// Pull the claim_name out of a Proof regardless of which Program variant
-// it carries. Both NDProgram and LKRProgram have a `claim_name` field.
+// Pull the claim_name out of a Proof regardless of which body variant
+// it carries. NDProgram, LKRProgram, and comb::CombProof all expose
+// .claim_name as a std::string.
 std::string claim_name_of(const Proof& p) {
     return std::visit(
-        [](const auto& prog) -> std::string { return prog.claim_name; },
+        [](const auto& body) -> std::string { return body.claim_name; },
         p.body);
 }
 
@@ -25,6 +27,7 @@ std::string claim_name_of(const Proof& p) {
 ProofRunner::ProofRunner(GlobalContext& ctx) : ctx_(ctx) {
     register_verifier(std::make_unique<nd::NDVerifier>());
     register_verifier(std::make_unique<lkr::LKRVerifier>());
+    register_verifier(std::make_unique<comb::CombVerifier>());
 }
 
 void ProofRunner::register_verifier(std::unique_ptr<Verifier> v) {
