@@ -74,6 +74,38 @@ These two readings coexist without contradiction because they apply to
 different objects (static formulas vs. derivation-internal terms). The
 existing goal-side rewrite already makes this split.
 
+### Why axiom normalization suffices (topological-order argument)
+
+The pipeline processes a `.fol.def`/`.fol.proof` pair in dependency
+order: axioms first, then each claim+proof in the order they appear
+(which must already be a topological order of theorem dependencies,
+since each proof can only `use` axioms or previously-proven
+theorems). Combined with Path D's load-time and translation-time
+normalization, this gives:
+
+| Object class       | When ι is eliminated                                  | When registered in ctx |
+|--------------------|-------------------------------------------------------|------------------------|
+| Axioms             | At load (formula rewrite)                             | After normalization    |
+| Claims             | At load (formula rewrite)                             | After normalization    |
+| Theorems' formulas | At load (same as claims — they're the proof's goal)   | After proof verifies   |
+| Theorems' proofs   | At proof translation (Layer 2 handles user iota_elim) | (proofs aren't stored in ctx) |
+
+The consequence: **by the time any proof runs, every formula it can
+reach via `use` is ι-free.** Axioms have been normalized; earlier
+theorems' formulas are also normalized (their claims were normalized
+at load). Layer 2 therefore never encounters ι via a `use` step —
+only via the user's own `iota_elim` instructions.
+
+This is what makes Path D's surface area small: Layer 2 has exactly
+one source of ι to handle, the user's `iota_elim`. All the
+machinery the previous design needed for axiom-embedded ι becomes
+unnecessary.
+
+The end state: ctx contains exclusively ι-free formulas. The
+translated proof IR is ι-free. LKR and Comb see ι-free input
+throughout. The system as a whole is description-free after
+translation.
+
 ### Invariants
 
 | ID  | Invariant                                                                              | Enforced by                |
