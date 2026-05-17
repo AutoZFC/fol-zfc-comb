@@ -24,16 +24,3 @@ cc_binary(
         "//src/runtime",
     ],
 )
-
-cc_binary(
-    name = "translate_corpus",
-    srcs = ["translate_corpus.cpp"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/parser",
-        "//src/proof/nd:lowering",
-        "//src/proof/nd:ops",
-        "//src/proof/translate:nd_to_lkr",
-        "//src/runtime",
-    ],
-)

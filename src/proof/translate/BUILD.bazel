@@ -1,69 +1,16 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 # Pass<From, To> — IR-to-IR transformation interface.
+#
+# Generic framework piece — not tied to the legacy ND→LKR translator
+# (deleted 2026-05-17 alongside env, emit_close, nd_to_lkr, close_flat,
+# and SPEC.md). Retained for the next translator design.
 cc_library(
     name = "pass",
     hdrs = ["pass.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//src/proof:ir",
-        "//src/util:error",
-    ],
-)
-
-# Env — abstract sequent state for the translator (positions-by-identity).
-# See SPEC.md.
-cc_library(
-    name = "env",
-    srcs = ["env.cpp"],
-    hdrs = ["env.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/core:formula",
-        "//src/util:error",
-    ],
-)
-
-# emit_close — structural dual-decomposition closer over Env.
-cc_library(
-    name = "emit_close",
-    srcs = ["emit_close.cpp"],
-    hdrs = ["emit_close.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":env",
-        "//src/core:formula",
-        "//src/proof:ir",
-        "//src/proof/lkr:literal",
-        "//src/proof/lkr:ops",
-        "//src/util:error",
-    ],
-)
-
-# NDtoLKR translator (positions-by-identity via Env; emit_close).
-# Split into two translation units:
-#   - nd_to_lkr.cpp: Phase A (decompose, formulas, deps) + Phase B
-#                    orchestration (translate_block / translate_flat_step).
-#   - close_flat.cpp: per-op LEFT-branch realizers (the dispatch table).
-# Internal types shared between the two live in nd_to_lkr_internal.h.
-cc_library(
-    name = "nd_to_lkr",
-    srcs = ["nd_to_lkr.cpp", "close_flat.cpp"],
-    hdrs = ["nd_to_lkr.h", "nd_to_lkr_internal.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":emit_close",
-        ":env",
-        ":pass",
-        "//src/core:formula",
-        "//src/core:scope_utils",
-        "//src/proof:proof_value",
-        "//src/proof:schema_resolve",
-        "//src/proof/lkr:literal",
-        "//src/proof/lkr:ops",
-        "//src/proof/lkr:verifier",
-        "//src/proof/nd:ops",
-        "//src/proof/translate/iota_elim:eliminate_iota",
         "//src/util:error",
     ],
 )
