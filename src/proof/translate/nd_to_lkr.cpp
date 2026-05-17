@@ -486,6 +486,33 @@ util::Result<FormulaHandle> compute_flat_formula(
             TRY_ASSIGN(target, require_step(op.target_formula, "bottom_elim"));
             return target;
         },
+        [&](const nd::EqSubst& op) -> util::Result<FormulaHandle> {
+            TRY_ASSIGN(eq, require_step(op.eq_formula, "eq_subst"));
+            TRY_ASSIGN(target, require_step(op.target, "eq_subst"));
+            const Formula& f = eq.get();
+            if (!f.is_predicate()
+                || f.as_predicate().predicate().get().get_name() != "eq"
+                || f.as_predicate().args().size() != 2) {
+                return MAKE_ERROR << "eq_subst: expected eq(a, b), got: "
+                                  << f.to_string();
+            }
+            Term a = f.as_predicate().args()[0];
+            Term b = f.as_predicate().args()[1];
+            return builder.translate_term(target, a, b);
+        },
+        [&](const nd::EqSym& op) -> util::Result<FormulaHandle> {
+            TRY_ASSIGN(eq, require_step(op.eq_formula, "eq_sym"));
+            const Formula& f = eq.get();
+            if (!f.is_predicate()
+                || f.as_predicate().predicate().get().get_name() != "eq"
+                || f.as_predicate().args().size() != 2) {
+                return MAKE_ERROR << "eq_sym: expected eq(a, b), got: "
+                                  << f.to_string();
+            }
+            Term a = f.as_predicate().args()[0];
+            Term b = f.as_predicate().args()[1];
+            return builder.predicate(f.as_predicate().predicate(), {b, a});
+        },
         [&](const auto& op) -> util::Result<FormulaHandle> {
             (void)op;
             return MAKE_ERROR
