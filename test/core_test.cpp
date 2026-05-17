@@ -118,6 +118,150 @@ bool test_nnf_quantifier_body() {
                              "forall x_0. P(x_0) & ~Q(x_0)");
 }
 
+// ==================== Description Elimination Tests ====================
+// Strategy: parse a sentence (which may contain `iota` syntax), NNF it,
+// then run eliminate_descriptions. Compare against the expected
+// Russell-without-uniqueness form. See ELIMINATE_DESCRIPTIONS.md §2.
+
+bool elim_string_equals(const std::string& src, const std::string& expected) {
+    GlobalContext ctx;
+    auto s = parse_sentence(src, ctx);
+    FormulaBuilder b(ctx);
+    auto nnf = b.to_nnf(s->root());
+    auto out = b.eliminate_descriptions(nnf);
+    std::string got = out.get().to_string();
+    std::cout << "[" << src << " => " << got << "] ";
+    return got == expected;
+}
+
+// Helper: confirms the result is structurally ι-free by re-running the
+// pass and checking it's idempotent (signals an ι somewhere otherwise).
+bool elim_idempotent(const std::string& src) {
+    GlobalContext ctx;
+    auto s = parse_sentence(src, ctx);
+    FormulaBuilder b(ctx);
+    auto nnf = b.to_nnf(s->root());
+    auto first  = b.eliminate_descriptions(nnf);
+    auto second = b.eliminate_descriptions(first);
+    std::cout << "[" << src << " => " << first.get().to_string() << "] ";
+    return first == second;
+}
+
+bool test_elim_no_iota_is_identity() {
+    // No description present — formula unchanged.
+    return elim_string_equals("forall x. P(x)", "forall x_0. P(x_0)");
+}
+
+bool test_elim_positive_single_iota() {
+    // Q((iota x. P(x)))  ↦  ∃x.(P(x) ∧ Q(x))
+    // But the canonical dedup case (body == atom-with-iota-replaced)
+    // collapses to just ∃x.P(x). Here Q != P, so no dedup.
+    return elim_string_equals(
+        "Q((iota x. P(x)))",
+        "exists x_0. P(x_0) & Q(x_0)");
+}
+
+bool test_elim_dedup_canonical() {
+    // P((iota x. P(x)))  ↦  ∃x.P(x) (dedup)
+    return elim_string_equals(
+        "P((iota x. P(x)))",
+        "exists x_0. P(x_0)");
+}
+
+bool test_elim_negative_single_iota() {
+    // ~Q((iota x. P(x)))  ↦  ∀x.(¬P(x) ∨ ¬Q(x))
+    return elim_string_equals(
+        "~Q((iota x. P(x)))",
+        "forall x_0. ~P(x_0) | ~Q(x_0)");
+}
+
+bool test_elim_nested_iota() {
+    // P((iota x. Q((iota y. R(y)))))
+    //   inner: Q((iota y.R(y))) ↦ ∃y.(R(y) ∧ Q(y))
+    //   outer: ι-body is ∃y.(R(y) ∧ Q(y)); P at that ι ↦ ∃x.(∃y.(R(y) ∧ Q(y)) ∧ P(x))
+    return elim_string_equals(
+        "P((iota x. Q((iota y. R(y)))))",
+        "exists x_0. exists x_1. R(x_1) & Q(x_1) & P(x_0)");
+}
+
+bool test_elim_iota_in_outer_scope() {
+    // forall a. P((iota x. R(a, x)))
+    //   ↦ forall a. ∃x.(R(a, x) ∧ P(x))
+    // The outer-bound `a` survives the shift correctly.
+    return elim_string_equals(
+        "forall a. P((iota x. R(a, x)))",
+        "forall x_0. exists x_1. R(x_0, x_1) & P(x_1)");
+}
+
+bool test_elim_iota_in_eq() {
+    // eq((iota x. P(x)), (iota y. Q(y)))
+    //   first iota peel: ∃x.(P(x) ∧ eq(x, (iota y. Q(y))))
+    //   second iota peel: ∃x.(P(x) ∧ ∃y.(Q(y) ∧ eq(x, y)))
+    return elim_string_equals(
+        "eq((iota x. P(x)), (iota y. Q(y)))",
+        "exists x_0. P(x_0) & exists x_1. Q(x_1) & eq(x_0, x_1)");
+}
+
+bool test_elim_iota_in_conjunction() {
+    // (P((iota x. B(x))) & Q((iota y. C(y))))
+    //   ↦ (∃x.(B(x) ∧ P(x))) & (∃y.(C(y) ∧ Q(y)))
+    // Both existentials use x_0 because each is independently De-Bruijn
+    // indexed from outermost depth 0.
+    return elim_string_equals(
+        "P((iota x. B(x))) & Q((iota y. C(y)))",
+        "exists x_0. B(x_0) & P(x_0) & exists x_0. C(x_0) & Q(x_0)");
+}
+
+bool test_elim_idempotent_on_iota_free() {
+    // Idempotent: a second pass shouldn't change a formula with no ι.
+    return elim_idempotent("forall x. (P(x) -> Q(x))");
+}
+
+bool test_elim_idempotent_after_first_pass() {
+    // After first pass produces ι-free formula, second pass is a no-op.
+    return elim_idempotent("Q((iota x. P(x)))");
+}
+
+// SchemaVar edge case 11 — the rewrite extension we added. SchemaVars
+// can't easily be tested via parse_sentence (no syntax for them), so
+// we build the formula directly via the FormulaBuilder API.
+bool test_elim_schema_var_with_iota_arg() {
+    // SchemaVar{id=0, args=[ιx.P(x)]} (= ?0((iota x. P(x))))
+    //   ↦ ∃x.(P(x) ∧ ?0(x))
+    GlobalContext ctx;
+    FormulaBuilder b(ctx);
+    auto P = ctx.add_predicate("P", 1);
+    auto P_body = b.predicate(P, {Term::generalized(0)});  // P(gen_0) — iota body
+    Term iota_P = Term::description(P_body);
+    auto sv = b.make_schema_var(0, {iota_P});
+
+    auto nnf = b.to_nnf(sv);
+    auto out = b.eliminate_descriptions(nnf);
+    std::string got = out.get().to_string();
+    std::cout << "[?0((iota x.P(x))) => " << got << "] ";
+    return got == "exists x_0. P(x_0) & ?0(x_0)";
+}
+
+bool test_elim_schema_var_arity_two_with_iota() {
+    // SchemaVar{id=0, args=[ιx.P(x), fixed(0)]} (a 2-arg schema param)
+    //   ↦ ∃x.(P(x) ∧ ?0(x, fixed(0)+1-shifted-up))
+    GlobalContext ctx;
+    FormulaBuilder b(ctx);
+    auto P = ctx.add_predicate("P", 1);
+    auto P_body = b.predicate(P, {Term::generalized(0)});
+    Term iota_P = Term::description(P_body);
+    // SchemaVar args: first is iota, second is a free fixed var (idx 5).
+    auto sv = b.make_schema_var(0, {iota_P, Term::fixed(5)});
+
+    auto nnf = b.to_nnf(sv);
+    auto out = b.eliminate_descriptions(nnf);
+    std::string got = out.get().to_string();
+    std::cout << "[?0((iota x.P(x)), v5) => " << got << "] ";
+    // The fixed(5) doesn't get shifted by Gen-shifting (shift_term only
+    // touches Gen vars). So the result is ∃x. (P(x) ∧ ?0(x, fixed(5))).
+    return got == "exists x_0. P(x_0) & ?0(x_0, f_5)";
+}
+
 // ==================== Parser Tests ====================
 
 bool test_parse_simple_forall() {
@@ -873,6 +1017,20 @@ int main() {
     run_test("NNF of iff expands to and-of-or", test_nnf_iff);
     run_test("NNF of negated forall becomes exists", test_nnf_neg_forall);
     run_test("NNF preserves De Bruijn under quantifier", test_nnf_quantifier_body);
+
+    std::cout << "\n── Description Elimination Tests ──\n";
+    run_test("Elim: no ι is identity", test_elim_no_iota_is_identity);
+    run_test("Elim: positive single ι", test_elim_positive_single_iota);
+    run_test("Elim: canonical dedup P(ιx.P(x))", test_elim_dedup_canonical);
+    run_test("Elim: negative single ι", test_elim_negative_single_iota);
+    run_test("Elim: nested ι in body", test_elim_nested_iota);
+    run_test("Elim: ι under outer scope", test_elim_iota_in_outer_scope);
+    run_test("Elim: ι in both eq args", test_elim_iota_in_eq);
+    run_test("Elim: ι in conjunction", test_elim_iota_in_conjunction);
+    run_test("Elim: idempotent on ι-free", test_elim_idempotent_on_iota_free);
+    run_test("Elim: idempotent after first pass", test_elim_idempotent_after_first_pass);
+    run_test("Elim: SchemaVar with ι arg (edge case 11)", test_elim_schema_var_with_iota_arg);
+    run_test("Elim: SchemaVar arity-2 with ι first arg", test_elim_schema_var_arity_two_with_iota);
 
     // Print summary
     print_summary();

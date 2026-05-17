@@ -762,6 +762,203 @@ FormulaHandle FormulaBuilder::to_nnf_neg(FormulaHandle h) {
     return nnf_dispatch(*this, h, /*negate=*/true);
 }
 
+// ==================== Description Elimination ====================
+//
+// Pure formula→formula rewrite turning an NNF formula with iota terms
+// into an iota-free NNF formula. See ELIMINATE_DESCRIPTIONS.md §2.
+//
+// Algorithm: walk the NNF tree, tracking the current polarity. At every
+// literal (atom, negated atom, or SchemaVar with iota args) that contains
+// a description arg:
+//   1. Clean the chosen description's body first (innermost-first):
+//      NNF the body, then recursively eliminate iotas inside it.
+//   2. Shift all NON-iota args up by one De Bruijn level (we are about
+//      to introduce a new outer binder). The chosen iota arg becomes
+//      Gen(0) — the new binder's bound variable.
+//   3. Wrap in ∃ (positive polarity) or ∀ (negative polarity):
+//        positive: ∃x. (body ∧ atom[arg ↦ x])
+//        negative: ∀x. (NNF(¬body) ∨ NNF(¬atom[arg ↦ x]))
+//   4. Recurse on the resulting wrapper to peel any remaining iotas in
+//      the same atom (or in newly exposed positions).
+//
+// No hoisting and no α-equivalence dedup in this first cut. Both are
+// optional optimizations; correctness only requires the local rewrite.
+
+namespace {
+
+FormulaHandle elim_desc_dispatch(FormulaBuilder& b, FormulaHandle h, bool negate);
+
+// Recursively eliminate iotas inside a description's body. The body
+// is first NNF'd in case it contains connectives/quantifiers that NNF
+// would otherwise leave in non-canonical form.
+FormulaHandle elim_in_desc_body(FormulaBuilder& b, FormulaHandle body) {
+    FormulaHandle nnf_body = b.to_nnf(body);
+    return elim_desc_dispatch(b, nnf_body, /*negate=*/false);
+}
+
+int find_first_desc_arg(const std::vector<Term>& args) {
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i].is_description()) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Eliminate descriptions appearing in a single literal (atom or negated
+// atom). Picks the first iota arg, cleans it, rewrites the literal.
+FormulaHandle elim_in_pred(FormulaBuilder& b, FormulaHandle atom_h, bool negate) {
+    const PredicateInstance& p = atom_h.get().as_predicate();
+    int idx = find_first_desc_arg(p.args());
+    if (idx < 0) {
+        return negate ? b.make_not(atom_h) : atom_h;
+    }
+
+    // Clean the chosen description's body (innermost-first).
+    FormulaHandle cleaned_body = elim_in_desc_body(b, p.args()[idx].as_description().body);
+
+    // Build new atom args: shift up by 1, replace the iota with Gen(0).
+    std::vector<Term> new_args;
+    new_args.reserve(p.args().size());
+    for (size_t j = 0; j < p.args().size(); ++j) {
+        if (static_cast<int>(j) == idx) {
+            new_args.push_back(Term::generalized(0));
+        } else {
+            new_args.push_back(b.shift_term(p.args()[j], 0, 1));
+        }
+    }
+
+    FormulaHandle new_atom = b.predicate(p.predicate(), std::move(new_args));
+    FormulaHandle leaf = negate ? b.make_not(new_atom) : new_atom;
+
+    // Dedup when the body coincides with the atom-with-iota-replaced
+    // (e.g. the canonical P(ιx.P(x))). Soundness: φ ∧ φ ≡ φ and ¬φ ∨ ¬φ ≡ ¬φ.
+    // Pragmatic: avoids the multiplicative-And conflict in the LKR translator
+    // when both AndIntro operands trace back to the same step.
+    FormulaHandle inner;
+    if (cleaned_body == new_atom) {
+        inner = leaf;
+    } else if (negate) {
+        FormulaHandle neg_body = b.to_nnf_neg(cleaned_body);
+        inner = b.make_or(neg_body, leaf);
+    } else {
+        inner = b.make_and(cleaned_body, leaf);
+    }
+    Op q_op = negate ? Op::Forall : Op::Exists;
+    FormulaHandle result = b.make_quantified(q_op, inner);
+
+    // Peel any remaining iotas (e.g., in other args of the same atom).
+    return elim_desc_dispatch(b, result, /*negate=*/false);
+}
+
+// Eliminate descriptions appearing in a SchemaVar's args. Same Russell
+// rewrite as for concrete predicates: ?N(..., ι.B, ...) ↦
+// ∃x.(B(x) ∧ ?N(..., x, ...)). This is the edge-case-11 extension from
+// IOTA_ELIM_DESIGN.md §4 — without it, axiom-load normalization would
+// leave ι in SchemaVar args, defeating Path D's "ctx is ι-free" invariant.
+//
+// At schema instantiation time (formula.cpp:588 instantiate_schema),
+// the substituted Gen(0) resolves to the new ∃-bound variable, yielding
+// ∃x.(B(x) ∧ instantiated-P(x)) — the same Russell form a concrete
+// predicate would produce.
+FormulaHandle elim_in_schema_var(FormulaBuilder& b, FormulaHandle sv_h, bool negate) {
+    const SchemaVar& sv = sv_h.get().as_schema_var();
+    int idx = find_first_desc_arg(sv.args);
+    if (idx < 0) {
+        return negate ? b.make_not(sv_h) : sv_h;
+    }
+
+    // Clean the chosen description's body.
+    FormulaHandle cleaned_body = elim_in_desc_body(b, sv.args[idx].as_description().body);
+
+    // Build new args: shift up by 1, replace the iota with Gen(0).
+    std::vector<Term> new_args;
+    new_args.reserve(sv.args.size());
+    for (size_t j = 0; j < sv.args.size(); ++j) {
+        if (static_cast<int>(j) == idx) {
+            new_args.push_back(Term::generalized(0));
+        } else {
+            new_args.push_back(b.shift_term(sv.args[j], 0, 1));
+        }
+    }
+
+    FormulaHandle new_sv = b.make_schema_var(sv.id, std::move(new_args));
+    FormulaHandle leaf = negate ? b.make_not(new_sv) : new_sv;
+
+    // Dedup analogous to elim_in_pred: collapses ?N(ιx.?N(x)) (canonical
+    // shape) to a single occurrence. Rare for SchemaVars but harmless.
+    FormulaHandle inner;
+    if (cleaned_body == new_sv) {
+        inner = leaf;
+    } else if (negate) {
+        FormulaHandle neg_body = b.to_nnf_neg(cleaned_body);
+        inner = b.make_or(neg_body, leaf);
+    } else {
+        inner = b.make_and(cleaned_body, leaf);
+    }
+    Op q_op = negate ? Op::Forall : Op::Exists;
+    FormulaHandle result = b.make_quantified(q_op, inner);
+
+    // Peel any remaining iotas in other SchemaVar args.
+    return elim_desc_dispatch(b, result, /*negate=*/false);
+}
+
+FormulaHandle elim_desc_dispatch(FormulaBuilder& b, FormulaHandle h, bool negate) {
+    const Formula& f = h.get();
+
+    if (f.is_predicate()) {
+        return elim_in_pred(b, h, negate);
+    }
+    if (f.is_compound()) {
+        const Compound& c = f.as_compound();
+        if (c.op == Op::Not) {
+            // NNF: the child of Not is an atom (or schema var / ⊥).
+            return elim_desc_dispatch(b, c.left, /*negate=*/!negate);
+        }
+        if (c.op == Op::Bottom) {
+            return negate ? b.make_not(h) : h;
+        }
+        if (c.op == Op::And || c.op == Op::Or) {
+            // In NNF, And/Or are never under Not. Process children at
+            // positive polarity. If `negate` is somehow set here (input
+            // not in NNF), the rewrite below is structurally wrong but
+            // non-crashing.
+            FormulaHandle nl = c.left.valid()
+                ? elim_desc_dispatch(b, c.left,  false) : c.left;
+            FormulaHandle nr = c.right.valid()
+                ? elim_desc_dispatch(b, c.right, false) : c.right;
+            FormulaHandle res;
+            if (nl == c.left && nr == c.right) {
+                res = h;
+            } else if (c.op == Op::And) {
+                res = b.make_and(nl, nr);
+            } else {
+                res = b.make_or(nl, nr);
+            }
+            return negate ? b.make_not(res) : res;
+        }
+        // Implies/Iff: not expected in NNF; pass through defensively.
+        return negate ? b.make_not(h) : h;
+    }
+    if (f.is_quantified()) {
+        const Quantified& q = f.as_quantified();
+        FormulaHandle nb = elim_desc_dispatch(b, q.body, false);
+        FormulaHandle res = (nb == q.body) ? h : b.make_quantified(q.op, nb);
+        return negate ? b.make_not(res) : res;
+    }
+    if (f.is_schema_var()) {
+        return elim_in_schema_var(b, h, negate);
+    }
+    if (f.is_sentence()) {
+        return elim_desc_dispatch(b, f.as_sentence().get().root(), negate);
+    }
+    return negate ? b.make_not(h) : h;
+}
+
+}  // namespace
+
+FormulaHandle FormulaBuilder::eliminate_descriptions(FormulaHandle h) {
+    return elim_desc_dispatch(*this, h, /*negate=*/false);
+}
+
 }  // namespace logic
 
 
