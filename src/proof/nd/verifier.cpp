@@ -362,22 +362,12 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Qed& op) {
     if (!s.stack.deps_empty(derived)) {
         return MAKE_ERROR << "qed: formula has unresolved scope dependencies";
     }
-    if (s.goal_formula.valid()) {
-        // Path D: the goal (claim) is normalized at load time
-        // (see GlobalContext::add_claim). The user's proof, however, may
-        // derive an ι-bearing formula (via iota_elim) that's only
-        // syntactically equivalent to the normalized goal after Russell
-        // rewriting. Normalize the derived form here so the comparison
-        // succeeds in that case. eliminate_descriptions is idempotent and
-        // a no-op when derived has no ι, so this doesn't affect existing
-        // proofs of ι-free claims.
-        FormulaHandle derived_normalized =
-            s.stack.builder().eliminate_descriptions(derived);
-        if (derived_normalized != s.goal_formula) {
-            return MAKE_ERROR << "qed: derived formula doesn't match goal\n"
-                              << "  Expected: " << s.goal_formula.get().to_string() << "\n"
-                              << "  Got:      " << derived.get().to_string();
-        }
+    if (s.goal_formula.valid() &&
+        !s.stack.builder().derived_matches_goal_under_iota(
+            derived, s.goal_formula)) {
+        return MAKE_ERROR << "qed: derived formula doesn't match goal\n"
+                          << "  Expected: " << s.goal_formula.get().to_string() << "\n"
+                          << "  Got:      " << derived.get().to_string();
     }
     s.completed = true;
     return util::Ok();

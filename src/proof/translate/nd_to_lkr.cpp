@@ -527,14 +527,17 @@ util::Result<FormulaHandle> compute_flat_formula(
         },
         [&](const nd::IotaElim& op) -> util::Result<FormulaHandle> {
             // Under Path D / Russell sugar, iota_elim's logical output
-            // B(ι.B) is just ∃x.B(x) (the source ∃ itself). The
-            // eliminate_descriptions wrapper normalizes it further if
-            // needed (no-op if already ι-free).
-            TRY_ASSIGN(ex, require_step(op.exists_formula, "iota_elim"));
-            // IotaElim binds a TermRef at its instr index (the iota term
-            // Term::description(B)). Subsequent forall_elim et al. look
-            // this up via term_for_idx. Mirror the verifier's
-            // stack.cpp:763 logic. The body B is the existential's body.
+            // B(ι.B) coincides with its source ∃x.B(x).
+            //
+            // CRITICAL: must normalize the source first, then extract its
+            // body for the iota term — otherwise the term references the
+            // pre-normalization body while the stored formula uses the
+            // post-normalization body, and downstream forall_elim
+            // instantiates with a stale term. (Triggers when B has
+            // nested ι.) The outer compute_flat_formula_normalized
+            // wrapper would normalize again, but it'd be too late.
+            TRY_ASSIGN(ex_raw, require_step(op.exists_formula, "iota_elim"));
+            FormulaHandle ex = builder.eliminate_descriptions(ex_raw);
             const Formula& f = ex.get();
             if (f.is_quantified() && f.as_quantified().op == Op::Exists) {
                 Term iota_term = Term::description(f.as_quantified().body);

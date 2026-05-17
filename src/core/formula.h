@@ -587,6 +587,15 @@ public:
     // Idempotent: a formula with no descriptions is returned unchanged.
     FormulaHandle eliminate_descriptions(FormulaHandle h);
 
+    // qed-time matching helper. Under Path D the goal is ι-free at load
+    // but the user's proof may derive a ι-bearing form via iota_elim;
+    // returns true iff `derived` normalizes to `goal`. Used by both ND
+    // verification entry points (verifier.cpp + runtime.cpp).
+    bool derived_matches_goal_under_iota(FormulaHandle derived,
+                                          FormulaHandle goal) {
+        return eliminate_descriptions(derived) == goal;
+    }
+
     // Build sentence if formula is closed (no free fixed vars AND no free Gen vars)
     SentenceHandle build_sentence(FormulaHandle root, var_index start = 0) {
         if (!is_closed_since(start)) return SentenceHandle{};

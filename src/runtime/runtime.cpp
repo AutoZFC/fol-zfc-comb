@@ -368,19 +368,12 @@ util::ResultStatus ProofContext::qed(FormulaHandle const& derived) {
     }
 
     // Check that derived matches goal (up to alpha-equivalence of bound vars).
-    // Path D: goal is normalized at load (see GlobalContext::add_claim);
-    // user proof may derive an ι-bearing form via iota_elim. Normalize
-    // derived here so the comparison succeeds. eliminate_descriptions is
-    // idempotent and a no-op on ι-free formulas, so existing proofs of
-    // ι-free claims are unaffected.
-    if (goal_formula_.valid()) {
-        FormulaHandle derived_normalized =
-            stack_.builder().eliminate_descriptions(derived);
-        if (derived_normalized != goal_formula_) {
-            return MAKE_ERROR << "Derived formula doesn't match goal\n"
-                              << "  Expected: " << goal_formula_.get().to_string() << "\n"
-                              << "  Got: " << derived.get().to_string();
-        }
+    if (goal_formula_.valid() &&
+        !stack_.builder().derived_matches_goal_under_iota(
+            derived, goal_formula_)) {
+        return MAKE_ERROR << "Derived formula doesn't match goal\n"
+                          << "  Expected: " << goal_formula_.get().to_string() << "\n"
+                          << "  Got: " << derived.get().to_string();
     }
 
     // Register result

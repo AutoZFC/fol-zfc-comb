@@ -810,77 +810,62 @@ int find_first_desc_arg(const std::vector<Term>& args) {
     return -1;
 }
 
-// Eliminate descriptions appearing in a single atom. Picks the first
-// iota arg, cleans it, rewrites the atom to ∃-form.
-FormulaHandle elim_in_pred(FormulaBuilder& b, FormulaHandle atom_h) {
-    const PredicateInstance& p = atom_h.get().as_predicate();
-    int idx = find_first_desc_arg(p.args());
-    if (idx < 0) {
-        return atom_h;
-    }
+// Shared rewrite for atom-shaped leaves (concrete predicate or SchemaVar):
+// given the leaf's original args and a factory that rebuilds the leaf
+// from new args, produce ∃x. (cleaned_body ∧ leaf[ι ↦ Gen(0)]) — with
+// canonical-shape dedup (body == leaf collapses to leaf alone).
+//
+// Returns the original leaf if no iota arg is present.
+template <typename Rebuild>
+FormulaHandle rewrite_leaf_with_iota(FormulaBuilder& b,
+                                      FormulaHandle leaf_h,
+                                      const std::vector<Term>& args,
+                                      Rebuild rebuild) {
+    int idx = find_first_desc_arg(args);
+    if (idx < 0) return leaf_h;
 
-    // Clean the chosen description's body (innermost-first).
-    FormulaHandle cleaned_body = elim_in_desc_body(b, p.args()[idx].as_description().body);
+    FormulaHandle cleaned_body = elim_in_desc_body(b, args[idx].as_description().body);
 
-    // Build new atom args: shift up by 1, replace the iota with Gen(0).
     std::vector<Term> new_args;
-    new_args.reserve(p.args().size());
-    for (size_t j = 0; j < p.args().size(); ++j) {
-        if (static_cast<int>(j) == idx) {
-            new_args.push_back(Term::generalized(0));
-        } else {
-            new_args.push_back(b.shift_term(p.args()[j], 0, 1));
-        }
+    new_args.reserve(args.size());
+    for (size_t j = 0; j < args.size(); ++j) {
+        new_args.push_back(static_cast<int>(j) == idx
+            ? Term::generalized(0)
+            : b.shift_term(args[j], 0, 1));
     }
+    FormulaHandle new_leaf = rebuild(std::move(new_args));
 
-    FormulaHandle new_atom = b.predicate(p.predicate(), std::move(new_args));
-
-    // Dedup: when body coincides with the atom-with-iota-replaced
-    // (canonical P(ιx.P(x))), φ ∧ φ ≡ φ — collapse.
-    FormulaHandle inner = (cleaned_body == new_atom)
-        ? new_atom
-        : b.make_and(cleaned_body, new_atom);
+    // Dedup: P(ιx.P(x)) collapses to ∃x.P(x).
+    FormulaHandle inner = (cleaned_body == new_leaf)
+        ? new_leaf
+        : b.make_and(cleaned_body, new_leaf);
     FormulaHandle result = b.make_quantified(Op::Exists, inner);
 
-    // Peel any remaining iotas in other args of the same atom.
+    // Peel any remaining iotas in other args.
     return elim_desc_dispatch(b, result);
 }
 
-// Schema-var version of elim_in_pred — edge case 11 from
-// IOTA_ELIM_DESIGN.md §4. Without this, axiom-load normalization would
-// leave ι in SchemaVar args, defeating Path D's "ctx is ι-free" invariant.
-//
-// At schema instantiation (formula.cpp:588 instantiate_schema), the
-// substituted Gen(0) resolves to the new ∃-bound variable, yielding
-// ∃x.(B(x) ∧ instantiated-P(x)) — same Russell form a concrete
-// predicate would produce.
+// Eliminate descriptions in a concrete predicate atom.
+FormulaHandle elim_in_pred(FormulaBuilder& b, FormulaHandle atom_h) {
+    const PredicateInstance& p = atom_h.get().as_predicate();
+    return rewrite_leaf_with_iota(b, atom_h, p.args(),
+        [&](std::vector<Term> args) {
+            return b.predicate(p.predicate(), std::move(args));
+        });
+}
+
+// Schema-var version — edge case 11 from IOTA_ELIM_DESIGN.md §4. Without
+// this, axiom-load normalization would leave ι in SchemaVar args,
+// defeating Path D's "ctx is ι-free" invariant. The substituted Gen(0)
+// resolves to the new ∃-bound variable at instantiate_schema time
+// (formula.cpp:588), yielding ∃x.(B(x) ∧ instantiated-P(x)) — same
+// Russell form a concrete predicate would produce.
 FormulaHandle elim_in_schema_var(FormulaBuilder& b, FormulaHandle sv_h) {
     const SchemaVar& sv = sv_h.get().as_schema_var();
-    int idx = find_first_desc_arg(sv.args);
-    if (idx < 0) {
-        return sv_h;
-    }
-
-    FormulaHandle cleaned_body = elim_in_desc_body(b, sv.args[idx].as_description().body);
-
-    std::vector<Term> new_args;
-    new_args.reserve(sv.args.size());
-    for (size_t j = 0; j < sv.args.size(); ++j) {
-        if (static_cast<int>(j) == idx) {
-            new_args.push_back(Term::generalized(0));
-        } else {
-            new_args.push_back(b.shift_term(sv.args[j], 0, 1));
-        }
-    }
-
-    FormulaHandle new_sv = b.make_schema_var(sv.id, std::move(new_args));
-
-    FormulaHandle inner = (cleaned_body == new_sv)
-        ? new_sv
-        : b.make_and(cleaned_body, new_sv);
-    FormulaHandle result = b.make_quantified(Op::Exists, inner);
-
-    return elim_desc_dispatch(b, result);
+    return rewrite_leaf_with_iota(b, sv_h, sv.args,
+        [&](std::vector<Term> args) {
+            return b.make_schema_var(sv.id, std::move(args));
+        });
 }
 
 FormulaHandle elim_desc_dispatch(FormulaBuilder& b, FormulaHandle h) {
@@ -943,9 +928,9 @@ namespace {
 // Normalize a sentence's root formula via eliminate_descriptions. If the
 // formula is unchanged (no ι present), returns the original sentence
 // handle unchanged. Otherwise registers a new Sentence wrapping the
-// normalized root.
-SentenceHandle normalize_iota_in_sentence(GlobalContext& ctx,
-                                          SentenceHandle s) {
+// normalized root. Naming follows the elim_desc_dispatch/elim_in_pred
+// convention (elim_desc_<node_type>).
+SentenceHandle elim_desc_sentence(GlobalContext& ctx, SentenceHandle s) {
     if (!s.valid()) return s;
     FormulaBuilder b(ctx);
     FormulaHandle root = s.get().root();
@@ -955,11 +940,10 @@ SentenceHandle normalize_iota_in_sentence(GlobalContext& ctx,
 }
 
 // Normalize a schema body. Schemas can't be wrapped in a Sentence (they
-// contain SchemaVar — not closed), so the helper returns a raw
-// FormulaHandle. The SchemaVar arm of elim_desc_dispatch (edge case 11)
-// handles ι in schema-parameter args.
-FormulaHandle normalize_iota_in_formula(GlobalContext& ctx,
-                                        FormulaHandle h) {
+// contain SchemaVar — not closed), so this returns a raw FormulaHandle.
+// The SchemaVar arm of elim_desc_dispatch (edge case 11) handles ι in
+// schema-parameter args.
+FormulaHandle elim_desc_formula(GlobalContext& ctx, FormulaHandle h) {
     if (!h.valid()) return h;
     FormulaBuilder b(ctx);
     return b.eliminate_descriptions(h);
@@ -968,7 +952,7 @@ FormulaHandle normalize_iota_in_formula(GlobalContext& ctx,
 }  // namespace
 
 void GlobalContext::add_axiom(const std::string& name, SentenceHandle sentence) {
-    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_axioms_[name] = normalized;
     known_.insert(normalized);
 }
@@ -981,25 +965,25 @@ void GlobalContext::add_definition(const std::string& predicate_name,
 }
 
 void GlobalContext::add_theorem(const std::string& name, SentenceHandle sentence) {
-    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_theorems_[name] = normalized;
     known_.insert(normalized);
 }
 
 void GlobalContext::add_unproved_theorem(const std::string& name, SentenceHandle sentence) {
-    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_theorems_[name] = normalized;
     known_.insert(normalized);
     unproved_theorems_.insert(name);
 }
 
 void GlobalContext::add_claim(const std::string& name, SentenceHandle sentence) {
-    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_claims_[name] = normalized;
 }
 
 void GlobalContext::add_schema(const std::string& name, SchemaDefinition def) {
-    def.body = normalize_iota_in_formula(*this, def.body);
+    def.body = elim_desc_formula(*this, def.body);
     named_schemas_[name] = std::move(def);
 }
 
