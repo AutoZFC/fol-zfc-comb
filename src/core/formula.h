@@ -572,18 +572,24 @@ public:
     FormulaHandle to_nnf_neg(FormulaHandle h);  // returns NNF of ¬h
 
     // ========== Description Elimination ==========
-    // Russell-without-uniqueness rewrite removing every iota term from
-    // an NNF formula. See src/proof/translate/ELIMINATE_DESCRIPTIONS.md
-    // for the full spec and IOTA_ELIM_DESIGN.md for the surrounding
-    // architecture (Path D, load-time normalization).
+    // Structure-preserving Russell-without-uniqueness rewrite. Removes
+    // every iota term from a formula by transforming each atom-with-ι
+    // leaf into its ∃-form; Not / Iff / Implies / And / Or / Quantified
+    // are preserved at non-leaf positions. See
+    // src/proof/translate/ELIMINATE_DESCRIPTIONS.md and
+    // IOTA_ELIM_DESIGN.md for the architecture (Path D, load-time
+    // normalization).
     //
-    // Rules (polarity-aware on NNF):
+    // Per-leaf rule:
     //   Q(ιx.P(x))   ↦   ∃x. (P(x) ∧ Q(x))
-    //   ¬Q(ιx.P(x))  ↦   ∀x. (¬P(x) ∨ ¬Q(x))
+    //
+    // Applied uniformly at every predicate or SchemaVar leaf containing
+    // ι. Surrounding Not stays as Not(rewritten) rather than being
+    // pushed inward, which preserves the user's axiom shape (Iff,
+    // Implies, Not all survive) and lets ND proofs match against
+    // axiom-instances structurally.
     //
     // Idempotent: a formula with no descriptions is returned unchanged.
-    // Works on both concrete predicates and schema parameters with ι in
-    // their args (the SchemaVar arm — see IOTA_ELIM_DESIGN.md §4).
     FormulaHandle eliminate_descriptions(FormulaHandle h);
 
     // Build sentence if formula is closed (no free fixed vars AND no free Gen vars)

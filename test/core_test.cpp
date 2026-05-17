@@ -123,7 +123,23 @@ bool test_nnf_quantifier_body() {
 // then run eliminate_descriptions. Compare against the expected
 // Russell-without-uniqueness form. See ELIMINATE_DESCRIPTIONS.md §2.
 
+// Default helper: applies eliminate_descriptions directly on the parsed
+// formula, WITHOUT pre-NNFing. This is the load-time normalization path:
+// we want Iff/Implies/Not at the top level preserved.
 bool elim_string_equals(const std::string& src, const std::string& expected) {
+    GlobalContext ctx;
+    auto s = parse_sentence(src, ctx);
+    FormulaBuilder b(ctx);
+    auto out = b.eliminate_descriptions(s->root());
+    std::string got = out.get().to_string();
+    std::cout << "[" << src << " => " << got << "] ";
+    return got == expected;
+}
+
+// Variant that pre-NNFs the input. Demonstrates the "NDtoLKR goal path":
+// NNF first, then elim. Output is NNF-equivalent (no Iff/Implies/Not at
+// non-leaf positions). Used to show the rewrite still works in that mode.
+bool elim_nnf_string_equals(const std::string& src, const std::string& expected) {
     GlobalContext ctx;
     auto s = parse_sentence(src, ctx);
     FormulaBuilder b(ctx);
@@ -140,8 +156,7 @@ bool elim_idempotent(const std::string& src) {
     GlobalContext ctx;
     auto s = parse_sentence(src, ctx);
     FormulaBuilder b(ctx);
-    auto nnf = b.to_nnf(s->root());
-    auto first  = b.eliminate_descriptions(nnf);
+    auto first  = b.eliminate_descriptions(s->root());
     auto second = b.eliminate_descriptions(first);
     std::cout << "[" << src << " => " << first.get().to_string() << "] ";
     return first == second;
@@ -168,11 +183,33 @@ bool test_elim_dedup_canonical() {
         "exists x_0. P(x_0)");
 }
 
-bool test_elim_negative_single_iota() {
-    // ~Q((iota x. P(x)))  ↦  ∀x.(¬P(x) ∨ ¬Q(x))
+bool test_elim_negative_preserves_not() {
+    // ~Q((iota x. P(x))) under shape-preservation:
+    //   Not is preserved at the outer level; only the ι-leaf inside
+    //   gets rewritten. Result: ~∃x.(P(x) ∧ Q(x)).
+    // Logically equivalent to ∀x.(¬P(x) ∨ ¬Q(x)) but preserves user's
+    // outer ~ shape so `not_elim axiom, h` still matches when the user
+    // wrote `axiom: ~Q((iota x. P(x)))`.
     return elim_string_equals(
         "~Q((iota x. P(x)))",
-        "forall x_0. ~P(x_0) | ~Q(x_0)");
+        "~exists x_0. P(x_0) & Q(x_0)");
+}
+
+bool test_elim_preserves_iff() {
+    // Critical for Path D: user's `iff_elim_l axiom_inst, h` must work
+    // after normalization. The Iff at the top level survives; only ι
+    // leaves on each side are rewritten. (to_string omits parens around
+    // the existentials — they're still semantically grouped under <->.)
+    return elim_string_equals(
+        "P((iota x. B(x))) <-> Q((iota y. C(y)))",
+        "exists x_0. B(x_0) & P(x_0) <-> exists x_0. C(x_0) & Q(x_0)");
+}
+
+bool test_elim_preserves_implies() {
+    // Same story for Implies.
+    return elim_string_equals(
+        "P((iota x. B(x))) -> Q",
+        "exists x_0. B(x_0) & P(x_0) -> Q");
 }
 
 bool test_elim_nested_iota() {
@@ -1022,7 +1059,9 @@ int main() {
     run_test("Elim: no ι is identity", test_elim_no_iota_is_identity);
     run_test("Elim: positive single ι", test_elim_positive_single_iota);
     run_test("Elim: canonical dedup P(ιx.P(x))", test_elim_dedup_canonical);
-    run_test("Elim: negative single ι", test_elim_negative_single_iota);
+    run_test("Elim: negative preserves Not", test_elim_negative_preserves_not);
+    run_test("Elim: preserves Iff", test_elim_preserves_iff);
+    run_test("Elim: preserves Implies", test_elim_preserves_implies);
     run_test("Elim: nested ι in body", test_elim_nested_iota);
     run_test("Elim: ι under outer scope", test_elim_iota_in_outer_scope);
     run_test("Elim: ι in both eq args", test_elim_iota_in_eq);
