@@ -377,6 +377,16 @@ util::ResultStatus close_flat(LowerCtx&                 lc,
                               lc.eigens, lc.builder, lc.out);
         },
 
+        [&](const nd::IotaElim& op) -> util::ResultStatus {
+            // Under Path D / Russell sugar, iota_elim's logical output
+            // F_k = ∃x.B(x) coincides with its source ∃. Close F_k_entry
+            // directly against the source's negation entry — no LKR
+            // structural ops needed; the two are the same formula.
+            TRY_ASSIGN(neg_source, require_neg(op.exists_formula, "iota_elim"));
+            return emit_close(env, F_k_entry, neg_source,
+                              lc.eigens, lc.builder, lc.out);
+        },
+
         [&](const auto& op) -> util::ResultStatus {
             (void)op;
             return MAKE_ERROR

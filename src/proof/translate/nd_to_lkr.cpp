@@ -107,7 +107,10 @@ util::Result<std::unique_ptr<Block>> decompose_blocks(
             TRY_ASSIGN(assumption_raw, try_parse_formula_with_vars(
                 assume->formula.get(), ctx, builder,
                 name_table, empty_sv, empty_ar));
-            blk->assumption_raw = assumption_raw;
+            // Path D: normalize so the translator's assumption_raw is
+            // ι-free, matching what the ND verifier sees post parse-
+            // deferred normalization. Idempotent; no-op on ι-free input.
+            blk->assumption_raw = builder.eliminate_descriptions(assumption_raw);
             TRY(push_block(std::move(blk)));
             continue;
         }
@@ -203,7 +206,16 @@ util::Result<FormulaHandle> compute_flat_formula(
     FormulaBuilder& builder,
     GlobalContext& ctx,
     const StepFormulaMap& step_formula,
-    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<std::string, Term>& name_table);
+
+util::Result<FormulaHandle> compute_flat_formula_normalized(
+    const Program<nd::Instr>& in,
+    uint32_t idx,
+    FormulaBuilder& builder,
+    GlobalContext& ctx,
+    const StepFormulaMap& step_formula,
+    std::unordered_map<uint32_t, Term>& term_for_idx,
     std::unordered_map<std::string, Term>& name_table);
 
 util::ResultStatus compute_block_formulas(
@@ -213,7 +225,7 @@ util::ResultStatus compute_block_formulas(
     GlobalContext& ctx,
     StepFormulaMap& step_formula,
     StepFormulaMap& step_formula_nnf,
-    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<uint32_t, Term>& term_for_idx,
     std::unordered_map<std::string, Term>& name_table)
 {
     auto record = [&](uint32_t idx, FormulaHandle f) {
@@ -245,7 +257,7 @@ util::ResultStatus compute_block_formulas(
 
     for (const auto& item : blk.body) {
         if (auto* flat = std::get_if<FlatStep>(&item)) {
-            TRY_ASSIGN(f, compute_flat_formula(
+            TRY_ASSIGN(f, compute_flat_formula_normalized(
                 in, flat->nd_idx, builder, ctx, step_formula,
                 term_for_idx, name_table));
             record(flat->nd_idx, f);
@@ -310,7 +322,7 @@ util::Result<FormulaHandle> compute_flat_formula(
     FormulaBuilder& builder,
     GlobalContext& ctx,
     const StepFormulaMap& step_formula,
-    const std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<uint32_t, Term>& term_for_idx,
     std::unordered_map<std::string, Term>& name_table)
 {
     const auto& instr = in.instrs[idx];
@@ -513,6 +525,26 @@ util::Result<FormulaHandle> compute_flat_formula(
             Term b = f.as_predicate().args()[1];
             return builder.predicate(f.as_predicate().predicate(), {b, a});
         },
+        [&](const nd::IotaElim& op) -> util::Result<FormulaHandle> {
+            // Under Path D / Russell sugar, iota_elim's logical output
+            // B(ι.B) is just ∃x.B(x) (the source ∃ itself). The
+            // eliminate_descriptions wrapper normalizes it further if
+            // needed (no-op if already ι-free).
+            TRY_ASSIGN(ex, require_step(op.exists_formula, "iota_elim"));
+            // IotaElim binds a TermRef at its instr index (the iota term
+            // Term::description(B)). Subsequent forall_elim et al. look
+            // this up via term_for_idx. Mirror the verifier's
+            // stack.cpp:763 logic. The body B is the existential's body.
+            const Formula& f = ex.get();
+            if (f.is_quantified() && f.as_quantified().op == Op::Exists) {
+                Term iota_term = Term::description(f.as_quantified().body);
+                term_for_idx[idx] = iota_term;
+                if (op.bind_iota.has_value() && !op.bind_iota->name.empty()) {
+                    name_table[op.bind_iota->name] = iota_term;
+                }
+            }
+            return ex;
+        },
         [&](const auto& op) -> util::Result<FormulaHandle> {
             (void)op;
             return MAKE_ERROR
@@ -520,6 +552,30 @@ util::Result<FormulaHandle> compute_flat_formula(
                 << instr.index() << " not yet supported";
         },
     }, instr);
+}
+
+// Wrapper: applies eliminate_descriptions to every result of
+// compute_flat_formula. Path D / Layer 2 mechanic: the translator's
+// internal formula map stays ι-free throughout, so the LKR translator
+// downstream never sees a description term. ForallElim with a ι-bearing
+// term produces ψ(ι.B) at the inner call; the wrap rewrites it to the
+// ∃-form before storing.
+//
+// Idempotent / no-op on already-ι-free formulas, so existing behavior
+// for ι-free proofs is unchanged.
+util::Result<FormulaHandle> compute_flat_formula_normalized(
+    const Program<nd::Instr>& in,
+    uint32_t idx,
+    FormulaBuilder& builder,
+    GlobalContext& ctx,
+    const StepFormulaMap& step_formula,
+    std::unordered_map<uint32_t, Term>& term_for_idx,
+    std::unordered_map<std::string, Term>& name_table)
+{
+    auto r = compute_flat_formula(in, idx, builder, ctx, step_formula,
+                                   term_for_idx, name_table);
+    if (!r.ok()) return r;
+    return builder.eliminate_descriptions(r.value());
 }
 
 // =========================================================================

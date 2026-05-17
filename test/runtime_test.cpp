@@ -1249,6 +1249,10 @@ bool test_path_d_iff_axiom_preserves_shape() {
     return true;
 }
 
+// Layer 2 (full proof restructuring for iota_elim → exists_elim with
+// witness substitution and re-scoping) is deferred to a follow-up.
+// Tests for Layer 2 will live alongside its implementation.
+
 bool test_path_d_proof_with_iota_qed_matches_normalized_claim() {
     // End-to-end: claim has ι, user proof uses iota_elim, qed succeeds
     // because the derived ι-form normalizes to match the stored
