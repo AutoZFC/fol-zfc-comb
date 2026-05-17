@@ -1167,6 +1167,114 @@ bool test_iota_elim_capture_avoidance() {
     return true;
 }
 
+// ==================== Path D Load-Time Normalization Tests ====================
+//
+// Direct verification of IOTA_ELIM_DESIGN.md §1.5 invariant: every
+// formula entering ctx (axiom, claim, theorem, schema body) is ι-free.
+
+bool test_path_d_axiom_normalized_at_load() {
+    // axiom: Q((iota x. P(x))) gets stored as ∃x.(P(x) ∧ Q(x)).
+    Runtime rt;
+    auto result = rt.load(R"(
+        axiom q_of_iota: Q((iota x. P(x)))
+    )");
+    if (!result.ok()) {
+        std::cout << "[load error: " << result.error() << "] ";
+        return false;
+    }
+    auto found = rt.context().find_axiom("q_of_iota");
+    if (!found.has_value()) {
+        std::cout << "[axiom not registered] ";
+        return false;
+    }
+    std::string stored = found.value().get().root().get().to_string();
+    std::cout << "[stored as: " << stored << "] ";
+    // No "iota" substring should remain.
+    if (stored.find("iota") != std::string::npos) {
+        std::cout << "[FAIL: ι survived normalization] ";
+        return false;
+    }
+    return true;
+}
+
+bool test_path_d_claim_normalized_at_load() {
+    // Same for claims. The user can still derive the original ι-form in
+    // their proof; the qed comparison normalizes both sides.
+    Runtime rt;
+    auto result = rt.load(R"(
+        axiom exists_p: exists x. P(x)
+        claim p_of_iota_claim: P((iota x. P(x)))
+    )");
+    if (!result.ok()) {
+        std::cout << "[load error: " << result.error() << "] ";
+        return false;
+    }
+    auto found = rt.context().find_claim("p_of_iota_claim");
+    if (!found.has_value()) {
+        std::cout << "[claim not registered] ";
+        return false;
+    }
+    std::string stored = found.value().get().root().get().to_string();
+    std::cout << "[stored as: " << stored << "] ";
+    return stored.find("iota") == std::string::npos;
+}
+
+bool test_path_d_iff_axiom_preserves_shape() {
+    // axiom with ι inside an iff: Iff connective preserved at top level
+    // so user proofs can iff_elim_l/r against it. Only the ι-leaf is
+    // rewritten to ∃-form.
+    Runtime rt;
+    auto result = rt.load(R"(
+        axiom un_def: forall A. forall B. forall v.
+            (Un(A, B, v) <-> Union((iota u. Upair(A, B, u)), v))
+    )");
+    if (!result.ok()) {
+        std::cout << "[load error: " << result.error() << "] ";
+        return false;
+    }
+    auto found = rt.context().find_axiom("un_def");
+    if (!found.has_value()) return false;
+    std::string stored = found.value().get().root().get().to_string();
+    std::cout << "[stored: " << stored << "] ";
+    // Iff should survive ("<->" or equivalent symbol).
+    if (stored.find("<->") == std::string::npos) {
+        std::cout << "[FAIL: iff not preserved] ";
+        return false;
+    }
+    // No iota should remain.
+    if (stored.find("iota") != std::string::npos) {
+        std::cout << "[FAIL: ι survived] ";
+        return false;
+    }
+    return true;
+}
+
+bool test_path_d_proof_with_iota_qed_matches_normalized_claim() {
+    // End-to-end: claim has ι, user proof uses iota_elim, qed succeeds
+    // because the derived ι-form normalizes to match the stored
+    // ι-free claim.
+    Runtime rt;
+    auto result = rt.load_with_proofs(R"(
+        axiom exists_p: exists x. P(x)
+        claim p_of_iota_e2e: P((iota x. P(x)))
+
+        proof p_of_iota_e2e:
+            h1 = use exists_p
+            h2 = iota_elim h1
+            qed h2
+    )");
+    if (!result.ok()) {
+        std::cout << "[parse error: " << result.error() << "] ";
+        return false;
+    }
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) {
+        std::cout << "[execution error: " << exec.error() << "] ";
+        return false;
+    }
+    return true;
+}
+
 // ==================== Schema Tests ====================
 
 bool test_schema_declare_prove_instantiate() {
@@ -1895,6 +2003,13 @@ int main() {
     run_test("iota term to_string", test_iota_term_to_string);
     run_test("iota term in eq context", test_iota_in_eq_subst);
     run_test("iota_elim capture avoidance", test_iota_elim_capture_avoidance);
+
+    std::cout << "\n── Path D Load-Time Normalization Tests ──\n";
+    run_test("Path D: axiom normalized at load", test_path_d_axiom_normalized_at_load);
+    run_test("Path D: claim normalized at load", test_path_d_claim_normalized_at_load);
+    run_test("Path D: iff axiom preserves shape", test_path_d_iff_axiom_preserves_shape);
+    run_test("Path D: proof with iota_elim qed-matches normalized claim",
+             test_path_d_proof_with_iota_qed_matches_normalized_claim);
 
     // Schema tests
     std::cout << "\n── Schema Tests ──\n";

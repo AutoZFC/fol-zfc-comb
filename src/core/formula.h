@@ -369,18 +369,20 @@ public:
     const Predicate& get_predicate(PredicateHandle h) const { return h.get(); }
 
     // Axiom/Theorem API
-    void add_axiom(const std::string& name, SentenceHandle sentence) {
-        named_axioms_[name] = sentence;
-        known_.insert(sentence);
-    }
+    //
+    // Path D normalization: any sentence with embedded ι terms is rewritten
+    // via eliminate_descriptions before being stored. This makes ctx fully
+    // ι-free for axioms, theorems, and claims — the precondition Layer 2's
+    // proof-level pass relies on. See IOTA_ELIM_DESIGN.md §1.5.
+    //
+    // Out-of-line so FormulaBuilder (declared later in this header) can be
+    // used.
+    void add_axiom(const std::string& name, SentenceHandle sentence);
 
     // Register a @def axiom: marks the predicate as defined and adds the axiom
     // Idempotent: re-registering the same predicate with the same axiom is a no-op
     // (needed for #pragma once semantics when files are loaded multiple times)
-    void add_definition(const std::string& predicate_name, const std::string& axiom_name, SentenceHandle sentence) {
-        defined_predicates_[predicate_name] = axiom_name;
-        add_axiom(axiom_name, sentence);
-    }
+    void add_definition(const std::string& predicate_name, const std::string& axiom_name, SentenceHandle sentence);
 
     bool is_defined(const std::string& predicate_name) const {
         return defined_predicates_.count(predicate_name) > 0;
@@ -392,16 +394,9 @@ public:
         return it != defined_predicates_.end() && it->second == axiom_name;
     }
 
-    void add_theorem(const std::string& name, SentenceHandle sentence) {
-        named_theorems_[name] = sentence;
-        known_.insert(sentence);
-    }
+    void add_theorem(const std::string& name, SentenceHandle sentence);
 
-    void add_unproved_theorem(const std::string& name, SentenceHandle sentence) {
-        named_theorems_[name] = sentence;
-        known_.insert(sentence);
-        unproved_theorems_.insert(name);
-    }
+    void add_unproved_theorem(const std::string& name, SentenceHandle sentence);
 
     bool is_unproved(const std::string& name) const {
         return unproved_theorems_.count(name) > 0;
@@ -433,9 +428,7 @@ public:
     }
 
     // Claim API (for theorems to be proven)
-    void add_claim(const std::string& name, SentenceHandle sentence) {
-        named_claims_[name] = sentence;
-    }
+    void add_claim(const std::string& name, SentenceHandle sentence);
 
     std::optional<SentenceHandle> find_claim(const std::string& name) const {
         auto it = named_claims_.find(name);
@@ -456,9 +449,11 @@ public:
     }
 
     // Schema API
-    void add_schema(const std::string& name, SchemaDefinition def) {
-        named_schemas_[name] = std::move(def);
-    }
+    //
+    // Schema body is normalized via eliminate_descriptions (Path D /
+    // edge case 11: SchemaVar args containing ι get rewritten to ∃-form).
+    // Out-of-line so FormulaBuilder is in scope.
+    void add_schema(const std::string& name, SchemaDefinition def);
     void mark_schema_proven(const std::string& name) {
         proven_schemas_.insert(name);
     }

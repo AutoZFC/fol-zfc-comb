@@ -83,12 +83,21 @@ struct Session {
 };
 
 // Parse a deferred formula AST against the current Session state.
+//
+// Path D: assume / let formulas in proofs are parsed here at proof
+// execution time. If the user wrote ι syntax in them, the same Russell-
+// sugar interpretation applies as for axioms — normalize at parse time
+// so the proof's intermediate steps see ι-free assumed/let formulas.
+// Without this, ι from assume/let would leak into Layer 2's purview
+// even though we expected only iota_elim to be the dynamic ι source.
 util::Result<FormulaHandle> parse_deferred(Session& s, const ASTNode* ast,
                                            const char* op_name) {
     if (!ast) return MAKE_ERROR << op_name << ": missing formula AST";
-    return try_parse_formula_with_vars(
+    auto r = try_parse_formula_with_vars(
         ast, s.ctx, s.stack.builder(),
         s.name_table, s.schema_var_map, s.schema_arity_map);
+    if (!r.ok()) return r.error();
+    return s.stack.builder().eliminate_descriptions(r.value());
 }
 
 // Resolve a SchemaInst's bindings at execute time. Schema bindings can
@@ -353,10 +362,22 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Qed& op) {
     if (!s.stack.deps_empty(derived)) {
         return MAKE_ERROR << "qed: formula has unresolved scope dependencies";
     }
-    if (s.goal_formula.valid() && derived != s.goal_formula) {
-        return MAKE_ERROR << "qed: derived formula doesn't match goal\n"
-                          << "  Expected: " << s.goal_formula.get().to_string() << "\n"
-                          << "  Got:      " << derived.get().to_string();
+    if (s.goal_formula.valid()) {
+        // Path D: the goal (claim) is normalized at load time
+        // (see GlobalContext::add_claim). The user's proof, however, may
+        // derive an ι-bearing formula (via iota_elim) that's only
+        // syntactically equivalent to the normalized goal after Russell
+        // rewriting. Normalize the derived form here so the comparison
+        // succeeds in that case. eliminate_descriptions is idempotent and
+        // a no-op when derived has no ι, so this doesn't affect existing
+        // proofs of ι-free claims.
+        FormulaHandle derived_normalized =
+            s.stack.builder().eliminate_descriptions(derived);
+        if (derived_normalized != s.goal_formula) {
+            return MAKE_ERROR << "qed: derived formula doesn't match goal\n"
+                              << "  Expected: " << s.goal_formula.get().to_string() << "\n"
+                              << "  Got:      " << derived.get().to_string();
+        }
     }
     s.completed = true;
     return util::Ok();

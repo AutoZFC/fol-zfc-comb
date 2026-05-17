@@ -931,6 +931,78 @@ FormulaHandle FormulaBuilder::eliminate_descriptions(FormulaHandle h) {
     return elim_desc_dispatch(*this, h);
 }
 
+// ==================== GlobalContext registration (Path D normalization) ====================
+//
+// Every axiom / claim / theorem / schema entering ctx is funneled through
+// the load-time ι normalization. Wrapped in helpers below so call sites
+// stay terse. See IOTA_ELIM_DESIGN.md §1.5 for the topological-order
+// argument that makes this sufficient for end-to-end ι-freedom.
+
+namespace {
+
+// Normalize a sentence's root formula via eliminate_descriptions. If the
+// formula is unchanged (no ι present), returns the original sentence
+// handle unchanged. Otherwise registers a new Sentence wrapping the
+// normalized root.
+SentenceHandle normalize_iota_in_sentence(GlobalContext& ctx,
+                                          SentenceHandle s) {
+    if (!s.valid()) return s;
+    FormulaBuilder b(ctx);
+    FormulaHandle root = s.get().root();
+    FormulaHandle normalized = b.eliminate_descriptions(root);
+    if (normalized == root) return s;
+    return ctx.add_sentence(Sentence(normalized));
+}
+
+// Normalize a schema body. Schemas can't be wrapped in a Sentence (they
+// contain SchemaVar — not closed), so the helper returns a raw
+// FormulaHandle. The SchemaVar arm of elim_desc_dispatch (edge case 11)
+// handles ι in schema-parameter args.
+FormulaHandle normalize_iota_in_formula(GlobalContext& ctx,
+                                        FormulaHandle h) {
+    if (!h.valid()) return h;
+    FormulaBuilder b(ctx);
+    return b.eliminate_descriptions(h);
+}
+
+}  // namespace
+
+void GlobalContext::add_axiom(const std::string& name, SentenceHandle sentence) {
+    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    named_axioms_[name] = normalized;
+    known_.insert(normalized);
+}
+
+void GlobalContext::add_definition(const std::string& predicate_name,
+                                   const std::string& axiom_name,
+                                   SentenceHandle sentence) {
+    defined_predicates_[predicate_name] = axiom_name;
+    add_axiom(axiom_name, sentence);   // re-uses add_axiom's normalization
+}
+
+void GlobalContext::add_theorem(const std::string& name, SentenceHandle sentence) {
+    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    named_theorems_[name] = normalized;
+    known_.insert(normalized);
+}
+
+void GlobalContext::add_unproved_theorem(const std::string& name, SentenceHandle sentence) {
+    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    named_theorems_[name] = normalized;
+    known_.insert(normalized);
+    unproved_theorems_.insert(name);
+}
+
+void GlobalContext::add_claim(const std::string& name, SentenceHandle sentence) {
+    SentenceHandle normalized = normalize_iota_in_sentence(*this, sentence);
+    named_claims_[name] = normalized;
+}
+
+void GlobalContext::add_schema(const std::string& name, SchemaDefinition def) {
+    def.body = normalize_iota_in_formula(*this, def.body);
+    named_schemas_[name] = std::move(def);
+}
+
 }  // namespace logic
 
 
