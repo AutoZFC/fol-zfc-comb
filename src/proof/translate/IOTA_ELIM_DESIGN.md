@@ -335,16 +335,62 @@ bug surfaced at the boundary.
 | 9 | User `iota_elim` body with fixed vars from outer scope | existing `description_body_accessible` check |
 | 10 | `@def`-marked axioms | `@def` shape preserved by normalization |
 
-### Edge cases needing verification before implementation
+### Edge case 11 (schema-parameter ι args): confirmed gap, design adjustment specified
+
+Schema axioms in bridge.fol.def carry ι inside schema-parameter args:
+
+```
+schema ArithSimp_2enat_diff_split [P(1)]:
+    forall a. forall b. (P((iota _v0. Arith_2ediff(a, b, _v0))) <-> ...)
+```
+
+Internally: `∀a. ∀b. SchemaVar{id=0, args=[Term::description(...)]} ↔ ...`.
+
+The previous (reverted) `elim_desc_dispatch` in `src/core/formula.cpp`
+passed SchemaVar through unchanged:
+
+```cpp
+if (f.is_schema_var()) {
+    return negate ? b.make_not(h) : h;   // ι in args NOT eliminated
+}
+```
+
+So as-was, axiom-normalization would leave ι in SchemaVar args
+untouched, and the instantiated formula at proof time would still
+contain ι — defeating Path D.
+
+**Resolution**: when re-introducing `eliminate_descriptions`, extend
+the SchemaVar arm to apply the Russell rewrite to ι args, mirroring
+`elim_in_pred`'s treatment of concrete predicates:
+
+```
+SchemaVar{id, args=[..., ι.B, ...]}
+    ↦  ∃x. (B(x) ∧ SchemaVar{id, args=[..., x, ...]})   (positive polarity)
+    ↦  ∀x. (¬B(x) ∨ SchemaVar{id, args=[..., x, ...]})  (negative polarity)
+```
+
+De Bruijn discipline: replace the ι arg with `Gen(0)` (new ∃-bound
+var); shift other args up by 1 via `shift_term`; recursively peel any
+remaining ι in other args (matches `elim_in_pred`'s recursive call at
+`formula.cpp:995`).
+
+Soundness at instantiation: at use-time, `bindings[id]` provides the
+schema-parameter's body. After substitution, `Gen(0)` resolves to the
+new ∃-bound variable. Result: `∃x. (B(x) ∧ instantiated-P(x))` —
+identical to the Russell rewrite of `P(ι.B)`. The schema-instantiation
+machinery (`instantiate_schema` in `formula.cpp:588`) already recurses
+into description bodies via `instantiate_schema_in_term`, so the
+rewrite composes cleanly.
+
+This is a small addition to `elim_desc_dispatch` (~20 LOC), captured
+in the implementation sequencing in §8.
+
+### Other edge cases for awareness (not blockers)
 
 | # | Case | Concern |
 |---|---|---|
-| 11 | Schema axioms with ι in schema-parameter args (`schema X [P(1)]: P(ιu.B(u))`) | Schema instantiation must compose correctly with the normalized form. Needs a small test. |
 | 12 | Axiom whose ι body is unsatisfiable in the theory | Existence-presumption gap. Mitigation: load-time warning lists ι bodies; user audits. |
 | 13 | Axiom-graph cycles (axiom A's ι body references ι from axiom B) | Normalize in load order (dependencies-first by `include` graph; already the existing discipline). |
-
-None are blockers. (11) is the only one requiring concrete test
-verification before locking in.
 
 ## 5. Testing strategy
 
@@ -404,25 +450,40 @@ test/iota_elim/
 └── eliminate_iota_corpus_test.cpp
 ```
 
-Total estimated: ~640 LOC across 7 files (vs. ~1100 LOC for the
-previous Path 1 design, vs. 1127 LOC for the deleted phase-based
-implementation). Path D is *both simpler and more complete* than the
-alternatives.
+Total estimated: ~640 LOC across 7 files for new translator code, plus
+~360 LOC re-introduced for `eliminate_descriptions` and its SchemaVar
+extension (`src/core/formula.{h,cpp}`, ported from the reverted
+commit `007b5e2` with the §4 edge-case-11 fix applied). Grand total
+~1000 LOC. Compare to ~1100 LOC for the previous Path 1 design and
+1127 LOC for the deleted phase-based implementation. Path D is *both
+simpler and more complete* than the alternatives.
 
 ## 8. Sequencing
 
-1. **Verify edge case 11** (schema interaction): hand-craft a minimal
-   schema axiom with ι, run through normalization, instantiate, check
-   the result is sound. This is the one unknown that could force
-   design changes.
-2. **Implement axiom normalization** at the load path, with the
-   warning emission. Add `axiom_normalize_test`.
-3. **Pick the bellwether set**: ~20 proofs hand-picked from the prior
+Prerequisite work (none of this exists at the current branch HEAD;
+`eliminate_descriptions` was reverted with the prior iota work and
+needs re-introduction):
+
+0a. **Re-introduce `eliminate_descriptions`** in `src/core/formula.cpp`
+    + declaration in `src/core/formula.h`. Port from the reverted
+    commit `007b5e2` (~341 LOC). Spec already exists at
+    `src/proof/translate/ELIMINATE_DESCRIPTIONS.md`.
+0b. **Extend `elim_desc_dispatch` to handle SchemaVar args** (edge
+    case 11). Add Russell rewrite for SchemaVar with ι args, ~20 LOC.
+    Test on both single-ι-arg and multi-ι-arg schema bodies, plus
+    nested-quantifier cases.
+
+Main work:
+
+1. **Implement axiom normalization** at the load path, with the
+   warning emission. Add `axiom_normalize_test` covering edge cases
+   1-10 and the SchemaVar extension from 0b.
+2. **Pick the bellwether set**: ~20 proofs hand-picked from the prior
    corpus run's failure buckets. Commit as `BELLWETHER.txt`.
-4. **Implement the proof-level pass** layer by layer:
+3. **Implement the proof-level pass** layer by layer:
    `IotaInventory → EliminationPlan → ProofRewriter →
    NDVerifierGate → top-level pass`. Test each layer in isolation.
-5. **Wire into NDtoLKR**, run the full corpus, hit the bellwether +
+4. **Wire into NDtoLKR**, run the full corpus, hit the bellwether +
    80% gate.
 
 ## 9. References
