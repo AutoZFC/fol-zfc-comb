@@ -63,6 +63,7 @@ cc_library(
         "//src/proof/lkr:ops",
         "//src/proof/lkr:verifier",
         "//src/proof/nd:ops",
+        "//src/proof/translate/iota_elim:eliminate_iota",
         "//src/util:error",
     ],
 )

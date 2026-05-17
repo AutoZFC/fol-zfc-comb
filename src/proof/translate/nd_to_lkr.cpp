@@ -2,6 +2,7 @@
 
 #include "emit_close.h"
 #include "env.h"
+#include "iota_elim/eliminate_iota.h"
 #include "nd_to_lkr_internal.h"
 
 #include "src/proof/lkr/literal.h"
@@ -498,19 +499,13 @@ util::Result<FormulaHandle> compute_flat_formula(
             TRY_ASSIGN(target, require_step(op.target_formula, "bottom_elim"));
             return target;
         },
-        [&](const nd::EqSubst& op) -> util::Result<FormulaHandle> {
-            TRY_ASSIGN(eq, require_step(op.eq_formula, "eq_subst"));
-            TRY_ASSIGN(target, require_step(op.target, "eq_subst"));
-            const Formula& f = eq.get();
-            if (!f.is_predicate()
-                || f.as_predicate().predicate().get().get_name() != "eq"
-                || f.as_predicate().args().size() != 2) {
-                return MAKE_ERROR << "eq_subst: expected eq(a, b), got: "
-                                  << f.to_string();
-            }
-            Term a = f.as_predicate().args()[0];
-            Term b = f.as_predicate().args()[1];
-            return builder.translate_term(target, a, b);
+        // eq_subst is deprecated in translation; the gate at NDtoLKR::apply
+        // entry rejects programs containing it. This arm exists only to
+        // keep the std::visit exhaustive — it should never fire.
+        [&](const nd::EqSubst&) -> util::Result<FormulaHandle> {
+            return MAKE_ERROR
+                << "compute_flat_formula: eq_subst is deprecated in "
+                << "translation (should have been rejected upstream)";
         },
         [&](const nd::EqSym& op) -> util::Result<FormulaHandle> {
             TRY_ASSIGN(eq, require_step(op.eq_formula, "eq_sym"));
@@ -524,29 +519,6 @@ util::Result<FormulaHandle> compute_flat_formula(
             Term a = f.as_predicate().args()[0];
             Term b = f.as_predicate().args()[1];
             return builder.predicate(f.as_predicate().predicate(), {b, a});
-        },
-        [&](const nd::IotaElim& op) -> util::Result<FormulaHandle> {
-            // Under Path D / Russell sugar, iota_elim's logical output
-            // B(ι.B) coincides with its source ∃x.B(x).
-            //
-            // CRITICAL: must normalize the source first, then extract its
-            // body for the iota term — otherwise the term references the
-            // pre-normalization body while the stored formula uses the
-            // post-normalization body, and downstream forall_elim
-            // instantiates with a stale term. (Triggers when B has
-            // nested ι.) The outer compute_flat_formula_normalized
-            // wrapper would normalize again, but it'd be too late.
-            TRY_ASSIGN(ex_raw, require_step(op.exists_formula, "iota_elim"));
-            FormulaHandle ex = builder.eliminate_descriptions(ex_raw);
-            const Formula& f = ex.get();
-            if (f.is_quantified() && f.as_quantified().op == Op::Exists) {
-                Term iota_term = Term::description(f.as_quantified().body);
-                term_for_idx[idx] = iota_term;
-                if (op.bind_iota.has_value() && !op.bind_iota->name.empty()) {
-                    name_table[op.bind_iota->name] = iota_term;
-                }
-            }
-            return ex;
         },
         [&](const auto& op) -> util::Result<FormulaHandle> {
             (void)op;
@@ -724,8 +696,13 @@ util::Result<ScopeDeps> compute_flat_step_proof_deps(
         [&](const nd::BottomElim& op) -> util::Result<ScopeDeps> {
             return deps_of(op.bottom) | deps_of(op.target_formula);
         },
-        [&](const nd::EqSubst& op) -> util::Result<ScopeDeps> {
-            return deps_of(op.eq_formula) | deps_of(op.target);
+        // eq_subst is deprecated in translation; the gate at NDtoLKR::apply
+        // entry rejects programs containing it. This arm exists only to
+        // keep the std::visit exhaustive — it should never fire.
+        [&](const nd::EqSubst&) -> util::Result<ScopeDeps> {
+            return MAKE_ERROR
+                << "compute_flat_step_proof_deps: eq_subst is deprecated in "
+                << "translation (should have been rejected upstream)";
         },
         [&](const nd::EqSym& op) -> util::Result<ScopeDeps> { return deps_of(op.eq_formula); },
         [&](const nd::DoubleNegElim& op) -> util::Result<ScopeDeps> { return deps_of(op.of); },
@@ -1184,6 +1161,48 @@ util::ResultStatus translate_block(LowerCtx& lc, Env& env,
 util::Result<Program<lkr::Instr>> NDtoLKR::apply(const Program<nd::Instr>& in) {
     if (!ctx_) {
         return MAKE_ERROR << "NDtoLKR: GlobalContext required";
+    }
+
+    // eq_subst is a deprecated ND rule. It exists in the ND verifier for
+    // existing hand-written proofs (zfc/naturals, zfc/induction/well_founded)
+    // but is not supported by the LK / Comb translation pipeline. Any
+    // proof using it must be rewritten without eq_subst (typically via
+    // eq_sym + axiom-style equality reasoning, or by skipping translation
+    // entirely for Isabelle-exported proofs). Reject at the boundary
+    // rather than failing later inside the dispatch tables, so callers
+    // get an unambiguous diagnostic.
+    for (uint32_t i = 0; i < in.instrs.size(); ++i) {
+        if (std::holds_alternative<nd::EqSubst>(in.instrs[i])) {
+            return MAKE_ERROR
+                << "NDtoLKR: eq_subst at instr #" << i << " is deprecated; "
+                << "translation does not support eq_subst (see "
+                << "src/proof/translate/EQ_SUBST_DEPRECATION.md)";
+        }
+    }
+
+    // Path D / Layer 2: if the user proof contains any iota_elim, run the
+    // proof-level rewrite first (iota_elim → exists_elim + witness
+    // substitution + scope re-closing), then recurse on the ι-free output.
+    // The downstream NDtoLKR machinery (decompose_blocks /
+    // compute_flat_formula / close_flat) does not handle iota_elim — the
+    // rewrite is responsible for eliminating it before LKR translation.
+    if (iota_elim::EliminateIotaInProof::program_contains_iota(in)) {
+        // Resolve the goal formula for NDVerifierGate. By Path D, the
+        // stored claim formula is already ι-free.
+        SentenceHandle goal_sentence{};
+        if (auto cl = ctx_->find_claim(in.claim_name)) {
+            goal_sentence = cl.value();
+        } else if (auto kn = ctx_->find_known(in.claim_name)) {
+            goal_sentence = kn.value();
+        } else {
+            return MAKE_ERROR << "NDtoLKR: claim '" << in.claim_name
+                              << "' not found in context";
+        }
+        iota_elim::EliminateIotaInProof pass(
+            *ctx_, goal_sentence.get().root());
+        auto rewritten = pass.apply(in);
+        if (!rewritten.ok()) return rewritten.error();
+        return apply(std::move(rewritten).unwrap());
     }
 
     Program<lkr::Instr> out;

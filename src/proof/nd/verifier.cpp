@@ -378,6 +378,39 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Qed& op) {
 
 }  // namespace
 
+namespace {
+
+// Shared loop: execute every instruction in `prog` against `s` in program
+// order. Returns Ok at qed completion, or an error mid-execution.
+util::ResultStatus run_session(Session& s, const NDProgram& prog) {
+    for (uint32_t i = 0; i < prog.instrs.size(); ++i) {
+        const auto& instr = prog.instrs[i];
+        auto status = std::visit(
+            [&](const auto& op) -> util::ResultStatus { return exec_op(s, i, op); },
+            instr);
+        if (!status.ok()) {
+            return MAKE_ERROR << "instr %" << i << ": " << status.error().to_string();
+        }
+        if (s.completed) {
+            return util::Ok();
+        }
+    }
+    return MAKE_ERROR << "ND proof: missing qed";
+}
+
+// Populate schema parsing context when claim_name is a schema.
+void populate_schema_context(Session& s, const NDProgram& prog) {
+    if (auto schema = s.ctx.find_schema(prog.claim_name)) {
+        for (size_t i = 0; i < schema->var_names.size(); ++i) {
+            s.schema_var_map[schema->var_names[i]] = i;
+            if (i < schema->var_arities.size())
+                s.schema_arity_map[schema->var_names[i]] = schema->var_arities[i];
+        }
+    }
+}
+
+}  // namespace
+
 util::ResultStatus NDVerifier::verify(
     GlobalContext& ctx,
     FormulaHandle  goal_formula,
@@ -391,30 +424,28 @@ util::ResultStatus NDVerifier::verify(
     const NDProgram& prog = std::get<NDProgram>(proof.body);
 
     Session s(ctx, goal_formula, prog);
+    populate_schema_context(s, prog);
 
-    // Schema parsing context: populated only when claim_name names a schema.
-    if (auto schema = ctx.find_schema(prog.claim_name)) {
-        for (size_t i = 0; i < schema->var_names.size(); ++i) {
-            s.schema_var_map[schema->var_names[i]] = i;
-            if (i < schema->var_arities.size())
-                s.schema_arity_map[schema->var_names[i]] = schema->var_arities[i];
-        }
-    }
+    auto status = run_session(s, prog);
+    if (!status.ok()) return status;
 
-    for (uint32_t i = 0; i < prog.instrs.size(); ++i) {
-        const auto& instr = prog.instrs[i];
-        auto status = std::visit(
-            [&](const auto& op) -> util::ResultStatus { return exec_op(s, i, op); },
-            instr);
-        if (!status.ok()) {
-            return MAKE_ERROR << "instr %" << i << ": " << status.error().to_string();
-        }
-        if (s.completed) {
-            last_used_ = std::move(s.used_names);
-            return util::Ok();
-        }
-    }
-    return MAKE_ERROR << "ND proof: missing qed";
+    last_used_ = std::move(s.used_names);
+    return util::Ok();
+}
+
+util::Result<std::vector<FormulaHandle>> NDVerifier::trace_formulas(
+    GlobalContext&    ctx,
+    const NDProgram&  prog)
+{
+    // No goal: pass an invalid handle; the qed handler skips goal-match
+    // when goal_formula is invalid.
+    Session s(ctx, FormulaHandle{}, prog);
+    populate_schema_context(s, prog);
+
+    auto status = run_session(s, prog);
+    if (!status.ok()) return status.error();
+
+    return std::move(s.step_env);
 }
 
 }  // namespace logic::proof::nd

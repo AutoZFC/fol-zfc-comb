@@ -79,6 +79,20 @@ cc_test(
 )
 
 cc_test(
+    name = "iota_translator_test",
+    srcs = ["iota_translator_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/nd:lowering",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/iota_elim:eliminate_iota",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "nd_to_lkr_corpus_test",
     srcs = ["nd_to_lkr_corpus_test.cpp"],
     data = [
@@ -129,6 +143,7 @@ test_suite(
     tests = [
         ":comb_test",
         ":core_test",
+        ":iota_translator_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_corpus_test",
         ":nd_to_lkr_test",

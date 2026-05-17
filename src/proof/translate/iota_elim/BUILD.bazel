@@ -1,0 +1,77 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# IotaInventory: analysis-only iota_elim site discovery.
+cc_library(
+    name = "iota_inventory",
+    srcs = ["iota_inventory.cpp"],
+    hdrs = ["iota_inventory.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+    ],
+)
+
+# EliminationPlan: per-site scope-close planning (LIFO discipline).
+cc_library(
+    name = "elimination_plan",
+    srcs = ["elimination_plan.cpp"],
+    hdrs = ["elimination_plan.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":iota_inventory",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)
+
+# ProofRewriter: structural witness substitution (Leisenring construction).
+cc_library(
+    name = "proof_rewriter",
+    srcs = ["proof_rewriter.cpp"],
+    hdrs = ["proof_rewriter.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":elimination_plan",
+        ":iota_inventory",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)
+
+# NDVerifierGate: soundness gate (I-3 + I-4).
+cc_library(
+    name = "nd_verifier_gate",
+    srcs = ["nd_verifier_gate.cpp"],
+    hdrs = ["nd_verifier_gate.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
+# EliminateIotaInProof: top-level pass.
+cc_library(
+    name = "eliminate_iota",
+    srcs = ["eliminate_iota.cpp"],
+    hdrs = ["eliminate_iota.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":elimination_plan",
+        ":iota_inventory",
+        ":nd_verifier_gate",
+        ":proof_rewriter",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)
