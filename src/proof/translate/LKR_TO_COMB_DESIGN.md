@@ -218,8 +218,159 @@ Base: `N = {u_α, u_ᾱ}` with one link `{u_α, u_ᾱ}`; `G(C) = •α + •ᾱ`
 
 ### 4.2 `One(idx)`
 
-Base: `N = {u_1}` (no link); `G(C) = •1`; `f = { u_1 ↦ •1 }`. Empty
-dualizer.
+#### Rule semantics
+
+Hughes §11.1 base case:
+
+```
+─────────  One
+ ⊢ 1
+```
+
+In our NNF encoding the truth literal `1` is `¬⊥` — `Compound{Not,
+Bottom}`. A bare `Bottom` is `0` (unprovable). The LKR op
+`One(idx)` is a closing leaf that closes the current goal when
+`entries[idx]` is `¬⊥`. The LKRVerifier enforces the shape check.
+
+#### State construction (leaf base case)
+
+For a conclusion sequent `Γ` with `entries[idx] = ¬⊥`:
+
+- `N` — one vertex `u_1` with `kind = VertexKind::One`. No
+  `cograph_edges`, no `binding_edges`, no `links`, empty `dualizer`.
+- `G(C)` — canonical target's fograph at the position assigned to
+  the `¬⊥` entry. By §4.13 below, that position holds a single vertex
+  with `kind = VertexKind::One`.
+- `f : u_1 ↦ canonical_pos(idx)`.
+- Other entries of `Γ` (if any) become *uncovered* in `f` — exactly the
+  same treatment as the side entries in `AxiomLit`.
+
+In short: this is the `AxiomLit` base case with one vertex instead of
+two and no link.
+
+#### Soundness lemma
+
+We use the same framing as `AxiomLit` (§4.1): the leaf isn't required
+to be verifier-accepted *standalone* — only the composed final
+`CombProof` is checked by the output gate. The lemma we prove is that
+the leaf's constructed source piece is internally consistent and
+combines correctly with the surrounding per-rule operations.
+
+**Claim.** `(N_leaf, f_leaf)` constructed above is a well-formed
+fonet piece (Def. 5.3 conditions that depend only on the leaf):
+
+1. **Link covering** (Def. 5.3 (i)): every atom-vertex lies in exactly
+   one link; binders and `1` are unlinked. `N_leaf` has one vertex
+   `u_1` of kind `One` with `in_link[u_1] = 0`. ✓ Matches the
+   verifier's switch in `verifier.cpp::verify_fonet` 2A.1.
+2. **Dualizer totality** (Def. 5.3 (ii)): every existential-binder var
+   has a dualizer key. `N_leaf` has no binders. Vacuous; empty
+   dualizer suffices.
+3. **Binder scope** (Def. 3.2): vacuous, no binders.
+4. **No induced bimatching** (Def. 5.3 (iii)): the leap graph
+   contribution from the leaf is empty (no links added). Vacuous.
+
+The skew-bifibration conditions (`f` a skew fibration on cograph
+edges, ordinary fibration on binding edges) are checked on the *final*
+composed `CombProof` after all per-rule operations have run. The leaf
+contributes one source vertex with no edges, fibrated to the canonical
+position of `entries[idx]`. The surrounding rules — `And`/`Cut` cross-
+edges, `Forall`/`Exists` binder additions, the label-derived binding
+post-pass — are what discharge the skew/fibration conditions globally,
+exactly as for `AxiomLit`'s atom vertices.
+
+**Consequence.** A `walk` whose derivation tree's leaves are all
+`AxiomLit` or `One` (or `CloseByLemma` with valid registry entries),
+composed with the existing per-rule operations, produces a
+`CombProof` accepted by `CombVerifier` against the §15-augmented
+goal — completing the Theorem A obligation for the `One` row.
+
+#### Completeness scope
+
+**Claim.** For every accepted LKR program whose closing leaf op is
+`One(idx)`, the §11.1 walk produces an `Ok(cp)` that
+`CombVerifier` accepts.
+
+**Proof.** LKRVerifier accepts `One(idx)` only when
+`entries[idx] = ¬⊥`. The Fograph extension (next subsection)
+ensures the canonical target has a `VertexKind::One` vertex at
+`canonical_pos(idx)`. The leaf builder constructs `(N, G, f)` as
+above. By the soundness lemma, the resulting `CombProof` is verifier-
+accepted. ∎
+
+The rest of the proof tree (linear and branching rules above the leaf)
+inherits the existing per-rule completeness. The leaf is a drop-in
+replacement for `AxiomLit` from `walk`'s perspective.
+
+#### Infrastructure: Fograph extension for `⊥` / `¬⊥`  (§13)
+
+`src/proof/comb/fograph.cpp::build` currently asserts on any compound
+whose op isn't `And`, `Or`, or `Not(predicate)`. To support `One` we
+add one case:
+
+```
+if (c.op == Op::Not) {
+    if (c.left->is_compound() &&
+        c.left->as_compound().op == Op::Bottom) {
+        // ¬⊥ ↦ one vertex with kind = One.
+        size_t id = out.labels.size();
+        VertexLabel lbl;
+        lbl.kind = VertexKind::One;
+        out.labels.push_back(std::move(lbl));
+        return {id};
+    }
+    // existing ¬predicate handling.
+}
+```
+
+`Bottom` alone (without enclosing `Not`) is unprovable — we assert
+rather than build a vertex for it, because it never appears in a
+verified LKR sequent (LKRVerifier rejects programs that don't close).
+
+`labels_equal` in `verifier.cpp` already returns `true` for two `One`
+vertices (kind-only comparison) — no change needed there.
+
+#### Position counting
+
+`count_vertices` (the helper in `cut_augment.cpp`,
+`sequent_replay.cpp`, and `walk.cpp`) returns `1` for any
+`Compound{Not, _}`. This is already correct for `¬predicate` (one
+atom vertex) and remains correct for `¬⊥` (one `One` vertex). No
+changes needed.
+
+For bare `Bottom`, the current code returns `0` (falls through). We'll
+add an assertion `Compound{Bottom}` paths shouldn't be reachable,
+mirroring the Fograph builder's stance.
+
+#### Test plan
+
+Three tests, smallest first:
+
+1. **`fograph_one_vertex`** — direct Fograph construction of `¬⊥`
+   produces a single `VertexKind::One` vertex; `CombVerifier`'s
+   target check accepts a `CombProof` whose target is `G(¬⊥)`.
+2. **`lkr_to_comb_one_closer`** — LKR program `[Or(0); One(1)]` (or
+   the simplest shape that places `¬⊥` as a sequent entry) translates
+   and verifies.
+3. **`nd_to_lkr_to_comb_bottom_elim`** — an ND proof that uses
+   `bottom_elim` (`⊢ ⊥ → ψ`) goes ND → LKR → Comb end-to-end. ND's
+   `BottomElim` is what NDtoLKR translates into `One` ops in the
+   target sequent (see `cut_spine.cpp::close_bottom_elim`), so this
+   exercises the full pipeline.
+
+Each test runs the existing output-gate verifiers. No new verifier
+plumbing needed.
+
+#### Implementation order
+
+1. Add the Fograph `¬⊥` case + targeted test 1.
+2. Add `walk.cpp::build_leaf_one` and wire it into `walk_recursive`'s
+   leaf dispatch (parallel to `build_leaf_axiom_lit`) + test 2.
+3. Verify end-to-end test 3 passes.
+
+The walk leaf builder is ~15 lines (build a 1-vertex source, no edges,
+fibration of `[entry_positions[idx][0]]`). No changes to per-rule
+linear or branching code.
 
 ### 4.3 `Exchange(i, j)`
 
