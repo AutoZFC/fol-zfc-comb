@@ -31,26 +31,33 @@ size_t count_fograph_vertices(FormulaHandle f) {
 // =====================================================================
 
 // =====================================================================
-// CloseByLemma — Strategy B leaf builder.
+// Rule: CloseByLemma  (Hughes §15 Strategy B; LKR_TO_COMB_DESIGN.md §4.11)
 //
-// The lemma's CombProof is a proof of φ_L (NNF). It was built against
-// G(φ_L) as its target with its own vertex numbering [0, |φ_L|). To
-// paste it into our LEFT subgoal:
-//   - target = our shared canonical target
-//   - source = lemma's source (with possibly remapped dualizer eigens)
-//   - fibration[v] = lemma_target_positions[lemma.fibration[v]]
+// Premise: (none — closing leaf)
+// Conclusion: CombProof of any sequent containing φ_L, where φ_L is
+//   the formula of the lemma named in `op.axiom`. Strategy B
+//   precondition: the closing op must be preceded by Cut(φ_L), so
+//   that the LEFT subgoal's last entry is φ_L.
 //
-// `lemma_target_positions` = entry_positions.back() = canonical
-// positions of the LEFT subgoal's LAST entry (= φ_L), which is the cut
-// formula introduced by the preceding Cut(φ_L). The lemma's vertex k
-// (at lemma.target position k) maps to canonical position
-// lemma_target_positions[k].
+// Operation:
+//   - Look up the lemma's pre-built CombProof L_proof in cc.lemmas.
+//   - Target = shared canonical target.
+//   - Source = lemma's source (no shape change).
+//   - Fibration = lemma's fibration composed with the position remap:
+//       fibration[v] := lemma_target_positions[lemma.fibration[v]]
+//     where lemma_target_positions = canonical positions of the LEFT
+//     subgoal's last entry (= φ_L's positions in the canonical target).
 //
-// Note on dualizer: the lemma's dualizer maps lemma's eigen-vars (which
-// correspond to binder vertices in lemma.target) to terms. After
-// pasting, those eigens should be remapped to the canonical target's
-// binder vars at the corresponding positions. For lemmas without
-// quantifiers (empty dualizer), no remap is needed — the common case.
+// Limitation (open obligation; see COMPLETENESS.md row CloseByLemma):
+//   This implementation rejects lemmas with non-empty dualizer. A
+//   complete implementation would remap lemma eigens to the canonical
+//   target's binder vars at the position-remapped vertices.
+//
+// Soundness: the lemma was verified standalone, so L_proof is a valid
+//   CombProof of φ_L. Position-remapping into the shared target
+//   preserves the fibration's shape; Strategy B's pairing with a
+//   preceding Cut(φ_L) handles the §15 augmentation (φ_L ∧ ¬φ_L) as
+//   a new disjunct of the augmented goal.
 util::Result<comb::CombProof> build_leaf_close_by_lemma(
     WalkContext&                                 cc,
     const lkr::CloseByLemma&                     op,
@@ -108,6 +115,24 @@ util::Result<comb::CombProof> build_leaf_close_by_lemma(
     return cp;
 }
 
+// =====================================================================
+// Rule: AxiomLit  (Hughes §11.1 base case; LKR_TO_COMB_DESIGN.md §4.1)
+//
+// Premise: (none — closing leaf)
+// Conclusion: CombProof of any sequent containing atom α at lit_a and
+//   its dual ᾱ at lit_b (atomic literals, opposite polarity, dual args
+//   under the dualizer).
+//
+// Operation: build N = {u_α, u_ᾱ} with one link {u_α, u_ᾱ}; empty
+//   dualizer, no cograph/binding edges (binding edges are derived in
+//   the post-pass, see derive_binding_edges); f maps the two source
+//   vertices to the canonical positions of lit_a and lit_b.
+//
+// Soundness: the leaf is a well-formed fonet piece (Def. 5.3): every
+//   atom in exactly one link, no binders so dualizer totality is
+//   vacuous, no induced bimatching in the trivially-empty leap graph.
+//   The skew bifibration conditions are discharged by the surrounding
+//   per-rule operations after composition.
 util::Result<comb::CombProof> build_leaf_axiom_lit(
     WalkContext&                                 cc,
     const lkr::AxiomLit&                         op,
@@ -142,9 +167,26 @@ util::Result<comb::CombProof> build_leaf_axiom_lit(
 }
 
 // =====================================================================
-// And — fusion of two combinatorial proofs (paper §11.1 ∧ case).
-// =====================================================================
-
+// Rule: And  (Hughes §11.1 ∧-case; LKR_TO_COMB_DESIGN.md §4.9)
+//
+// Premise: CombProof(Γ_1, φ_1)   CombProof(Γ_2, φ_2)
+// Conclusion: CombProof(Γ_1, Γ_2, φ_1 ∧ φ_2)
+//
+// Operation: G(C) = G(Γ_1) + G(Γ_2) + (G(φ_1) × G(φ_2)) — note the
+//   × join on the conjuncts' fographs.
+//
+//   Witness portions:  P_i = f_i^{-1}(V_{G(φ_i)})
+//   Strong/weak:       f_i is strong iff P_i ≠ ∅, weak otherwise.
+//
+//   - Both strong | both weak  → fuse disjointly with cograph edges
+//     P_1 × P_2 added between the witness portions (the new × in C).
+//   - One weak, one strong     → keep the weak side alone (the weak
+//     side doesn't actually use its conjunct; it suffices via the
+//     canonical injection for the joined conclusion).
+//
+// Soundness: Hughes §11.1 ∧-case lemma. Strong/weak classification
+//   preserves fonet well-formedness; the fibration extends to the
+//   join (cograph edges of the source mirror the new × in target).
 util::Result<comb::CombProof> rule_and(
     WalkContext&                                 cc,
     const lkr::And&                              op,
@@ -249,13 +291,25 @@ util::Result<comb::CombProof> rule_and(
 }
 
 // =====================================================================
-// Cut — per Hughes §15: identical to the And rule's fusion, but the
-// "principal" entry doesn't exist in the pre-Cut sequent; the Cut adds
-// θ to LEFT and ¬θ to RIGHT, and the augmented goal includes (θ ∧ ¬θ)
-// as a new disjunct. The cut formula's positions are pre-computed by
-// cut_augment.
-// =====================================================================
-
+// Rule: Cut  (Hughes §15; LKR_TO_COMB_DESIGN.md §4.10)
+//
+// Premise: CombProof(Γ ∪ {θ})   CombProof(Γ ∪ {¬θ})
+// Conclusion: CombProof of the §15-augmented goal, where the running
+//   goal gains a disjunct (θ ∧ ¬θ). The augmentation is built once,
+//   ahead of the walk, by cut_augment.cpp; the canonical target
+//   already accounts for every Cut's contribution at stable positions.
+//
+// Operation: identical fusion to the And rule, but the "principal"
+//   entry doesn't exist in the pre-Cut sequent. We treat the cut
+//   formula's θ-portion on LEFT and ¬θ-portion on RIGHT as the
+//   witness portions P_L, P_R; strong/weak classification proceeds
+//   exactly as in rule_and.
+//
+// Soundness: Hughes §15 Theorem 15.1 — cut combinatorial proofs of
+//   φ are by definition ordinary combinatorial proofs of the augmented
+//   φ ∨ ⋁ (θ_i ∧ ¬θ_i), which is classically equivalent to φ. Each
+//   (θ ∧ ¬θ) disjunct is contradictory, so adding them preserves
+//   validity. Thm 15.1 ensures this is sound and complete.
 util::Result<comb::CombProof> rule_cut(
     WalkContext&                                 cc,
     comb::CombProof                              left_cp,
@@ -339,9 +393,34 @@ util::Result<comb::CombProof> rule_cut(
 }
 
 // =====================================================================
-// Forall — add a universal binder vertex (Case B) or pass through (Case A).
-// =====================================================================
-
+// Rule: Forall  (Hughes §11.1 ∀-case; LKR_TO_COMB_DESIGN.md §4.7 + §7.5)
+//
+// Premise: CombProof(Γ, φ)   side condition: x not free in Γ
+// Conclusion: CombProof(Γ, ∀x.φ)
+//
+// Operation: G(C) = G(Γ) + (•x + G(φ)) — note the + (universal is
+//   `+`-attached to its body, i.e., no cograph edges between the
+//   binder and the body in the cograph).
+//
+//   Witness portion: P = f^{-1}(V_{G(φ)})
+//   - Case A (P = ∅): G(φ) was weakened in; •x stays uncovered, return
+//     child unchanged.
+//   - Case B (P ≠ ∅): add a new vertex b_x to N, no new cograph edges;
+//     map b_x ↦ •x (the canonical binder position).
+//
+// Binding edges in source: NOT constructed here. They are derived
+//   from labels in derive_binding_edges() at the end of walk, per
+//   Hughes Def. 3.1. The previous per-rule construction (edges to
+//   P only) missed atoms in carried-over sequent entries that share
+//   the bound var (see §7.5 for the failure mode and resolution).
+//
+// Var alignment: requires the alpha-rename pre-pass (see
+//   alpha_rename.{h,cpp}) so that op.eigen equals the canonical
+//   binder var Fograph allocates at this principal's binder position.
+//
+// Soundness: Hughes §11.1 ∀-case lemma. The skew bifibration extends
+//   to the join; the post-pass guarantees source binding edges mirror
+//   the target's (which Fograph derives identically from labels).
 util::Result<comb::CombProof> rule_forall(
     WalkContext&                                 cc,
     const lkr::Forall& /*op*/,
@@ -385,10 +464,33 @@ util::Result<comb::CombProof> rule_forall(
 }
 
 // =====================================================================
-// Exists — add an existential binder vertex with cograph (×) edges to
-// the witness portion. Extend dualizer with δ(x) = witness term.
-// =====================================================================
-
+// Rule: Exists  (Hughes §11.1 ∃-case; LKR_TO_COMB_DESIGN.md §4.8 + §7.5)
+//
+// Premise: CombProof(Γ, φ{x ↦ t})   for some witness term t
+// Conclusion: CombProof(Γ, ∃x.φ)
+//
+// Operation: G(C) = G(Γ) + (•x × G(φ)) — note the × (existential is
+//   `×`-attached to its body, i.e., the binder gets cograph edges to
+//   every vertex of G(φ)).
+//
+//   Witness portion: P = f^{-1}(V_{G(φ{x↦t})})
+//   - Case A (P = ∅): φ was weakened in; return child unchanged.
+//   - Case B (P ≠ ∅): add a new vertex b_x to N with cograph edges
+//     {b_x, p} for every p ∈ P (mirroring the × in target); map
+//     b_x ↦ •x. Extend dualizer with δ(x) = t (the witness term, looked
+//     up through cc.replay.term_env via op.witness's TermRef).
+//
+// Binding edges in source: NOT constructed here (same as Forall;
+//   derived in derive_binding_edges).
+//
+// Dualizer conflict check: if the same eigen has been bound by an
+//   earlier Exists with a different witness, that's a translator bug
+//   (the LKR program would be inconsistent). Conflicting bindings
+//   surface here as MAKE_ERROR rather than via verifier failure.
+//
+// Soundness: Hughes §11.1 ∃-case lemma. δ(x) records the witness so
+//   the linked atoms unify under δ; the cograph cross-edges encode
+//   the × join in the target.
 util::Result<comb::CombProof> rule_exists(
     WalkContext&                                 cc,
     const lkr::Exists&                           op,
@@ -454,22 +556,30 @@ util::Result<comb::CombProof> rule_exists(
 }
 
 // =====================================================================
-// Source binding-edge derivation (Hughes Def. 3.1, applied to fonet).
+// Post-pass: source binding-edge derivation
+//   (Hughes Def. 3.1, applied to fonet; LKR_TO_COMB_DESIGN.md §7.5)
 //
 // In a fograph — and hence in a fonet, which is a linked fograph — the
-// binding edges aren't free parameters: they're DERIVED from labels.
-// Concretely, for each binder vertex b with var v and each atom vertex
-// a whose args contain Fixed(v), the pair (b, a) is a binding edge.
+// binding edges are not free parameters: they are DERIVED from labels.
+// For each binder vertex b with var v and each atom vertex a whose
+// args contain Fixed(v), the pair (b, a) is a binding edge.
 //
 // Fograph builds the target's binding edges this way in
 // fograph.cpp::add_binding_edges. The source must follow the same
 // recipe — anything else risks producing fonets whose binding edges
 // fail the verifier's unique-lift fibration check against the target.
 //
-// We compute source labels via fibration (source_label(v) =
-// target.labels[fibration[v]]), then run the same per-vertex scan.
-// Any binding edges accumulated by per-rule code earlier in walk are
-// discarded; this is the single source of truth.
+// Implementation: source labels via fibration (source_label(v) =
+//   target.labels[fibration[v]]), then run the same per-vertex scan.
+//   Any binding edges accumulated by per-rule code earlier in walk are
+//   discarded — this post-pass is the single source of truth.
+//
+// History: the previous code constructed source binding edges per-rule
+//   (rule_forall: edges to atoms in principal's body only). This was a
+//   completeness bug, invisible until quantified end-to-end tests
+//   exercised it (the §7.5 cut-shared-var case). The math-grounded fix
+//   is this post-pass — matching Hughes' definition verbatim — rather
+//   than patching per-rule constructions.
 void derive_binding_edges(comb::CombProof& cp,
                           const comb::Fograph& target) {
     cp.source.binding_edges.clear();
@@ -541,15 +651,28 @@ util::Result<comb::CombProof> walk_recursive(
         if (std::holds_alternative<lkr::Or>(instr) ||
             std::holds_alternative<lkr::Exchange>(instr) ||
             std::holds_alternative<lkr::Weakening>(instr)) {
-            // Or/Exchange: cograph associativity/commutativity → fonet
-            // and fibration unchanged. Target is the shared canonical
-            // target; no need to mutate.
-            // Weakening: new vertices are uncovered; canonical target
-            // already includes them at the goal-canonical position if
-            // the weakened entry survives to the goal. (For Weakening
-            // ops that introduce entries with empty position vectors —
-            // i.e., truly new positions outside the canonical target —
-            // proper target augmentation is phase-7 work.)
+            // -------------------------------------------------------------
+            // Rule: Or  (Hughes §11.1 ∨-case; LKR_TO_COMB_DESIGN.md §4.6)
+            //   G(H) = G(C) identically (cograph associativity). f, N
+            //   unchanged — the cheapest rule.
+            //
+            // Rule: Exchange  (Hughes §11.1 X-case; §4.3)
+            //   Cograph commutativity. Vertices identified by occurrence
+            //   (canonical position), so the canonical bijection is the
+            //   identity at the structural level. f, N unchanged.
+            //
+            // Rule: Weakening  (Hughes §11.1 W-case; §4.4)
+            //   PARTIAL: G(C) = G(H) + G(φ) with new G(φ) vertices
+            //   uncovered. When the weakened entry's positions fall
+            //   inside the canonical target's range (built from the
+            //   §15-augmented goal), this is a no-op on N and f.
+            //   When the weakened entry lands outside that range, the
+            //   canonical target must be augmented — see open obligation
+            //   row "Weakening" in COMPLETENESS.md.
+            //
+            // Soundness (all three): trivial; child is already a valid
+            //   CombProof against the shared canonical target.
+            // -------------------------------------------------------------
             return child;
         }
         return MAKE_ERROR

@@ -126,6 +126,18 @@ bool is_no_emit_flat(const nd::Instr& instr) {
 // on the LEFT branch of the cut spine.
 // =========================================================================
 
+// =========================================================================
+// Rule: nd::Use  (ND_TO_LKR_DESIGN.md — COMPLETENESS.md row "Use")
+//
+// ND op: derive a previously-proven theorem's (or axiom's) formula by
+//   referencing it by name. F_k = the axiom/theorem's formula.
+// LKR emission: a single CloseByLemma(name) closing op. The shadow
+//   isn't mutated; the LEFT subgoal contains F_k_nnf and the lemma's
+//   pre-built CombProof gets pasted in by LKRtoComb's Strategy B.
+//
+// Soundness: the lemma is already verified (it must be in the
+//   theorem registry before this proof references it). CloseByLemma's
+//   verifier checks the named lemma's formula equals F_k_nnf.
 util::ResultStatus close_use(
     CutSpineContext&         cc,
     const nd::Use&           op,
@@ -134,13 +146,22 @@ util::ResultStatus close_use(
     std::vector<lkr::Instr>& out)
 {
     (void)cc;
-    // NNF(F_k) equals NNF(the axiom/theorem's formula) — verifier checks.
     lkr::CloseByLemma cb{};
     cb.axiom = AxiomRef{op.axiom.name};
     out.emplace_back(std::move(cb));
     return util::Ok();
 }
 
+// =========================================================================
+// Rule: nd::SchemaInst  (ND_TO_LKR_DESIGN.md — COMPLETENESS.md row "SchemaInst")
+//
+// ND op: instantiate a schema axiom with concrete bindings. F_k = the
+//   schema body with bindings applied.
+// LKR emission: CloseByLemma(schema_name, bindings) — verifier
+//   resolves the schema and applies bindings to reconstruct F_k_nnf.
+//
+// Soundness: schema body is part of the registered axiom; the
+//   bindings are validated at LKR verify time.
 util::ResultStatus close_schema_inst(
     CutSpineContext&         cc,
     const nd::SchemaInst&    op,
@@ -156,10 +177,20 @@ util::ResultStatus close_schema_inst(
     return util::Ok();
 }
 
-// close_forall_elim: F_k = body[x:=t] from step h whose formula is ∀x.body.
-// i_h holds ∃x.NNF(¬body). Emit Exists(i_h, witness=t_lkr) — shadow mutates
-// to NNF(¬body)[x:=t] at i_h. Then emit_close(F_k_idx, i_h) — the two
-// entries are NNF-dual by construction (NNF(¬body)[x:=t] = NNF(¬(body[x:=t]))).
+// =========================================================================
+// Rule: nd::ForallElim  (ND_TO_LKR_DESIGN.md — COMPLETENESS.md row "ForallElim")
+//
+// ND op: from ∀x.body and term t, derive body[x:=t]. F_k = body[x:=t]
+//   at f_k_idx. The negation entry i_h (for step h whose formula is
+//   ∀x.body) holds ∃x.NNF(¬body) in the LEFT shadow.
+// LKR emission:
+//   1. Exists(i_h, witness=t_lkr) — mutates entries[i_h] to NNF(¬body)[x:=t].
+//   2. emit_close(f_k_idx, i_h) — the two entries are NNF-dual by
+//      construction, since NNF(¬body)[x:=t] = NNF(¬(body[x:=t])).
+//
+// Soundness: ND ForallElim is sound (universal instantiation). The
+//   LKR ∃-rule and emit_close's recursive duality decomposition
+//   produce a verified LKR program.
 util::ResultStatus close_forall_elim(
     CutSpineContext&         cc,
     const nd::ForallElim&    op,
@@ -207,6 +238,24 @@ util::ResultStatus close_forall_elim(
     return emit_close(ecc, left, f_k_idx, i_h, out);
 }
 
+// =========================================================================
+// dispatch_close — switch on the closer ND op and emit the corresponding
+// LKR closing pattern.
+//
+// Every row marked ✓ in COMPLETENESS.md §4.2 (ND → LKR table) lands
+// here. The inline branches below cover the "flat" ND rules (those
+// that don't open scopes — those are handled by translate_block_*).
+//
+// Branches with multi-line comments describe their own emission
+// pattern. The named handlers above (close_use, close_schema_inst,
+// close_forall_elim) carry the structured spec-link comment format;
+// the inline branches retain their brief description until they're
+// extracted as part of Phase 0.3 (file split) of the implementation
+// roadmap.
+//
+// Open obligations (return MAKE_ERROR until implemented):
+//   nd::Peirce, nd::ClassicalAbsurd — see COMPLETENESS.md §4.2.
+// =========================================================================
 util::ResultStatus dispatch_close(
     CutSpineContext&         cc,
     uint32_t                 nd_idx,
@@ -809,6 +858,35 @@ util::ResultStatus translate_block_body_with_close(
     return emit_close(ecc, left, qed_slot, it->second, out);
 }
 
+// =========================================================================
+// Block: FORALL  (Fix → ForallIntro; COMPLETENESS.md row "ForallIntro")
+//
+// ND opener: nd::Fix (fresh eigenvar binds the universal scope).
+// ND closer: nd::ForallIntro (target.body's formula = ∀x.target_body_φ).
+// F_block = ∀x.body — read from trace[closer_idx].
+//
+// LKR emission pattern:
+//   1. Cut(F_block_nnf)  — pushes LEFT = [parent..., F_block_nnf] and
+//                          RIGHT = [parent..., NNF(¬F_block)].
+//   2. Forall(principal=f_block_idx, eigen=fix_var)
+//                       — instantiates the cut entry with Term::fixed(fix_var),
+//                         turning it into the body NNF.
+//   3. Body translation (recursive) closes the LEFT subgoal via the
+//      block-specific body+close pattern.
+//   4. RIGHT subgoal carries NNF(¬F_block) for siblings via
+//      step_to_neg_idx[closer_idx].
+//
+// fix_var = ND trace's fix var for the opener. Reusing the same
+//   eigen makes the body's trace formulas usable in the LEFT shadow
+//   without re-keying. LKRtoComb's alpha-rename pre-pass (see
+//   LKR_TO_COMB_DESIGN.md §7.5) later renames this to the canonical
+//   Fograph binder var; that's an LKRtoComb concern, not NDtoLKR's.
+//
+// Soundness: ND ForallIntro requires the eigen not free in earlier
+//   sequent entries (NDVerifier checks). LKR Forall enforces the
+//   analogous freshness (LKRVerifier checks). The Cut + Forall pair
+//   makes the LKR program LKR-accept, and emit_close handles the
+//   inner sequent.
 util::ResultStatus translate_block_forall(
     CutSpineContext&         cc,
     const Block&             blk,
@@ -883,6 +961,26 @@ util::ResultStatus translate_block_forall(
     return util::Ok();
 }
 
+// =========================================================================
+// Block: IMPLIES  (Assume → ImpliesIntro; COMPLETENESS.md row "ImpliesIntro")
+//
+// ND opener: nd::Assume A (introduces the antecedent into scope).
+// ND closer: nd::ImpliesIntro (conclusion = A → body, NNF = ¬A ∨ body_nnf).
+// F_block = A → body — read from trace[closer_idx].
+//
+// LKR emission pattern:
+//   1. Cut(F_block_nnf)   — NNF of A → body is ¬A ∨ body_nnf.
+//   2. Or(principal=f_block_idx)
+//                         — splits the cut entry into ¬A at f_block_idx
+//                           and body_nnf appended; ¬A acts as the
+//                           assumption hypothesis in the LEFT shadow.
+//   3. Body translation closes via the appended body_nnf entry.
+//   4. RIGHT subgoal carries NNF(¬(A→body)) = A ∧ ¬body for siblings.
+//
+// Soundness: ND ImpliesIntro discharges the assumption A from the
+//   sequent on close. The Cut + Or pair mirrors this: ¬A is the
+//   "negated assumption" entry the body proves around, exactly
+//   matching the LKR-side encoding of implication.
 util::ResultStatus translate_block_implies(
     CutSpineContext&         cc,
     const Block&             blk,
@@ -941,11 +1039,27 @@ util::ResultStatus translate_block_implies(
     return util::Ok();
 }
 
-// NOT block. NotIntro(bottom) derives ¬A where A was the assumption.
-// In the LEFT subgoal of the block's Cut, NNF(¬A) is the cut formula AND
-// the assumption's negation slot — they coincide. The body's last step is
-// a NotElim that pairs two derived steps' negations as duals via
-// emit_close.
+// =========================================================================
+// Block: NOT  (Assume → NotIntro; COMPLETENESS.md row "NotIntro")
+//
+// ND opener: nd::Assume A.
+// ND closer: nd::NotIntro (bottom = NotElim(neg, formula) at body end).
+// F_block = ¬A — read from trace[closer_idx].
+//
+// LKR emission pattern:
+//   1. Cut(F_block_nnf) where F_block_nnf = NNF(¬A).
+//   2. NNF(¬A) at f_block_idx serves double-duty as the cut formula
+//      AND the assumption's negation slot — they coincide for NOT,
+//      so step_to_neg_idx[opener_idx] := f_block_idx.
+//   3. Body translation derives ⊥ via NotElim(neg, formula). The
+//      closer's NotElim names two steps whose negations live in
+//      step_to_neg_idx; emit_close pairs them as duals.
+//   4. RIGHT subgoal carries NNF(¬¬A) = A for siblings.
+//
+// Soundness: ND NotIntro discharges the assumption A and produces ¬A
+//   when the body derives ⊥. The Cut + emit_close pattern realises
+//   this by leaving the cut entry as ¬A and proving the contradiction
+//   through emit_close's duality recursion.
 util::ResultStatus translate_block_not(
     CutSpineContext&         cc,
     const Block&             blk,
@@ -1003,23 +1117,32 @@ util::ResultStatus translate_block_not(
     return util::Ok();
 }
 
-// EXISTS_ELIM block. Opener is `exists_elim h_src, w` on ∃x.φ from a
-// derived step; closer is `exists_intro h_body` (no witness). The block's
-// result is the re-existed body — typically ∃y.body[w→y], but if body
-// doesn't reference w it's just body unchanged.
+// =========================================================================
+// Block: EXISTS_ELIM  (ExistsElim → ExistsIntro; COMPLETENESS.md row "ExistsElim")
 //
-// Strategy (per design §4.5, adapted for block-as-cut):
+// ND opener: nd::ExistsElim h_src, w — eliminate ∃x.φ from h_src,
+//   binding fresh witness w.
+// ND closer: nd::ExistsIntro h_body (no witness) — re-existentialize.
+// F_block = the re-existed body — typically ∃y.body[w↦y], but if body
+//   doesn't reference w it's just body unchanged.
+//
+// LKR emission pattern (design §4.5, adapted for block-as-cut):
 //   1. Cut(F_block_nnf).
-//   2. LEFT subgoal has F_block_nnf at f_block_idx, AND
-//      shadow.step_to_neg_idx[h_src.idx] = neg_exists_idx (from h_src's
+//   2. LEFT subgoal has F_block_nnf at f_block_idx AND
+//      step_to_neg_idx[h_src.idx] = neg_exists_idx (from h_src's
 //      earlier flat-step cut) holding ∀x.NNF(¬φ).
-//   3. Emit Forall on neg_exists_idx with eigen v (= ND's ExistsElim
-//      witness var). Sequent entries[neg_exists_idx] becomes NNF(¬φ)[v].
-//      Set step_to_neg_idx[ee_opener_idx] = neg_exists_idx so body
-//      references work, and lkr_term_for[ee_opener_idx] = the Forall's
-//      TermRef so body's exists_intro-with-witness handlers can use v.
+//   3. Forall on neg_exists_idx with eigen v (the ND ExistsElim witness
+//      var). entries[neg_exists_idx] becomes NNF(¬φ)[v]. Set
+//      step_to_neg_idx[ee_opener_idx] = neg_exists_idx so body refs
+//      work, and lkr_term_for[ee_opener_idx] = the Forall's TermRef so
+//      body's exists_intro-with-witness handlers can use v.
 //   4. Recurse body.
-//   5. After body: emit_close(f_block_idx, step_to_neg_idx[block.target_idx]).
+//   5. emit_close(f_block_idx, step_to_neg_idx[block.target_idx]).
+//
+// Soundness: ND ExistsElim introduces w as fresh; the Forall in step 3
+//   mirrors this (LKRVerifier enforces eigen freshness against Γ).
+//   The body proves F_block using the witnessed instance, and the
+//   final emit_close discharges the cut.
 util::ResultStatus translate_block_exists_elim(
     CutSpineContext&         cc,
     const Block&             blk,
@@ -1138,6 +1261,25 @@ util::ResultStatus translate_block(
 
 }  // namespace
 
+// =========================================================================
+// Block: OUTER  (the root — wraps the entire ND proof)
+//
+// Single OUTER block per program. Opener = instruction 0; closer = Qed.
+// target_idx = Qed.derived (the step whose formula equals the goal).
+//
+// LKR emission pattern (no enclosing Cut — this IS the top level):
+//   1. Initialise shadow with [goal_nnf]; qed_slot = 0.
+//   2. Recursively translate the body (sub-blocks accumulate Cuts and
+//      register their negations in shadow.step_to_neg_idx).
+//   3. After body, emit_close(qed_slot = 0, step_to_neg_idx[target_idx]).
+//
+// Soundness: the final emit_close pairs the original goal_nnf entry
+//   with NNF(¬goal) (registered by the body via the Cut chain for the
+//   target step). emit_close's structural duality decomposition turns
+//   this into a sequence of LKR ops that LKRVerifier accepts.
+//
+// COMPLETENESS.md row "Qed".
+// =========================================================================
 util::Result<std::vector<lkr::Instr>> translate_outer(
     CutSpineContext&    cc,
     const Block&        outer,
