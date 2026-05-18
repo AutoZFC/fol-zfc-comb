@@ -39,25 +39,35 @@ size_t count_fograph_vertices(FormulaHandle f) {
 //   precondition: the closing op must be preceded by Cut(φ_L), so
 //   that the LEFT subgoal's last entry is φ_L.
 //
-// Operation:
+// Operation (per §4.11):
 //   - Look up the lemma's pre-built CombProof L_proof in cc.lemmas.
-//   - Target = shared canonical target.
-//   - Source = lemma's source (no shape change).
-//   - Fibration = lemma's fibration composed with the position remap:
-//       fibration[v] := lemma_target_positions[lemma.fibration[v]]
-//     where lemma_target_positions = canonical positions of the LEFT
-//     subgoal's last entry (= φ_L's positions in the canonical target).
-//
-// Limitation (open obligation; see COMPLETENESS.md row CloseByLemma):
-//   This implementation rejects lemmas with non-empty dualizer. A
-//   complete implementation would remap lemma eigens to the canonical
-//   target's binder vars at the position-remapped vertices.
+//   - Target = shared outer canonical target.
+//   - Source = lemma's source (edges/links inherited; dualizer rebuilt).
+//   - Position remap σ_pos = entry_positions.back() (= φ_L's
+//     positions in the outer canonical target).
+//   - Fibration = lemma's fibration composed with σ_pos:
+//       fibration[v] := σ_pos(lemma.fibration[v])
+//   - σ build: for each binder vertex i in lemma.target, pair
+//     lemma-canonical var var_L(i) with outer-canonical var
+//     var_O(σ_pos(i)). Verify binder kind matches as a precondition.
+//   - Dualizer remap (σ_remap): for each (x_L, t_L) in L_proof's
+//     dualizer, emit (σ(x_L), σ_T(t_L)) where σ_T applies σ to
+//     Fixed terms (one-pass, identity on Gen).
 //
 // Soundness: the lemma was verified standalone, so L_proof is a valid
-//   CombProof of φ_L. Position-remapping into the shared target
-//   preserves the fibration's shape; Strategy B's pairing with a
-//   preceding Cut(φ_L) handles the §15 augmentation (φ_L ∧ ¬φ_L) as
-//   a new disjunct of the augmented goal.
+//   CombProof of φ_L. Position-remapping + σ_remap preserves the
+//   fibration's shape under the structural iso between lemma.target
+//   and the outer slice. Strategy B's pairing with a preceding
+//   Cut(φ_L) handles the §15 augmentation: (φ_L ∧ ¬φ_L) becomes a
+//   new disjunct of the augmented goal.
+//
+// Scope limitation (open obligation; see COMPLETENESS.md): this
+//   implementation assumes lemma_cp.target = G(φ_L_nnf), not the
+//   §15-augmented form. Lemma CombProofs built via the full ND→Comb
+//   pipeline currently target their augmented goal (extra positions
+//   from any internal Cuts in the lemma proof), which doesn't match
+//   the outer cut formula's slice. Cut-free lemmas (and lemmas built
+//   via hand-crafted LKR programs without Cut ops) work cleanly.
 util::Result<comb::CombProof> build_leaf_close_by_lemma(
     WalkContext&                                 cc,
     const lkr::CloseByLemma&                     op,
@@ -85,20 +95,67 @@ util::Result<comb::CombProof> build_leaf_close_by_lemma(
             << lemma_target_positions.size() << ")";
     }
 
-    // Dualizer remap support: for now require empty (no quantifiers in
-    // lemma); a non-empty dualizer would need eigen-var translation
-    // (lemma's eigen → canonical target's binder var at the same
-    // position-remapped vertex).
-    if (!lemma_cp.source.dualizer.empty()) {
-        return MAKE_ERROR
-            << "close_by_lemma: lemma '" << op.axiom.name
-            << "' has a non-empty dualizer; eigen-var remap not yet "
-            << "implemented (first-cut limitation)";
+    // σ build (LKR_TO_COMB_DESIGN.md §4.11): for each binder vertex
+    // b in lemma_cp.target, pair its lemma-canonical var with the
+    // outer-canonical var at the position-remapped vertex. Fograph
+    // preserves binder kind under the structural iso between
+    // lemma.target and the outer slice (both built from the same
+    // formula), so kind/pred parity is a precondition we verify here.
+    std::unordered_map<var_index, var_index> sigma;
+    for (size_t i = 0; i < lemma_cp.target.labels.size(); ++i) {
+        const comb::VertexLabel& lbl_L = lemma_cp.target.labels[i];
+        const comb::VertexLabel& lbl_O =
+            cc.canonical_target.labels[lemma_target_positions[i]];
+        if (lbl_L.kind != lbl_O.kind) {
+            return MAKE_ERROR
+                << "close_by_lemma: lemma '" << op.axiom.name
+                << "' label kind mismatch at vertex " << i
+                << " (lemma=" << static_cast<int>(lbl_L.kind)
+                << ", outer=" << static_cast<int>(lbl_O.kind) << ")";
+        }
+        if (lbl_L.kind == comb::VertexKind::Binder) {
+            if (lbl_L.is_existential != lbl_O.is_existential) {
+                return MAKE_ERROR
+                    << "close_by_lemma: lemma '" << op.axiom.name
+                    << "' binder polarity mismatch at vertex " << i;
+            }
+            sigma[lbl_L.var] = lbl_O.var;
+        } else if (lbl_L.kind == comb::VertexKind::Atom) {
+            if (lbl_L.pred != lbl_O.pred || lbl_L.negated != lbl_O.negated) {
+                return MAKE_ERROR
+                    << "close_by_lemma: lemma '" << op.axiom.name
+                    << "' atom label mismatch at vertex " << i;
+            }
+        }
     }
+
+    // σ_T: simultaneous substitution on Fixed terms. Mirrors
+    // alpha_rename.cpp's rewrite_term_simultaneous — Gen and other
+    // Term shapes pass through unchanged.
+    auto sigma_T = [&sigma](const Term& t) -> Term {
+        if (t.is_fixed()) {
+            auto it = sigma.find(t.as_variable());
+            if (it != sigma.end()) return Term::fixed(it->second);
+        }
+        return t;
+    };
 
     comb::CombProof cp;
     cp.target = cc.canonical_target;
-    cp.source = lemma_cp.source;  // same shape, no eigen remap needed
+    cp.source = lemma_cp.source;  // edges/links inherited; dualizer rebuilt below
+    cp.source.dualizer.clear();
+    for (const auto& [x_L, t_L] : lemma_cp.source.dualizer) {
+        auto sigma_it = sigma.find(x_L);
+        if (sigma_it == sigma.end()) {
+            return MAKE_ERROR
+                << "close_by_lemma: lemma '" << op.axiom.name
+                << "' dualizer key " << x_L
+                << " is not a lemma binder var (corrupt lemma proof)";
+        }
+        var_index x_O = sigma_it->second;
+        cp.source.dualizer.emplace(x_O, sigma_T(t_L));
+    }
+
     cp.fibration.reserve(lemma_cp.fibration.size());
     for (size_t fib : lemma_cp.fibration) {
         if (fib >= lemma_target_positions.size()) {

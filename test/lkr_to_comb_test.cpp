@@ -250,6 +250,211 @@ void test_lkr_to_comb_cut_with_lemma() {
     EXPECT_OK(outer_pass.apply(outer));
 }
 
+// CloseByLemma dualizer remap (LKR_TO_COMB_DESIGN.md §4.11):
+// regression test for empty dualizer. The existing
+// test_lkr_to_comb_cut_with_lemma already covers this; this is the
+// row that previously took the empty-dualizer early-return path.
+// Kept passing means the σ remap implementation doesn't regress.
+//
+// (Already exercised by test_lkr_to_comb_cut_with_lemma above; no new
+// test needed for this row — the regression is implicit.)
+
+// CloseByLemma with a forall lemma (LKR_TO_COMB_DESIGN.md §4.11
+// test 2). Exercises the σ build: lemma's universal binder vertex
+// must pair with an outer-target universal binder at the
+// position-remapped vertex. Dualizer is empty (lemma has no ∃), so
+// σ_T isn't exercised here — only the binder-kind precondition check.
+//
+// Strategy: build the lemma's CombProof via the existing ND→Comb
+// pipeline (test_end_to_end_nd_to_comb_forall_self_impl proves
+// `∀x.(p(x) → p(x))`). Register it. Then an outer ND proof of the
+// same formula via `use lemma_fa_pp` translates through NDtoLKR to
+// a Cut + CloseByLemma + emit_close pattern.
+void test_lkr_to_comb_cut_with_forall_lemma() {
+    // The lemma's CombProof must target G(lemma_formula_nnf) exactly,
+    // not the §15-augmented form. Lemmas built via the full ND→Comb
+    // pipeline target their augmented goal (extra positions from any
+    // internal Cuts), which doesn't match the outer cut formula's
+    // slice — that's an open obligation tracked separately. For now,
+    // use a Cut-free hand-crafted LKR program so augmented == original.
+    //
+    // Lemma: forall x. (p(x) | ~p(x)) — same NNF shape as forall x.
+    // (p(x) -> p(x)) but expressed positively. Hand-crafted LKR:
+    //   Forall(0, eigen=0)   [body becomes (p(0) | ~p(0))]
+    //   Or(0)                [split: p(0), ~p(0)]
+    //   AxiomLit(0, 1)       [close]
+    // Empty dualizer (no ∃). Source has one ∀ binder vertex.
+    Runtime rt;
+    rt.load("axiom lemma_fa_em: forall x. (p(x) | ~p(x))");
+    GlobalContext& ctx = rt.context();
+
+    FormulaHandle lemma_goal = parse_root(ctx, "forall x. (p(x) | ~p(x))");
+    comb::CombProof lemma_cp_value;
+    {
+        LKRProgram lemma_prog;
+        lemma_prog.claim_name = "lemma_fa_em_proof";
+        lemma_prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});
+        lemma_prog.instrs.push_back(lkr::Or{{}, 0});
+        lemma_prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+        translate::lkr_to_comb::LemmaCombProofs empty;
+        translate::lkr_to_comb::LKRtoComb lemma_lc(ctx, lemma_goal, empty);
+        auto cp = lemma_lc.apply(lemma_prog);
+        if (!cp.ok()) {
+            std::cerr << "lemma lkr_to_comb: " << cp.error().to_string() << "\n";
+            ++g_failed; return;
+        }
+        lemma_cp_value = cp.value();
+    }
+
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    lemmas["lemma_fa_em"] = lemma_cp_value;
+
+    // ---- Outer proof: cut on the lemma's formula, close LEFT via
+    // CloseByLemma, decompose RIGHT structurally.
+    //
+    // Goal = `forall x. (p(x) | ~p(x))`. Initial sequent [goal_nnf].
+    //   Cut(lemma_formula)  → LEFT [goal, lemma], RIGHT [goal, ¬lemma]
+    //   CloseByLemma        → closes LEFT
+    //   On RIGHT [forall x.(p∨¬p), exists x.(¬p∧p)]:
+    //   Forall(p=0, eigen=v1)              → [(p(v1) | ¬p(v1)), exists x.(¬p∧p)]
+    //   Exists(p=1, witness=Forall ref)     → [(p(v1) | ¬p(v1)), (¬p(v1) ∧ p(v1))]
+    //   Or(0)                               → [p(v1), (¬p(v1) ∧ p(v1)), ¬p(v1)]
+    //   And(p=1, L=[0])                     → LEFT [p(v1), ¬p(v1)], RIGHT [¬p(v1), p(v1)]
+    //   AxiomLit(0, 1)                      close LEFT
+    //   AxiomLit(0, 1)                      close RIGHT
+    FormulaHandle goal = parse_root(ctx, "forall x. (p(x) | ~p(x))");
+    LKRProgram outer;
+    outer.claim_name = "cut_with_forall_lemma";
+    {
+        lkr::Cut c{};
+        c.cut_formula = lemma_goal;
+        outer.instrs.emplace_back(std::move(c));
+    }
+    {
+        lkr::CloseByLemma cbl{};
+        cbl.axiom = AxiomRef{"lemma_fa_em"};
+        outer.instrs.emplace_back(std::move(cbl));
+    }
+    outer.instrs.push_back(lkr::Forall{{}, /*principal=*/0, /*eigen=*/1});
+    {
+        lkr::Exists e{};
+        e.principal = 1;
+        e.witness = TermRef{2};  // the Forall above is at op index 2
+        outer.instrs.emplace_back(std::move(e));
+    }
+    outer.instrs.push_back(lkr::Or{{}, /*principal=*/0});
+    outer.instrs.push_back(lkr::And{{}, /*principal=*/1, /*left_partition=*/{0}});
+    outer.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+    outer.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    translate::lkr_to_comb::LKRtoComb outer_lc(ctx, goal, lemmas);
+    EXPECT_OK(outer_lc.apply(outer));
+}
+
+// CloseByLemma with an exists-containing lemma (LKR_TO_COMB_DESIGN.md
+// §4.11 test 3). The lemma has BOTH ∀ and ∃ binders, so its
+// CombProof's dualizer is non-empty. This is the test that exercises
+// the full σ + σ_T remap path: both dualizer keys (lemma ∃ var →
+// outer ∃ var) and image terms (Fixed(lemma_∀_var) → Fixed(outer_∀_var))
+// must be renamed.
+//
+// Lemma: forall y. (¬p(y) ∨ exists x. p(x)) — i.e., the trivial
+// `∀y. (p(y) → ∃x. p(x))` after NNF.
+// Hand-crafted LKR for the lemma (Cut-free so target = G(formula)):
+//   Forall(0, eigen=0)              [∀y, body = ¬p(0) ∨ ∃x.p(x)]
+//   Or(0)                            [split: ¬p(0), ∃x.p(x)]
+//   Exists(1, witness=TermRef{0})    [body = p(Fixed(0))]
+//   AxiomLit(0, 1)                   [close ¬p(0) and p(0)]
+// CombProof.source has 4 vertices, link {0,1}, cograph (2,1) from
+// the ∃ Case B, dualizer {∃-var: Fixed(∀-eigen)} — non-empty.
+void test_lkr_to_comb_cut_with_exists_lemma() {
+    Runtime rt;
+    rt.load("axiom lemma_fa_ex: forall y. (~p(y) | exists x. p(x))");
+    GlobalContext& ctx = rt.context();
+
+    FormulaHandle lemma_goal =
+        parse_root(ctx, "forall y. (~p(y) | exists x. p(x))");
+    comb::CombProof lemma_cp_value;
+    {
+        LKRProgram lemma_prog;
+        lemma_prog.claim_name = "lemma_fa_ex_proof";
+        lemma_prog.instrs.push_back(lkr::Forall{{}, /*p=*/0, /*eigen=*/0});
+        lemma_prog.instrs.push_back(lkr::Or{{}, /*p=*/0});
+        {
+            lkr::Exists e{};
+            e.principal = 1;
+            e.witness   = TermRef{0};  // the Forall is op #0
+            lemma_prog.instrs.emplace_back(std::move(e));
+        }
+        lemma_prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+        translate::lkr_to_comb::LemmaCombProofs empty;
+        translate::lkr_to_comb::LKRtoComb lemma_lc(ctx, lemma_goal, empty);
+        auto cp = lemma_lc.apply(lemma_prog);
+        if (!cp.ok()) {
+            std::cerr << "lemma lkr_to_comb: " << cp.error().to_string() << "\n";
+            ++g_failed; return;
+        }
+        lemma_cp_value = cp.value();
+    }
+
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    lemmas["lemma_fa_ex"] = lemma_cp_value;
+
+    // Outer goal = same lemma formula. Outer LKR cuts on the lemma,
+    // CloseByLemma closes LEFT, RIGHT decomposes the negation
+    // structurally (∀y on goal entry, ∃y on neg-goal entry, Or, And
+    // split, then nested Forall+Exists+AxiomLit for the inner pair).
+    //
+    // NNF(¬lemma) = exists y. (p(y) ∧ forall x. ¬p(x)).
+    //
+    // op#0: Cut(lemma_formula)
+    // op#1: CloseByLemma(lemma_fa_ex)              — closes LEFT
+    // op#2: Forall(p=0, eigen=10)                   on RIGHT, principal = goal
+    // op#3: Exists(p=1, witness=TermRef{2})         on RIGHT, principal = ¬goal
+    // op#4: Or(p=0)                                 split (¬p(y) ∨ ∃x.p(x))
+    // op#5: And(p=1, L=[0])                         split (p(y) ∧ ∀x.¬p(x))
+    // op#6: AxiomLit(0, 1)                          close And's LEFT: [¬p(y), p(y)]
+    // op#7: Forall(p=1, eigen=11)                   And's RIGHT: ∀x.¬p(x)
+    // op#8: Exists(p=0, witness=TermRef{7})         And's RIGHT: ∃x.p(x)
+    // op#9: AxiomLit(0, 1)                          close
+    FormulaHandle goal = parse_root(ctx, "forall y. (~p(y) | exists x. p(x))");
+    LKRProgram outer;
+    outer.claim_name = "cut_with_exists_lemma";
+    {
+        lkr::Cut c{};
+        c.cut_formula = lemma_goal;
+        outer.instrs.emplace_back(std::move(c));
+    }
+    {
+        lkr::CloseByLemma cbl{};
+        cbl.axiom = AxiomRef{"lemma_fa_ex"};
+        outer.instrs.emplace_back(std::move(cbl));
+    }
+    outer.instrs.push_back(lkr::Forall{{}, /*p=*/0, /*eigen=*/10});
+    {
+        lkr::Exists e{};
+        e.principal = 1;
+        e.witness   = TermRef{2};
+        outer.instrs.emplace_back(std::move(e));
+    }
+    outer.instrs.push_back(lkr::Or{{}, /*p=*/0});
+    outer.instrs.push_back(lkr::And{{}, /*p=*/1, /*L=*/{0}});
+    outer.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+    outer.instrs.push_back(lkr::Forall{{}, /*p=*/1, /*eigen=*/11});
+    {
+        lkr::Exists e{};
+        e.principal = 0;
+        e.witness   = TermRef{7};
+        outer.instrs.emplace_back(std::move(e));
+    }
+    outer.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    translate::lkr_to_comb::LKRtoComb outer_lc(ctx, goal, lemmas);
+    EXPECT_OK(outer_lc.apply(outer));
+}
+
 // End-to-end pipeline: ND → ND(iota-free) → LKR → CombProof. The ND
 // proof uses no axioms (only built-in rules), so no lemma registry
 // entries are needed. Goal: prove `p → p` via assume + implies_intro.
@@ -370,6 +575,8 @@ int main() {
     test_lkr_to_comb_forall_em();
     test_lkr_to_comb_cut_no_use();
     test_lkr_to_comb_cut_with_lemma();
+    test_lkr_to_comb_cut_with_forall_lemma();
+    test_lkr_to_comb_cut_with_exists_lemma();
     test_end_to_end_nd_to_comb_self_impl();
     test_end_to_end_nd_to_comb_forall_self_impl();
 
