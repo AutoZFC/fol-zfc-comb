@@ -1,12 +1,12 @@
 # LKR → Comb F2: Paper-Faithful Per-Hypothesis Target Architecture
 
-Status: implemented 2026-05-18. Validation gate: **partial** —
-8/8 test targets green and 18/18 lkr_to_comb_test pass, but the
-two Phase 6 axiom_rewrap tests (`test_integration_nested_forall_axiom`,
-`test_integration_zfc_eq_refl`) STILL hit the original C.2
-binder-cluster error. The §6 "Coverage gained" claim below was
-overoptimistic — see §12 Findings for the post-implementation
-assessment.
+Status: implemented 2026-05-18. Validation gate **passed in full**
+after a follow-up fix to `leap.cpp`'s cotree decomposition. All 8
+test targets green, including both previously-disabled Phase 6
+tests (`test_integration_nested_forall_axiom`,
+`test_integration_zfc_eq_refl`). See §12 for the diagnostic and
+§13 for the cotree-decomposition fix that cleared the Lemma 10.20
+C.2 obstruction.
 
 This doc specifies the migration of `LKRtoComb` from the current shared
 canonical target (`G(augmented_goal)` for every subproof) to Hughes
@@ -19,10 +19,10 @@ architectural deviation, not a localized bug.
 
 | Item                       | State |
 |----------------------------|-------|
-| Math spec                  | draft (this doc) |
-| Migration plan             | draft (this doc) |
-| Implementation             | not started |
-| Validating tests           | Phase 6 Tests 4 + 5 in `axiom_rewrap_test.cpp` (currently `#if 0`) |
+| Math spec                  | done (this doc) |
+| Migration plan             | done (this doc) |
+| Implementation             | done (commit 27015e9, §13 follow-up) |
+| Validating tests           | Phase 6 Tests 4 + 5 ENABLED and PASSING |
 
 ## 1. The deviation
 
@@ -436,6 +436,77 @@ one of:
 This is a research question, not a routine bug. Worth pausing
 F2 obligation as "architecturally landed, pre-existing C.2
 obstruction not cleared" and tracking the C.2 issue separately.
+
+## 13. Cotree-decomposition fix (cleared the C.2 obstruction)
+
+After §12 was written, the diagnostic was extended one step further:
+the `parts[lone].size() != 1` failure was traced to a specific
+W = {atom_1, binder_2, binder_4} (K_3 in source) where
+`process_union` in `leap.cpp` partitioned the × node as
+parts[0]={atom_1}, parts[1]={binder_2, binder_4}. parts[1] is a
+multi-binder cluster → C.2 rejects.
+
+But Lemma 10.21 doesn't fix WHICH 1-factor of Omega to pick — the
+×-associativity gives us freedom to choose ANY binary partition.
+The partition parts[0]={binder_2}, parts[1]={atom_1, binder_4}
+satisfies C.2 cleanly: parts[0] is a singleton existential,
+parts[1] has a literal.
+
+The implementation was naively peeling off the FIRST cotree-child
+of every × node. The fix is to PREFER a singleton-existential-binder
+child as parts[0] when one exists; this peels binders one at a
+time and lets the recursion handle C.1/C.2 correctly. When no
+singleton-binder child exists, fall back to first-child (the C.1
+fusion case applies).
+
+This is a leap.cpp bug, not a translator bug. The F2 walk's
+source structure was correct per Hughes §11.1 all along; the
+verifier's decomposition was just too eager about partitioning.
+
+Diff is ~25 lines in `src/proof/comb/leap.cpp::process_union`.
+Validation: 76/76 axiom_rewrap tests pass (was 74/76),
+18/18 lkr_to_comb_test, all 8 test targets green.
+
+## 12. Post-implementation findings (2026-05-18)
+
+The F2 rewrite landed and the architecture is in place per §7:
+per-hypothesis targets, per-rule operations against G(H_i), no
+shared canonical target during the walk, `cut_augment` reduced to
+augmented-goal computation, alpha-rename retained for witness-term
+canonicalization (open question §10 closed: keeping it is cleaner).
+
+**What works.** All 18 lkr_to_comb_test cases pass, including
+nested existentials, mixed forall/exists, lemma inlining with
+cuts, classical absurd, peirce. All 74 enabled axiom_rewrap tests
+pass. No regressions in any of the 8 test targets.
+
+**Initial blocker (cleared by §13).** The two `#if 0`'d Phase 6
+tests (`test_integration_nested_forall_axiom`,
+`test_integration_zfc_eq_refl`) initially still hit
+`leap.cpp:575: C.2 expected a singleton binder, got part of size 2`.
+
+**Diagnostic.** The §6 "Coverage gained" paragraph mis-identified
+the failing C.2: there are two C.2s in Hughes 2019. F2 fixes
+Def 3.2 C.2 (every binder's scope is its smallest proper strong
+module) — this property is preserved locally by the per-rule
+operations against per-hypothesis targets. The `leap.cpp:575`
+check is Lemma 10.20 C.2 (the bimatching cotree decomposition's
+sub-case for existential quantification), a different but
+not-actually-stronger requirement: when the cotree splits at a
+bridge into parts where one side has no literal, that side must
+be a *singleton existential binder*.
+
+Hughes's `rule_exists` (which our implementation follows verbatim:
+"K^+ extends K with vertex v and edges from v to every vertex in
+P") naturally produces dense source structure for nested
+existentials and for axiom_rewrap's NNF-wrapped goals — the
+preimage P can include other source binders (introduced by
+deeper rule_forall / rule_exists), so the new existential
+binder gets cograph edges to other binders, not just atoms.
+After enough nesting, the cotree of source has multi-binder
+candidate-parts. The fix was in the verifier (§13), not the
+translator: choose a smarter binary partition of the cotree's
+×-children when checking C.2.
 
 ## 11. References
 

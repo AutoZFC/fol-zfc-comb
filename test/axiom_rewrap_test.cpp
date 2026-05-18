@@ -1328,15 +1328,10 @@ void test_integration_two_axioms_to_comb() {
 // (leap.cpp:575). The fix is in LKRtoComb's binder handling
 // (LKR_TO_COMB_DESIGN.md §8 "Modular decomposition during translation").
 //
-// 2026-05-18 update: the F2 per-hypothesis-target rewrite landed
-// (LKR_TO_COMB_F2_DESIGN.md). The simpler walk tests all pass, but
-// this test STILL fails with the same C.2 error. F2 fixes the
-// portion-closure / fusion issue (rule_and, rule_cut) but does not
-// automatically prevent the binder-cluster C.2 violation that arises
-// when nested existentials (from NNF-ing ∀ negations in the
-// axiom_rewrap wrap) create dense cograph structure. The spec's
-// claim "F2 handles this by construction" was too optimistic.
-#if 0
+// 2026-05-18 resolution: passes after (a) the F2 per-hypothesis-target
+// rewrite (LKR_TO_COMB_F2_DESIGN.md) plus (b) the leap.cpp cotree
+// decomposition fix (F2_DESIGN §13) that picks singleton-binder
+// cotree-children preferentially when partitioning a × node.
 void test_integration_nested_forall_axiom() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -1385,7 +1380,6 @@ void test_integration_nested_forall_axiom() {
         std::cerr << "lkr_to_comb fail: " << comb_r.error().to_string() << "\n";
     }
 }
-#endif
 
 // Phase 6 Test 5: Real ZFC theorem `eq_refl` from
 // `zfc/basics/ordered_pair.fol.proof`, inlined here.
@@ -1403,10 +1397,8 @@ void test_integration_nested_forall_axiom() {
 // (separate obligation). Leaving this test commented-out for now;
 // re-enable once that limitation is addressed.
 //
-// 2026-05-18 update: F2 rewrite (LKR_TO_COMB_F2_DESIGN.md) landed but
-// did NOT clear this test — same C.2 symptom as before. See sibling
-// test_integration_nested_forall_axiom comment for details.
-#if 0
+// 2026-05-18 resolution: passes after F2 + leap.cpp cotree fix. See
+// sibling test_integration_nested_forall_axiom comment.
 void test_integration_zfc_eq_refl() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -1464,7 +1456,6 @@ void test_integration_zfc_eq_refl() {
         std::cerr << "lkr_to_comb fail: " << comb_r.error().to_string() << "\n";
     }
 }
-#endif
 
 // Phase 6 Test 3: ZFC-style integration. A quantified axiom + a proof
 // using forall_elim chain — the shape `eq_refl` uses against
@@ -1561,10 +1552,8 @@ int main() {
     test_integration_simple_axiom_to_comb();
     test_integration_two_axioms_to_comb();
     test_integration_zfc_style_quantified_axiom();
-    // Tests 4 (nested_forall_axiom) + 5 (zfc_eq_refl) still disabled.
-    // The F2 rewrite (LKR_TO_COMB_F2_DESIGN.md) landed but did not
-    // resolve the C.2 binder-cluster issue these tests surface. See
-    // their #if 0 comments for the updated assessment.
+    test_integration_nested_forall_axiom();
+    test_integration_zfc_eq_refl();
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";

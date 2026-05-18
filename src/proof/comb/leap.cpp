@@ -453,13 +453,37 @@ util::ResultStatus verify_no_bimatching(const CombProof& proof,
                     for (size_t v : child_leaves[0]) L.push_back(v);
                     return;
                 }
-                // Binary split: H_1 vs (H_2 + ... + H_k). Associativity
-                // of x means any partition into two non-empty groups
-                // works; we keep it simple by peeling off the first
-                // non-empty cotree-child.
-                parts.push_back(std::move(child_leaves[0]));
+                // Binary split: H_a vs (everything else). ×-associativity
+                // means any binary partition is mathematically valid (Lemma
+                // 10.21's Z is a 1-factor of Omega, but its existence proof
+                // doesn't fix WHICH 1-factor — implementation chooses).
+                //
+                // Strategy: PREFER to peel off a singleton existential
+                // binder as H_a. Lemma 10.20's C.2 sub-case requires the
+                // binder-only side to be a singleton; if we instead peel
+                // off an atom-side and leave multi-binder rest, C.2
+                // rejects even though a fonet decomposition exists. By
+                // peeling binders one at a time we guarantee the recursion
+                // terminates on the C.1 / C.2 dichotomy correctly.
+                //
+                // If no singleton-binder child exists, fall back to the
+                // first-child rule (C.1 fusion case applies provided both
+                // sides have a literal — which they do for a well-formed
+                // fonet whose source comes from per-rule operations).
+                size_t pick = 0;
+                for (size_t i = 0; i < child_leaves.size(); ++i) {
+                    if (child_leaves[i].size() != 1) continue;
+                    size_t v = child_leaves[i][0];
+                    const VertexLabel& lbl = proof.source_label(v);
+                    if (lbl.kind == VertexKind::Binder && lbl.is_existential) {
+                        pick = i;
+                        break;
+                    }
+                }
+                parts.push_back(std::move(child_leaves[pick]));
                 std::vector<size_t> rest;
-                for (size_t k = 1; k < child_leaves.size(); ++k) {
+                for (size_t k = 0; k < child_leaves.size(); ++k) {
+                    if (k == pick) continue;
                     for (size_t v : child_leaves[k]) rest.push_back(v);
                 }
                 parts.push_back(std::move(rest));
