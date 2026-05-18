@@ -110,19 +110,21 @@ typedef void* yyscan_t;
     EXISTS_ELIM = 301,             /* EXISTS_ELIM  */
     DOUBLE_NEG_ELIM = 302,         /* DOUBLE_NEG_ELIM  */
     EXCLUDED_MIDDLE = 303,         /* EXCLUDED_MIDDLE  */
-    EQ_SUBST = 304,                /* EQ_SUBST  */
-    EQ_SYM = 305,                  /* EQ_SYM  */
-    IOTA_ELIM = 306,               /* IOTA_ELIM  */
-    IOTA = 307,                    /* IOTA  */
-    UNPROVED = 308,                /* UNPROVED  */
-    SCHEMA = 309,                  /* SCHEMA  */
-    SCHEMA_INST = 310,             /* SCHEMA_INST  */
-    LBRACKET = 311,                /* LBRACKET  */
-    RBRACKET = 312,                /* RBRACKET  */
-    LBRACE = 313,                  /* LBRACE  */
-    RBRACE = 314,                  /* RBRACE  */
-    BACKSLASH = 315,               /* BACKSLASH  */
-    NUMBER = 316                   /* NUMBER  */
+    PEIRCE = 304,                  /* PEIRCE  */
+    CLASSICAL_ABSURD = 305,        /* CLASSICAL_ABSURD  */
+    EQ_SUBST = 306,                /* EQ_SUBST  */
+    EQ_SYM = 307,                  /* EQ_SYM  */
+    IOTA_ELIM = 308,               /* IOTA_ELIM  */
+    IOTA = 309,                    /* IOTA  */
+    UNPROVED = 310,                /* UNPROVED  */
+    SCHEMA = 311,                  /* SCHEMA  */
+    SCHEMA_INST = 312,             /* SCHEMA_INST  */
+    LBRACKET = 313,                /* LBRACKET  */
+    RBRACKET = 314,                /* RBRACKET  */
+    LBRACE = 315,                  /* LBRACE  */
+    RBRACE = 316,                  /* RBRACE  */
+    BACKSLASH = 317,               /* BACKSLASH  */
+    NUMBER = 318                   /* NUMBER  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -137,7 +139,7 @@ union YYSTYPE
     ASTNode* node;
     std::vector<ASTNode*>* node_list;
 
-#line 141 "formula_parser.tab.h"
+#line 143 "formula_parser.tab.h"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -181,6 +183,6 @@ void yypstate_delete (yypstate *ps);
 
 void yyerror(YYLTYPE* loc, yyscan_t scanner, ParseContext* ctx, const char* msg);
 
-#line 185 "formula_parser.tab.h"
+#line 187 "formula_parser.tab.h"
 
 #endif /* !YY_YY_FORMULA_PARSER_TAB_H_INCLUDED  */

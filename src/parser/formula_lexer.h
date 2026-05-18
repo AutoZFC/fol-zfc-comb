@@ -2,9 +2,9 @@
 #define yyHEADER_H 1
 #define yyIN_HEADER 1
 
-#line 5 "formula_lexer.h"
+#line 6 "formula_lexer.h"
 
-#line 7 "formula_lexer.h"
+#line 8 "formula_lexer.h"
 
 #define  YY_INT_ALIGNED short int
 
@@ -518,9 +518,9 @@ extern int yylex \
 #undef yyTABLES_NAME
 #endif
 
-#line 110 "formula.l"
+#line 112 "formula.l"
 
 
-#line 524 "formula_lexer.h"
+#line 525 "formula_lexer.h"
 #undef yyIN_HEADER
 #endif /* yyHEADER_H */

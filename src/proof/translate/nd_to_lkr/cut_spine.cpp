@@ -708,6 +708,115 @@ util::ResultStatus dispatch_close(
         return emit_close(ecc, split.right, split.right_theta_idx, r_i_b, out);
     }
 
+    if (auto* op = std::get_if<nd::Peirce>(&instr)) {
+        // =====================================================================
+        // Rule: nd::Peirce  (ND_TO_LKR_DESIGN.md §4.7 "close_peirce")
+        //
+        // F_k = ((A → B) → A) → A.  F_k_nnf = ((¬A ∨ B) ∧ ¬A) ∨ A.
+        //
+        // Strategy: nested Cut on A. The Cut introduces A_nnf on LEFT_inner
+        // and ¬A_nnf on RIGHT_inner; both close against F_k_nnf by
+        // structural decomposition via emit_close on (A, ¬A) NNF-dual pairs.
+        //
+        // Soundness: each emit_close closes a sequent whose entries include
+        // an NNF-dual pair (A and ¬A), independent of B's structure.
+        // =====================================================================
+        if (op->a_let.idx >= cc.trace.step_env.size() ||
+            !cc.trace.step_env[op->a_let.idx].valid()) {
+            return MAKE_ERROR
+                << "close_peirce: a_let StepRef #" << op->a_let.idx
+                << " has no trace entry";
+        }
+        FormulaHandle a_raw     = cc.trace.step_env[op->a_let.idx];
+        FormulaHandle a_nnf     = cc.builder.to_nnf(a_raw);
+        FormulaHandle neg_a_nnf = cc.builder.to_nnf_neg(a_raw);
+
+        // Decompose F_k_nnf = ((¬A ∨ B) ∧ ¬A) ∨ A into its sub-parts.
+        FormulaHandle f_k_nnf = left.entries[f_k_idx];
+        if (!f_k_nnf.get().is_compound() ||
+            f_k_nnf.get().as_compound().op != Op::Or) {
+            return MAKE_ERROR
+                << "close_peirce: F_k_nnf top-level not Or (got variant "
+                << f_k_nnf.get().is_compound() << ")";
+        }
+        FormulaHandle and_part = f_k_nnf.get().as_compound().left;
+        FormulaHandle a_disj   = f_k_nnf.get().as_compound().right;
+        if (!and_part.get().is_compound() ||
+            and_part.get().as_compound().op != Op::And) {
+            return MAKE_ERROR
+                << "close_peirce: F_k_nnf left disjunct not And";
+        }
+        FormulaHandle or_part = and_part.get().as_compound().left;
+        FormulaHandle neg_a   = and_part.get().as_compound().right;
+        if (!or_part.get().is_compound() ||
+            or_part.get().as_compound().op != Op::Or) {
+            return MAKE_ERROR
+                << "close_peirce: (¬A ∨ B) clause not Or";
+        }
+        FormulaHandle inner_neg_a = or_part.get().as_compound().left;
+        FormulaHandle b_part      = or_part.get().as_compound().right;
+
+        // --- Cut(A): LEFT_inner appends A_nnf; RIGHT_inner appends ¬A_nnf.
+        {
+            lkr::Cut c{};
+            c.cut_formula = a_raw;
+            out.emplace_back(std::move(c));
+        }
+        SequentShadow left_inner  = left;
+        size_t a_cut_idx          = left_inner.append(a_nnf);
+        SequentShadow right_inner = left;
+        size_t neg_a_cut_idx      = right_inner.append(neg_a_nnf);
+
+        // --- LEFT_inner: Or(f_k_idx); And(f_k_idx, partition=[A_cut]);
+        //     LEFT_sub: Or; emit_close. RIGHT_sub: emit_close.
+        {
+            lkr::Or o{};
+            o.principal = f_k_idx;
+            out.emplace_back(std::move(o));
+        }
+        left_inner.entries[f_k_idx] = and_part;
+        size_t a_or_idx = left_inner.append(a_disj);
+
+        // emit_and_split with right_needs=[A_or] → LEFT_sub gets A_cut,
+        // RIGHT_sub gets A_or + ¬A.
+        TRY_ASSIGN(split, emit_and_split(left_inner, f_k_idx,
+                                          /*right_needs=*/{a_or_idx},
+                                          /*left_phi=*/or_part,
+                                          /*right_theta=*/neg_a, out));
+
+        // LEFT_sub: Or(left_phi_idx) → split (¬A∨B). ¬A at left_phi_idx, B appended.
+        {
+            lkr::Or o{};
+            o.principal = split.left_phi_idx;
+            out.emplace_back(std::move(o));
+        }
+        split.left.entries[split.left_phi_idx] = inner_neg_a;
+        split.left.append(b_part);
+
+        // emit_close on A_cut (remapped) and ¬A (at split.left_phi_idx).
+        size_t a_cut_in_left = split.left_remap.at(a_cut_idx);
+        EmitCloseContext ecc{cc.builder};
+        TRY(emit_close(ecc, split.left, a_cut_in_left,
+                       split.left_phi_idx, out));
+
+        // RIGHT_sub: emit_close on A_or (remapped) and ¬A (right_theta_idx).
+        size_t a_or_in_right = split.right_remap.at(a_or_idx);
+        TRY(emit_close(ecc, split.right, a_or_in_right,
+                       split.right_theta_idx, out));
+
+        // --- RIGHT_inner: Or(f_k_idx); emit_close on A_or and ¬A_cut.
+        {
+            lkr::Or o{};
+            o.principal = f_k_idx;
+            out.emplace_back(std::move(o));
+        }
+        right_inner.entries[f_k_idx] = and_part;
+        size_t a_or_in_right_inner = right_inner.append(a_disj);
+
+        return emit_close(ecc, right_inner, a_or_in_right_inner,
+                          neg_a_cut_idx, out);
+    }
+
     if (auto* op = std::get_if<nd::ExistsIntro>(&instr)) {
         // F_k = ∃x.body. i_body holds NNF(¬body[x:=witness]).
         // Emit Exists(f_k_idx, witness=t_lkr); entries[f_k_idx] becomes

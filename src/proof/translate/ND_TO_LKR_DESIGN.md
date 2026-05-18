@@ -521,11 +521,62 @@ directly via `emit_close(step_to_neg_idx[negation], step_to_neg_idx[formula])`.
 
 #### `close_peirce(a_let, b_let)`
 
-Peirce's law `((A→B)→A) → A`. Desugar at this level: cut on
-`A ∨ ¬A` (excluded middle); LEFT closes via the `A` disjunct paired
-with `F_k`'s `¬A` requirement; RIGHT uses `¬A` to derive `A→B`
-(vacuous antecedent) and applies modus ponens. The desugaring is
-local; not factored out as a pre-pass.
+Peirce's law: `((A → B) → A) → A`. NNF:
+`((¬A ∨ B) ∧ ¬A) ∨ A`.
+
+**Strategy.** Cut on `A` directly (no need for excluded middle as a
+separate lemma — the Cut suffices). The LEFT_inner subgoal has `A`
+appended; the RIGHT_inner has `¬A`. Each closes against `F_k_nnf`
+by structural decomposition.
+
+**Op sequence.**
+
+```
+Cut(A)                                  push LEFT_inner [..., F_k_nnf, A], RIGHT_inner [..., F_k_nnf, ¬A]
+
+LEFT_inner:
+  Or(f_k_idx)                           F_k_nnf → (¬A∨B)∧¬A at f_k_idx; A appended (call it A_or)
+  And(f_k_idx, partition=[A_cut_idx])   split the conjunction. LEFT_sub gets A_cut + (¬A∨B);
+                                        RIGHT_sub gets A_or + ¬A.
+  LEFT_sub:
+    Or(left_phi_idx)                    (¬A∨B) → ¬A at left_phi_idx; B appended
+    emit_close(A_cut, ¬A at left_phi_idx)   close (A and ¬A are NNF-dual)
+  RIGHT_sub:
+    emit_close(A_or, ¬A at right_theta_idx) close
+
+RIGHT_inner:
+  Or(f_k_idx)                           F_k_nnf → (¬A∨B)∧¬A at f_k_idx; A appended (A_or)
+  emit_close(A_or, ¬A_cut)              close (the second-disjunct A vs the Cut's ¬A)
+```
+
+The two `emit_close` calls in LEFT_sub and RIGHT_sub close pairs of
+NNF-dual entries: `(A_nnf, NNF(¬A))`. `emit_close` recursively
+decomposes if `A` is non-atomic; for atomic `A`, it emits a single
+`AxiomLit`.
+
+**Why this works.** Both inner subgoals close because:
+- `LEFT_inner`: the Cut introduced an `A` we can pair with the `¬A`
+  hidden inside `F_k_nnf`'s `(¬A ∨ B) ∧ ¬A` conjunct. The `And` rule
+  multiplicatively splits this conjunction so the `¬A` lands in
+  RIGHT_sub, where the `A_or` (second disjunct of F_k_nnf) pairs
+  with it. The LEFT_sub has the Cut's `A` and the `(¬A ∨ B)` factor;
+  after `Or` split, its `¬A` part pairs with the Cut's `A`.
+- `RIGHT_inner`: the Cut introduced a `¬A` we can pair with the
+  `A` from F_k_nnf's second disjunct (after `Or` split).
+
+**Soundness.** Each closing `emit_close` call pairs NNF-dual entries
+(by construction of A_nnf and NNF(¬A)). The Cut adds an auxiliary
+disjunct `(A ∧ ¬A)` to the §15-augmented goal at the LKRtoComb
+layer; classically equivalent to the original.
+
+**Test plan.**
+
+1. `peirce_atomic` — Peirce schema with A=p (atomic), B=q. The
+   simplest case; `emit_close` calls land at `AxiomLit`.
+2. `peirce_complex_A` — A = `p ∨ q` (non-atomic). `emit_close`
+   recursively decomposes; verifies the strategy works for any A.
+3. (NDtoLKR test): an ND proof using `peirce p q` to derive
+   `((p→q)→p)→p`; end-to-end through NDtoLKR.
 
 #### `close_double_neg_elim(of)`
 

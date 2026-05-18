@@ -361,6 +361,21 @@ void test_e2e_exists_elim_block() {
     )", "ex_p_again");
 }
 
+// Peirce: classical ((A → B) → A) → A as a built-in ND rule.
+// Uses two let-defined formulas for A and B. Tests close_peirce
+// (ND_TO_LKR_DESIGN.md §4.7): Cut(A) + Or + And + emit_close pattern.
+void test_e2e_peirce() {
+    run_e2e(R"(
+        claim peirce_law: ((p -> q) -> p) -> p
+
+        proof peirce_law:
+            ha = let p
+            hb = let q
+            hpe = peirce ha, hb
+            qed hpe
+    )", "peirce_law");
+}
+
 // ExcludedMiddle: classical p ∨ ¬p as a built-in axiom.
 void test_e2e_excluded_middle() {
     run_e2e(R"(
@@ -794,6 +809,7 @@ int main() {
     test_e2e_iff_elim_r();
     test_e2e_not_block();
     test_e2e_bottom_elim();
+    test_e2e_peirce();
     test_e2e_excluded_middle();
     test_e2e_or_elim();
     test_e2e_exists_elim_block();

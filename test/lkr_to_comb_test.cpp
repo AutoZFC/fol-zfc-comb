@@ -424,6 +424,42 @@ void test_lkr_to_comb_cut_with_exists_lemma() {
     EXPECT_OK(outer_lc.apply(outer));
 }
 
+// End-to-end ND → LKR → Comb via Peirce.
+// Goal: `((p → q) → p) → p` proved via the `peirce` ND rule.
+// Exercises close_peirce in NDtoLKR (ND_TO_LKR_DESIGN.md §4.7) + the
+// full LKRtoComb pipeline (alpha-rename, cut_augment, walk).
+void test_lkr_to_comb_peirce_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim peirce_law: ((p -> q) -> p) -> p
+
+        proof peirce_law:
+            ha = let p
+            hb = let q
+            hpe = peirce ha, hb
+            qed hpe
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "load: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto nd_prog = nd::lower(parsed.value().proofs[0]).unwrap();
+    auto claim = rt.context().find_claim("peirce_law");
+    if (!claim.has_value()) { std::cerr << "claim not found\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    translate::nd_to_lkr::NDtoLKR ndl(rt.context(), goal);
+    auto lkr_r = ndl.apply(nd_prog);
+    if (!lkr_r.ok()) {
+        std::cerr << "nd_to_lkr: " << lkr_r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    translate::lkr_to_comb::LemmaCombProofs no_lemmas;
+    translate::lkr_to_comb::LKRtoComb lc(rt.context(), goal, no_lemmas);
+    EXPECT_OK(lc.apply(lkr_r.value()));
+}
+
 // Phase 1.4: Contraction (LKR_TO_COMB_DESIGN.md §4.5).
 // Goal: p ∨ ¬p. LKR uses Cut(p) to introduce a duplicate `p` entry,
 // then Contraction to merge, then AxiomLit to close.
@@ -820,6 +856,7 @@ int main() {
     test_lkr_to_comb_cut_with_lemma();
     test_lkr_to_comb_cut_with_forall_lemma();
     test_lkr_to_comb_cut_with_exists_lemma();
+    test_lkr_to_comb_peirce_e2e();
     test_lkr_to_comb_contraction_after_cut();
     test_lkr_to_comb_weakening_scaffolding();
     test_lkr_to_comb_weakening_load_bearing_rejected();

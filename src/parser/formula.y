@@ -44,7 +44,7 @@ void yyerror(YYLTYPE* loc, yyscan_t scanner, ParseContext* ctx, const char* msg)
 %token NOT_INTRO NOT_ELIM BOTTOM_ELIM
 %token IFF_INTRO IFF_ELIM_L IFF_ELIM_R
 %token FORALL_INTRO FORALL_ELIM EXISTS_INTRO EXISTS_ELIM
-%token DOUBLE_NEG_ELIM EXCLUDED_MIDDLE EQ_SUBST EQ_SYM
+%token DOUBLE_NEG_ELIM EXCLUDED_MIDDLE PEIRCE CLASSICAL_ABSURD EQ_SUBST EQ_SYM
 %token IOTA_ELIM IOTA
 %token UNPROVED
 %token SCHEMA SCHEMA_INST LBRACKET RBRACKET LBRACE RBRACE
@@ -350,6 +350,15 @@ rule_call
         auto* args = new std::vector<ASTNode*>();
         args->push_back(new ASTNode(ASTNode::Term, *$2));
         $$ = ASTNode::make_rule_step("excluded_middle", args);
+        delete $2;
+    }
+    | PEIRCE id_list {
+        $$ = ASTNode::make_rule_step("peirce", $2);
+    }
+    | CLASSICAL_ABSURD IDENTIFIER {
+        auto* args = new std::vector<ASTNode*>();
+        args->push_back(new ASTNode(ASTNode::Term, *$2));
+        $$ = ASTNode::make_rule_step("classical_absurd", args);
         delete $2;
     }
     | EQ_SUBST id_list {
