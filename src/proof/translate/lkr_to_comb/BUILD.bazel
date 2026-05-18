@@ -1,0 +1,116 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# InputGate — I-1 (LKR-verifies). Future I-2 (CloseByLemma pairing).
+cc_library(
+    name = "input_gate",
+    srcs = ["input_gate.cpp"],
+    hdrs = ["input_gate.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/util:error",
+    ],
+)
+
+# DerivationTree — branching tree reconstructed from a flat LKR op stream.
+cc_library(
+    name = "tree",
+    srcs = ["tree.cpp"],
+    hdrs = ["tree.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# CutAugmentation — pre-pass that builds the §15-augmented goal formula
+# and per-cut canonical position metadata.
+cc_library(
+    name = "cut_augment",
+    srcs = ["cut_augment.cpp"],
+    hdrs = ["cut_augment.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# SequentReplay — non-checking simulation of LKR's open-goals stack.
+# Computes the per-op conclusion sequent (the goal entries the op
+# operates on) needed by the §11.1 leaf and per-rule operations.
+cc_library(
+    name = "sequent_replay",
+    srcs = ["sequent_replay.cpp"],
+    hdrs = ["sequent_replay.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cut_augment",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# §11.1 walk — recursive translation of DerivationTree → CombProof.
+cc_library(
+    name = "walk",
+    srcs = ["walk.cpp"],
+    hdrs = ["walk.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sequent_replay",
+        ":tree",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# OutputGate — runs CombVerifier on emitted CombProofs.
+cc_library(
+    name = "output_gate",
+    srcs = ["output_gate.cpp"],
+    hdrs = ["output_gate.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/comb:verifier",
+        "//src/util:error",
+    ],
+)
+
+# LKRtoComb — top-level pass. Phase 4 partial (AxiomLit leaf + Or /
+# Exchange / Weakening linear ops). And/Cut/Forall/Exists/Contraction/
+# CloseByLemma pending (phases 5-8).
+cc_library(
+    name = "lkr_to_comb",
+    srcs = ["lkr_to_comb.cpp"],
+    hdrs = ["lkr_to_comb.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cut_augment",
+        ":input_gate",
+        ":output_gate",
+        ":sequent_replay",
+        ":tree",
+        ":walk",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)

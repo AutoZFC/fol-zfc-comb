@@ -1,0 +1,115 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# InputGate — I-1 (no iota) + I-2 (no eq_subst/eq_sym) + I-3 (ND-verifies).
+cc_library(
+    name = "input_gate",
+    srcs = ["input_gate.cpp"],
+    hdrs = ["input_gate.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
+# BlockTree — nested decomposition of the flat ND op stream
+# (OUTER / FORALL / IMPLIES / NOT / EXISTS_ELIM blocks).
+cc_library(
+    name = "block_tree",
+    srcs = ["block_tree.cpp"],
+    hdrs = ["block_tree.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)
+
+# SequentShadow — translator-side mirror of the verifier's open goal.
+cc_library(
+    name = "sequent_shadow",
+    hdrs = ["sequent_shadow.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:ir",
+    ],
+)
+
+# emit_close — dual-decomposition primitive (closes a goal via two
+# NNF-dual sequent entries). Pure; generic over rule provenance.
+cc_library(
+    name = "emit_close",
+    srcs = ["emit_close.cpp"],
+    hdrs = ["emit_close.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# cut_spine — translator driver. Emits LKR ops from the block tree via
+# the cut-spine schema (§4 of ND_TO_LKR_DESIGN.md).
+cc_library(
+    name = "cut_spine",
+    srcs = ["cut_spine.cpp"],
+    hdrs = ["cut_spine.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_tree",
+        ":emit_close",
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
+# OutputGate — runs LKRVerifier on emitted programs. Translator is not
+# trusted; soundness rests on this gate.
+cc_library(
+    name = "output_gate",
+    srcs = ["output_gate.cpp"],
+    hdrs = ["output_gate.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/util:error",
+    ],
+)
+
+# NDtoLKR — top-level Pass. Skeleton only (phases 4-9 pending).
+cc_library(
+    name = "nd_to_lkr",
+    srcs = ["nd_to_lkr.cpp"],
+    hdrs = ["nd_to_lkr.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_tree",
+        ":cut_spine",
+        ":input_gate",
+        ":output_gate",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)

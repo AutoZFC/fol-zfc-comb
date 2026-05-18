@@ -448,4 +448,22 @@ util::Result<std::vector<FormulaHandle>> NDVerifier::trace_formulas(
     return std::move(s.step_env);
 }
 
+util::Result<NDVerifier::TraceFull> NDVerifier::trace_full(
+    GlobalContext&    ctx,
+    const NDProgram&  prog)
+{
+    Session s(ctx, FormulaHandle{}, prog);
+    populate_schema_context(s, prog);
+
+    auto status = run_session(s, prog);
+    if (!status.ok()) return status.error();
+
+    TraceFull r;
+    r.step_env      = std::move(s.step_env);
+    r.term_env      = std::move(s.term_env);
+    r.term_present  = std::move(s.term_present);
+    r.next_free_var = s.stack.builder().high_water_mark();
+    return r;
+}
+
 }  // namespace logic::proof::nd

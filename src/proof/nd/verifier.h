@@ -49,6 +49,24 @@ public:
         GlobalContext&    ctx,
         const NDProgram&  prog);
 
+    // Like trace_formulas, but also returns the per-step Term env (for
+    // instructions that bind a term: Fix, ExistsElim, IotaElim) and the
+    // post-trace var allocator depth (= one past the highest var_index
+    // any internal builder allocated, so callers using a private
+    // FormulaBuilder can advance past it).
+    //
+    // Used by NDtoLKR to align LKR-side eigenvariables with the trace's
+    // fix-var indices so that substituted formulas match without re-keying.
+    struct TraceFull {
+        std::vector<FormulaHandle> step_env;   // size == prog.instrs.size()
+        std::vector<Term>          term_env;   // size == prog.instrs.size()
+        std::vector<uint8_t>       term_present; // term_env[i] valid iff present
+        var_index                  next_free_var{0};
+    };
+    util::Result<TraceFull> trace_full(
+        GlobalContext&    ctx,
+        const NDProgram&  prog);
+
 private:
     std::unordered_set<std::string> last_used_;
 };

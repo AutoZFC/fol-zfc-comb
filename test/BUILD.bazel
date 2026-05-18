@@ -81,13 +81,46 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "nd_to_lkr_test",
+    srcs = ["nd_to_lkr_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/nd:lowering",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/iota_elim:eliminate_iota",
+        "//src/proof/translate/nd_to_lkr",
+        "//src/proof/translate/nd_to_lkr:block_tree",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
+    name = "lkr_to_comb_test",
+    srcs = ["lkr_to_comb_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate/lkr_to_comb",
+        "//src/proof/translate/nd_to_lkr",
+        "//src/runtime",
+    ],
+)
+
 test_suite(
     name = "all_tests",
     tests = [
         ":comb_test",
         ":core_test",
         ":iota_translator_test",
+        ":lkr_to_comb_test",
         ":lkr_verifier_test",
+        ":nd_to_lkr_test",
         ":runtime_test",
     ],
 )

@@ -475,6 +475,11 @@ class FormulaBuilder {
     GlobalContext& ctx_;
     var_index local_vars_{0};  // Current depth / next var index
     var_index used_vars_{static_cast<var_index>(-1)};  // Min var used (init to max)
+    var_index high_water_mark_{0};  // Max var ever allocated by this builder
+                                    // (= one past the highest var_index handed
+                                    // out by enter_scope). Distinct from
+                                    // local_vars_, which decreases on
+                                    // exit_scope; this only increases.
 
 public:
     explicit FormulaBuilder(GlobalContext& ctx) : ctx_(ctx) {}
@@ -483,9 +488,18 @@ public:
     GlobalContext& context() { return ctx_; }
 
     // Scope management for QuantifierBuilder
-    var_index enter_scope() { return local_vars_++; }
+    var_index enter_scope() {
+        var_index v = local_vars_++;
+        if (local_vars_ > high_water_mark_) high_water_mark_ = local_vars_;
+        return v;
+    }
     void exit_scope() { local_vars_--; }
     var_index depth() const { return local_vars_; }
+    // Highest depth ever reached (= one past the highest var_index this
+    // builder ever handed out). Stable across exit_scope() — useful for
+    // callers who need a fresh-var floor that won't collide with anything
+    // this builder previously produced.
+    var_index high_water_mark() const { return high_water_mark_; }
 
     // Track variable usage - call when using a variable in formula
     void use_var(var_index v) {
