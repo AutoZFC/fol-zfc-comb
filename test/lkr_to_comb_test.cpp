@@ -424,6 +424,86 @@ void test_lkr_to_comb_cut_with_exists_lemma() {
     EXPECT_OK(outer_lc.apply(outer));
 }
 
+// Phase 1.3: Weakening scaffolding (LKR_TO_COMB_DESIGN.md §4.4 Case A).
+// Goal: p | ¬p. Weakens in q (unused), then closes via AxiomLit on the
+// goal's atoms. The weakening entry has empty positions in
+// sequent_replay but is never referenced; the walk's no-op handler
+// suffices and the gate check passes.
+void test_lkr_to_comb_weakening_scaffolding() {
+    Runtime rt;
+    rt.load("axiom dummy: q");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "p | ~p");
+    FormulaHandle q_form = parse_root(ctx, "q");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening_scaffolding";
+    {
+        lkr::Weakening w{};
+        w.formula = q_form;
+        prog.instrs.emplace_back(std::move(w));
+    }
+    // After Weakening: [(p|~p), q]
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    // After Or: [p, q, ~p]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});
+
+    translate::lkr_to_comb::LemmaCombProofs no_lemmas;
+    translate::lkr_to_comb::LKRtoComb pass(ctx, goal, no_lemmas);
+    EXPECT_OK(pass.apply(prog));
+}
+
+// Phase 1.3: Weakening load-bearing (LKR_TO_COMB_DESIGN.md §4.4
+// Case B). The input gate should reject with a clear error.
+//
+// Goal: p | ¬p (a tautology). LKR Weakens in p, then ¬p, then closes
+// AxiomLit using the two weakening entries directly. LKR-valid but
+// the proof's "content" lives entirely in the weakening — proving
+// `(p|~p) ∨ p ∨ ~p` rather than `p|~p` itself. The §15 trick can't
+// absorb this (φ is not contradictory), so the gate rejects.
+void test_lkr_to_comb_weakening_load_bearing_rejected() {
+    Runtime rt;
+    rt.load("axiom dummy: q");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "p | ~p");
+    FormulaHandle p_form  = parse_root(ctx, "p");
+    FormulaHandle np_form = parse_root(ctx, "~p");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening_load_bearing";
+    {
+        lkr::Weakening w{};
+        w.formula = p_form;
+        prog.instrs.emplace_back(std::move(w));
+    }
+    {
+        lkr::Weakening w{};
+        w.formula = np_form;
+        prog.instrs.emplace_back(std::move(w));
+    }
+    // After two Weakenings: [(p|~p), p, ~p].
+    // Load-bearing AxiomLit on the weakening entries:
+    prog.instrs.push_back(lkr::AxiomLit{{}, 1, 2});
+
+    translate::lkr_to_comb::LemmaCombProofs no_lemmas;
+    translate::lkr_to_comb::LKRtoComb pass(ctx, goal, no_lemmas);
+    auto r = pass.apply(prog);
+    if (r.ok()) {
+        std::cerr << "FAIL: expected load-bearing-Weakening rejection at "
+                  << __FILE__ << ":" << __LINE__ << "\n";
+        ++g_failed;
+        return;
+    }
+    std::string msg = r.error().to_string();
+    if (msg.find("load-bearing") == std::string::npos) {
+        std::cerr << "FAIL: error doesn't mention 'load-bearing': "
+                  << msg << " at " << __FILE__ << ":" << __LINE__ << "\n";
+        ++g_failed;
+        return;
+    }
+    ++g_passed;
+}
+
 // Strategy A simpler case (LKR_TO_COMB_DESIGN.md §4.12): hand-crafted
 // lemma with one internal Cut. Verifies the splicer handles lemma Cuts
 // correctly before we tackle the NDtoLKR-emitted case.
@@ -699,6 +779,8 @@ int main() {
     test_lkr_to_comb_cut_with_lemma();
     test_lkr_to_comb_cut_with_forall_lemma();
     test_lkr_to_comb_cut_with_exists_lemma();
+    test_lkr_to_comb_weakening_scaffolding();
+    test_lkr_to_comb_weakening_load_bearing_rejected();
     test_lkr_to_comb_inline_hand_crafted_cut_lemma();
     test_lkr_to_comb_inline_lemma_with_cuts();
     test_end_to_end_nd_to_comb_self_impl();

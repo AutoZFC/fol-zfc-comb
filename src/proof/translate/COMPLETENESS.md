@@ -134,7 +134,7 @@ and a test exercises the rule under the relevant verifier gate.
 | AxiomLit     | LKR_TO_COMB_DESIGN.md §4.1         | walk.cpp::build_leaf_axiom_lit       | lkr_to_comb_test::self_implication    | ✓ done   |
 | One          | LKR_TO_COMB_DESIGN.md §4.2         | walk.cpp::build_leaf_one + fograph.cpp | lkr_to_comb_test::one_minimal/with_sibling, comb_test::builder_one_* | ✓ done   |
 | Exchange     | LKR_TO_COMB_DESIGN.md §4.3         | walk.cpp (no-op linear)              | covered by and_commute                | ✓ done   |
-| Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp (no-op linear, scaffolding) | (spec only, gate not yet implemented) | spec     |
+| Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp + input_gate.cpp::check_no_load_bearing_weakening | weakening_scaffolding + weakening_load_bearing_rejected | ✓ done   |
 | Contraction  | LKR_TO_COMB_DESIGN.md §4.5 (stub)  | pending                              | pending                               | open     |
 | Or           | LKR_TO_COMB_DESIGN.md §4.6         | walk.cpp (no-op linear)              | covered by self_implication           | ✓ done   |
 | Forall       | LKR_TO_COMB_DESIGN.md §4.7 + §7.5  | walk.cpp::rule_forall                | forall_em + nd_to_comb_forall_self    | ✓ done   |
@@ -143,23 +143,19 @@ and a test exercises the rule under the relevant verifier gate.
 | Cut          | LKR_TO_COMB_DESIGN.md §4.10 + §15  | walk.cpp::rule_cut + cut_augment     | cut_no_use, cut_with_lemma            | ✓ done   |
 | CloseByLemma | LKR_TO_COMB_DESIGN.md §4.12        | lemma_inliner.cpp (Strategy A)       | cut_with_lemma + cut_with_forall_lemma + cut_with_exists_lemma + inline_hand_crafted_cut_lemma + inline_lemma_with_cuts | ✓ done |
 
-**`Weakening`** (spec status: full spec in `LKR_TO_COMB_DESIGN.md §4.4`,
-implementation of the gate-level check pending).
+**`Weakening`** (✓ done — scope-restricted to scaffolding case).
 
 The spec distinguishes two cases:
 - **Scaffolding** (weakened entry never referenced): supported by the
-  current no-op handler. CombProof witnesses `goal_nnf` directly; no
+  no-op handler in `walk`. CombProof witnesses `goal_nnf` directly; no
   target augmentation is needed because the source has no vertices in
   `G(φ)`.
 - **Load-bearing** (weakened entry used by later ops): out of scope.
-  Naively augmenting the target with `∨ φ` would break the soundness
-  contract — `goal ∨ φ` is not classically equivalent to `goal`
-  when `φ` isn't contradictory (unlike §15's `(θ ∧ ¬θ)`).
-
-To flip the row to ✓ done, an input-gate check
-(`weakening_is_scaffolding`) needs to reject load-bearing Weakening
-with a clear error pointing at the offending reference. The walk and
-sequent_replay are already correct for the scaffolding case.
+  Rejected by the input-gate check `check_no_load_bearing_weakening`
+  with a clear diagnostic pointing at the offending position
+  reference. The §15 trick doesn't generalize uniformly here:
+  `goal ∨ φ` is not classically equivalent to `goal` when `φ`
+  isn't contradictory (unlike §15's `(θ ∧ ¬θ)`).
 
 **`CloseByLemma`** (✓ done — Strategy A via `LKR_TO_COMB_DESIGN.md §4.12`).
 The lemma registry stores LKR programs (not CombProofs). The
