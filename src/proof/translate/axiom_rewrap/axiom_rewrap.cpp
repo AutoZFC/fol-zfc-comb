@@ -156,62 +156,68 @@ util::Result<uint32_t> find_qed(const Program<nd::Instr>& prog) {
     return MAKE_ERROR << "axiom_rewrap: input program has no Qed op";
 }
 
-// Build H = (((A_1 ∧ A_2) ∧ A_3) … ∧ A_n) left-associated.
-// `axiom_names` is lex-sorted by caller.
+// Look up a fact's formula. Both axioms and theorems live in the
+// runtime context; for facts that name a theorem, the formula is the
+// theorem's claim (φ_T), unchanged.
+FormulaHandle find_fact_formula(GlobalContext& ctx, const std::string& name) {
+    if (auto ax = ctx.find_axiom(name); ax.has_value()) {
+        return ax.value().get().root();
+    }
+    if (auto th = ctx.find_theorem(name); th.has_value()) {
+        return th.value().get().root();
+    }
+    // Unreachable for facts validated by compute_transitive_facts.
+    return FormulaHandle{};
+}
+
+// Build H = (((φ_F_1 ∧ φ_F_2) ∧ φ_F_3) … ∧ φ_F_n) left-associated.
+// `fact_names` is lex-sorted by caller. F_i can be either an axiom or
+// a theorem name; the corresponding formula is looked up uniformly.
 FormulaHandle build_conjunction(GlobalContext& ctx,
                                 FormulaBuilder& builder,
-                                const std::vector<std::string>& axiom_names) {
-    FormulaHandle h = ctx.find_axiom(axiom_names[0]).value().get().root();
-    for (size_t i = 1; i < axiom_names.size(); ++i) {
-        FormulaHandle a_i =
-            ctx.find_axiom(axiom_names[i]).value().get().root();
-        h = builder.make_and(h, a_i);
+                                const std::vector<std::string>& fact_names) {
+    FormulaHandle h = find_fact_formula(ctx, fact_names[0]);
+    for (size_t i = 1; i < fact_names.size(); ++i) {
+        h = builder.make_and(h, find_fact_formula(ctx, fact_names[i]));
     }
     return h;
 }
 
 // Emit the prelude: synthetic Assume(H) followed by the and_elim chain
-// that lands each axiom on its own step. Populates `axiom_step_table`
-// mapping axiom name → StepRef in the output.
+// that lands each fact on its own step. Populates `fact_step_table`
+// mapping fact name (axiom or theorem) → StepRef in the output.
 //
-// Layout (n = |axioms|, H is left-associated lex-sorted conjunction):
+// Layout (n = |facts|, H is left-associated lex-sorted conjunction):
 //   [0]                     Assume(H)                                       ← binds h = H
 //   [1 .. n-1]              AndElimL of h, then of prev result, …          ← (n-1) ops, peel left
-//                                                                            h_2 = (((A_1∧A_2)∧A_3)∧…∧A_{n-1})
-//                                                                            h_{n-1} = (A_1∧A_2)
-//                                                                            h_1 = A_1                        ← bound at index n-1
-//   [n .. 2n-2]             AndElimR of h, of h_2, …, of h_{n-1}            ← (n-1) ops, extract A_n, …, A_2
-//   axiom_step_table[A_1] = StepRef{n-1}        (= h_1 directly)
-//   axiom_step_table[A_k] = AndElimR's index for k = 2..n
+//                                                                            h_{n-1} = (φ_1∧…∧φ_{n-1})
+//                                                                            h_1     = φ_1                  ← bound at index n-1
+//   [n .. 2n-2]             AndElimR of h, of h_2, …, of h_{n-1}            ← (n-1) ops, extract φ_n, …, φ_2
+//   fact_step_table[F_1] = StepRef{n-1}        (= h_1 directly)
+//   fact_step_table[F_k] = AndElimR's index for k = 2..n
 //
-// n = 1: prelude is just [Assume]; axiom_step_table[A_1] = StepRef{0}.
+// n = 1: prelude is just [Assume]; fact_step_table[F_1] = StepRef{0}.
 // n = 0: caller short-circuits before reaching here.
 void emit_prelude(GlobalContext& /*ctx*/,
-                  const std::vector<std::string>& axioms,
+                  const std::vector<std::string>& facts,
                   FormulaHandle H,
                   Program<nd::Instr>& out,
-                  std::unordered_map<std::string, StepRef>& axiom_step_table) {
+                  std::unordered_map<std::string, StepRef>& fact_step_table) {
     nd::Assume assume_h{};
     assume_h.resolved = H;
     out.instrs.push_back(nd::Instr{assume_h});
     StepRef h_step{0};
 
-    const size_t n = axioms.size();
+    const size_t n = facts.size();
     if (n == 1) {
-        axiom_step_table[axioms[0]] = h_step;
+        fact_step_table[facts[0]] = h_step;
         return;
     }
 
-    // h_steps[i] is the StepRef binding h_{n-i}:
-    //   h_steps[0]   = h_n   = h
-    //   h_steps[1]   = h_{n-1}
-    //   …
-    //   h_steps[n-1] = h_1 = A_1
     std::vector<StepRef> h_steps;
     h_steps.reserve(n);
     h_steps.push_back(h_step);
 
-    // (n-1) AndElimL ops, building h_{n-1} … h_1.
     for (size_t i = 0; i + 1 < n; ++i) {
         nd::AndElimL op{};
         op.of = h_steps[i];
@@ -220,34 +226,32 @@ void emit_prelude(GlobalContext& /*ctx*/,
         h_steps.push_back(StepRef{idx});
     }
 
-    // (n-1) AndElimR ops, extracting A_n, A_{n-1}, …, A_2.
     for (size_t i = 0; i + 1 < n; ++i) {
         nd::AndElimR op{};
-        op.of = h_steps[i];        // h_{n-i} = (((A_1∧…∧A_{n-i-1}) ∧ A_{n-i}))
+        op.of = h_steps[i];
         uint32_t idx = static_cast<uint32_t>(out.instrs.size());
         out.instrs.push_back(nd::Instr{op});
-        axiom_step_table[axioms[n - 1 - i]] = StepRef{idx};
+        fact_step_table[facts[n - 1 - i]] = StepRef{idx};
     }
 
-    // A_1 = h_1.
-    axiom_step_table[axioms[0]] = h_steps[n - 1];
+    fact_step_table[facts[0]] = h_steps[n - 1];
 }
 
 }  // namespace
 
 util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
-    auto axioms_r = compute_transitive_axioms(in, ctx_, theorem_axioms_);
-    if (!axioms_r.ok()) return axioms_r.error();
-    std::vector<std::string> axioms = std::move(axioms_r).unwrap();
+    auto facts_r = compute_transitive_facts(in, ctx_, theorem_facts_);
+    if (!facts_r.ok()) return facts_r.error();
+    std::vector<std::string> facts = std::move(facts_r).unwrap();
 
     // n = 0: identity pass-through.
-    if (axioms.empty()) {
-        return RewrapResult{in, goal_, std::move(axioms)};
+    if (facts.empty()) {
+        return RewrapResult{in, goal_, std::move(facts)};
     }
 
     // Build H and wrapped goal.
     FormulaBuilder builder(ctx_);
-    FormulaHandle H        = build_conjunction(ctx_, builder, axioms);
+    FormulaHandle H        = build_conjunction(ctx_, builder, facts);
     FormulaHandle wrapped  = builder.make_implies(H, goal_);
 
     // Find the input's Qed.
@@ -259,94 +263,34 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
 
     Program<nd::Instr> out;
     out.claim_name = in.claim_name;
-    out.instrs.reserve(in.instrs.size() + 2 * axioms.size());
+    out.instrs.reserve(in.instrs.size() + 2 * facts.size());
 
     // ===== Prelude: Assume(H) + and_elim chain =====
-    std::unordered_map<std::string, StepRef> axiom_step_table;
-    emit_prelude(ctx_, axioms, H, out, axiom_step_table);
+    std::unordered_map<std::string, StepRef> fact_step_table;
+    emit_prelude(ctx_, facts, H, out, fact_step_table);
 
-    // ===== Body: copy with remap; drop direct axiom Uses =====
+    // ===== Body: copy with remap; drop every Use op uniformly =====
     //
     // step_remap[input_idx] is the output StepRef.idx for an input op's
-    // result. For dropped Use(A), the entry points at axiom_step_table[A]'s
-    // StepRef so downstream refs alias the cached extract. For all other
-    // ops, the entry is the op's new instr index in `out`.
+    // result. Every Use(F) — axiom or theorem alike — is dropped and
+    // aliased to the cached extract h_F from the prelude.
     std::vector<uint32_t> step_remap(in.instrs.size(), kInvalid);
 
     for (uint32_t i = 0; i < in.instrs.size(); ++i) {
         if (i == qed_idx) continue;   // original Qed is replaced by postlude
 
         if (const auto* u = std::get_if<nd::Use>(&in.instrs[i])) {
-            // Drop direct-axiom Use ops: alias to the cached extract.
-            if (ctx_.find_axiom(u->axiom.name).has_value()) {
-                step_remap[i] = axiom_step_table.at(u->axiom.name).idx;
-                continue;
+            auto it = fact_step_table.find(u->axiom.name);
+            if (it == fact_step_table.end()) {
+                // compute_transitive_facts should have validated every
+                // cited fact; defensive error.
+                return MAKE_ERROR
+                    << "axiom_rewrap: Use('" << u->axiom.name
+                    << "') has no entry in fact_step_table (transitive "
+                       "facts computation skipped it?)";
             }
-            // Theorem Use ops: emit the unwrap macro (Phase 5).
-            // Modus ponens on (H_T → φ_T) with H_T rebuilt from
-            // axiom_step_table over axioms(T) (lex-sorted to match H_T).
-            if (ctx_.find_theorem(u->axiom.name).has_value()) {
-                const std::string& T_name = u->axiom.name;
-                const auto& axioms_T = theorem_axioms_.get(T_name);
-
-                if (axioms_T.empty()) {
-                    // No wrap happened for T (axioms(T) = ∅); plain Use(T)
-                    // returns φ_T directly.
-                    uint32_t out_idx = static_cast<uint32_t>(out.instrs.size());
-                    step_remap[i] = out_idx;
-                    out.instrs.push_back(remap_refs(in.instrs[i], step_remap));
-                    continue;
-                }
-
-                if (!wrapped_theorems_.contains(T_name)) {
-                    return MAKE_ERROR
-                        << "axiom_rewrap: theorem '" << T_name
-                        << "' has axioms(T) = " << axioms_T.size()
-                        << " but no wrapped form in WrappedTheoremMap "
-                           "(runtime must register the wrapped form after "
-                           "rewrapping T's proof, in build-topological order)";
-                }
-                FormulaHandle wrapped_T = wrapped_theorems_.get(T_name);
-
-                // Emit Use{resolved: H_T → φ_T} — bypasses ctx name lookup.
-                uint32_t use_wrap_idx =
-                    static_cast<uint32_t>(out.instrs.size());
-                nd::Use use_op{};
-                use_op.resolved = wrapped_T;
-                out.instrs.push_back(nd::Instr{use_op});
-
-                // Build H_T via and_intro left-fold:
-                //   H = A_1, then iteratively H := H ∧ A_{i+1}.
-                // This reproduces the canonical left-associated lex-sorted
-                // shape (((A_1 ∧ A_2) ∧ A_3) … ∧ A_k) that the wrapped form
-                // T's prelude was constructed against.
-                StepRef H_T_step = axiom_step_table.at(axioms_T[0]);
-                for (size_t j = 1; j < axioms_T.size(); ++j) {
-                    nd::AndIntro and_op{};
-                    and_op.a = H_T_step;
-                    and_op.b = axiom_step_table.at(axioms_T[j]);
-                    uint32_t and_idx =
-                        static_cast<uint32_t>(out.instrs.size());
-                    out.instrs.push_back(nd::Instr{and_op});
-                    H_T_step = StepRef{and_idx};
-                }
-
-                // Modus ponens: (H_T → φ_T), H_T ⊢ φ_T.
-                uint32_t mp_idx =
-                    static_cast<uint32_t>(out.instrs.size());
-                nd::ImpliesElim mp_op{};
-                mp_op.impl = StepRef{use_wrap_idx};
-                mp_op.ant  = H_T_step;
-                out.instrs.push_back(nd::Instr{mp_op});
-
-                step_remap[i] = mp_idx;
-                continue;
-            }
-            // Unresolved name — compute_transitive_axioms would have
-            // caught this earlier; defensive error.
-            return MAKE_ERROR
-                << "axiom_rewrap: Use('" << u->axiom.name
-                << "') resolves to neither axiom nor theorem in ctx";
+            step_remap[i] = it->second.idx;
+            continue;
         }
 
         uint32_t out_idx = static_cast<uint32_t>(out.instrs.size());
@@ -393,7 +337,7 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
     return RewrapResult{
         std::move(out),
         wrapped,
-        std::move(axioms),
+        std::move(facts),
     };
 }
 

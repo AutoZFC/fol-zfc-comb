@@ -1,7 +1,7 @@
-// axiom_rewrap Phase 1 tests — compute_transitive_axioms.
+// axiom_rewrap Phase 1 tests — compute_transitive_facts.
 //
 // Per AXIOM_REWRAP_DESIGN.md §7.1, this phase delivers:
-//   compute_transitive_axioms(prog, ctx, theorem_axioms) → vector<string>
+//   compute_transitive_facts(prog, ctx, theorem_axioms) → vector<string>
 //
 // The function returns axiom names (lex-sorted, deduplicated) for:
 //   - direct Use(A) where ctx resolves A as an axiom
@@ -32,9 +32,8 @@ using namespace logic;
 using namespace logic::proof;
 using logic::proof::translate::axiom_rewrap::AxiomRewrap;
 using logic::proof::translate::axiom_rewrap::RewrapResult;
-using logic::proof::translate::axiom_rewrap::TheoremAxiomMap;
-using logic::proof::translate::axiom_rewrap::WrappedTheoremMap;
-using logic::proof::translate::axiom_rewrap::compute_transitive_axioms;
+using logic::proof::translate::axiom_rewrap::TheoremFactsMap;
+using logic::proof::translate::axiom_rewrap::compute_transitive_facts;
 
 namespace {
 
@@ -85,9 +84,9 @@ void test_empty_axiom_set() {
     }
 
     Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
         EXPECT_EQ(r.value().size(), size_t{0});
@@ -115,9 +114,9 @@ void test_single_axiom_used_once() {
     }
 
     Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
         std::vector<std::string> expected{"a_true"};
@@ -145,9 +144,9 @@ void test_same_axiom_used_many_times() {
     }
 
     Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
         std::vector<std::string> expected{"p_holds"};
@@ -179,9 +178,9 @@ void test_multiple_axioms_lex_sort() {
     }
 
     Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
         std::vector<std::string> expected{"a_ax", "b_ax", "c_ax"};
@@ -192,7 +191,8 @@ void test_multiple_axioms_lex_sort() {
 // =========================================================================
 // Test 5: one-theorem transitive dep
 // Proof uses theorem T, which itself uses axiom A.
-// Closure = {A} (T contributes its axiom set, not T itself).
+// Closure = {A, t_thm} (under uniform fact treatment, T contributes
+// itself AND its transitive facts).
 // =========================================================================
 void test_one_theorem_dep() {
     Runtime rt;
@@ -209,7 +209,7 @@ void test_one_theorem_dep() {
     }
 
     // Simulate that t_thm has been translated and its closure is recorded.
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
     registry.put("t_thm", std::vector<std::string>{"a_ax"});
 
     // Now a proof that uses t_thm.
@@ -234,10 +234,10 @@ void test_one_theorem_dep() {
     }
     rt.context().add_theorem("t_thm", t_thm_sentence.value());
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
-        std::vector<std::string> expected{"a_ax"};
+        std::vector<std::string> expected{"a_ax", "t_thm"};
         EXPECT_EQ(r.value(), expected);
     }
 }
@@ -263,9 +263,10 @@ void test_chained_theorem_deps() {
         ++g_failed; return;
     }
 
-    TheoremAxiomMap registry;
+    TheoremFactsMap registry;
     registry.put("t1", std::vector<std::string>{"a_ax"});
-    registry.put("t2", std::vector<std::string>{"a_ax"});  // T2's closure includes A transitively
+    // Under uniform fact treatment, t2's facts include t1 itself + t1's facts.
+    registry.put("t2", std::vector<std::string>{"a_ax", "t1"});
 
     // Outer proof using t2.
     auto parsed2 = rt.load_with_proofs(R"(
@@ -289,10 +290,10 @@ void test_chained_theorem_deps() {
     rt.context().add_theorem("t1", t1_s.value());
     rt.context().add_theorem("t2", t2_s.value());
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
     if (r.ok()) {
-        std::vector<std::string> expected{"a_ax"};
+        std::vector<std::string> expected{"a_ax", "t1", "t2"};
         EXPECT_EQ(r.value(), expected);
     }
 }
@@ -331,9 +332,9 @@ void test_theorem_not_in_registry_errors() {
     if (!t_s) { std::cerr << "FAIL: claim missing\n"; ++g_failed; return; }
     rt.context().add_theorem("t_missing", t_s.value());
 
-    TheoremAxiomMap registry;  // empty: t_missing not registered
+    TheoremFactsMap registry;  // empty: t_missing not registered
 
-    auto r = compute_transitive_axioms(prog, rt.context(), registry);
+    auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.is_error());
 }
 
@@ -387,15 +388,14 @@ void test_apply_no_axioms_identity() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
 
     const auto& res = r.value();
-    EXPECT_EQ(res.axioms.size(), size_t{0});
+    EXPECT_EQ(res.facts.size(), size_t{0});
     EXPECT_EQ(res.wrapped_goal, goal);
     EXPECT_EQ(res.proof.instrs.size(), input_size);
     EXPECT_EQ(count_synthetic_assume(res.proof), 0);
@@ -429,9 +429,8 @@ void test_apply_single_axiom_wrap() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -440,9 +439,9 @@ void test_apply_single_axiom_wrap() {
     }
 
     const auto& res = r.value();
-    EXPECT_EQ(res.axioms.size(), size_t{1});
-    if (res.axioms.size() == 1) {
-        EXPECT_EQ(res.axioms[0], std::string("a_true"));
+    EXPECT_EQ(res.facts.size(), size_t{1});
+    if (res.facts.size() == 1) {
+        EXPECT_EQ(res.facts[0], std::string("a_true"));
     }
     // Wrapped goal != original goal (now H → φ).
     EXPECT_TRUE(res.wrapped_goal != goal);
@@ -490,9 +489,8 @@ void test_apply_two_axioms_wrap() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -502,10 +500,10 @@ void test_apply_two_axioms_wrap() {
 
     const auto& res = r.value();
     // Two axioms, lex-sorted: a_ax, b_ax.
-    EXPECT_EQ(res.axioms.size(), size_t{2});
-    if (res.axioms.size() == 2) {
-        EXPECT_EQ(res.axioms[0], std::string("a_ax"));
-        EXPECT_EQ(res.axioms[1], std::string("b_ax"));
+    EXPECT_EQ(res.facts.size(), size_t{2});
+    if (res.facts.size() == 2) {
+        EXPECT_EQ(res.facts[0], std::string("a_ax"));
+        EXPECT_EQ(res.facts[1], std::string("b_ax"));
     }
     // Phase 4: axiom Uses dropped from body.
     EXPECT_EQ(count_axiom_uses(res.proof, rt.context()), 0);
@@ -559,9 +557,8 @@ void verify_wrap(Runtime& rt, const char* source, const char* claim_name) {
     }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     if (!r.ok()) {
         std::cerr << "apply fail for '" << claim_name << "': "
@@ -713,9 +710,8 @@ void test_apply_axiom_dropped_no_other_uses() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -748,9 +744,8 @@ void test_apply_axiom_cached_across_multi_use() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -792,9 +787,8 @@ void test_apply_two_axioms_dropped_with_extracts() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
@@ -838,16 +832,15 @@ void test_apply_three_axioms_dropped_with_extracts() {
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap registry;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
+    TheoremFactsMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
 
     const auto& res = r.value();
     // Lex order: a_ax, b_ax, c_ax. H = ((a ∧ b) ∧ c).
-    EXPECT_EQ(res.axioms.size(), size_t{3});
+    EXPECT_EQ(res.facts.size(), size_t{3});
     EXPECT_EQ(count_axiom_uses(res.proof, rt.context()), 0);
 
     nd::NDVerifier verifier;
@@ -883,8 +876,7 @@ RewrapResult setup_wrapped_theorem(
     Runtime& rt,
     const ParseResult& parsed,
     const std::string& T_name,
-    TheoremAxiomMap& thm_axioms,
-    WrappedTheoremMap& wrapped)
+    TheoremFactsMap& thm_facts)
 {
     const ParsedProof* p = nullptr;
     for (const auto& pp : parsed.proofs) {
@@ -902,7 +894,7 @@ RewrapResult setup_wrapped_theorem(
     }
     FormulaHandle T_goal = claim.value().get().root();
 
-    AxiomRewrap pass(rt.context(), T_goal, thm_axioms, wrapped);
+    AxiomRewrap pass(rt.context(), T_goal, thm_facts);
     auto r = pass.apply(prog);
     if (!r.ok()) {
         std::cerr << "setup_wrapped_theorem(" << T_name << "): "
@@ -911,10 +903,7 @@ RewrapResult setup_wrapped_theorem(
     }
 
     rt.context().add_theorem(T_name, claim.value());
-    thm_axioms.put(T_name, r.value().axioms);
-    if (!r.value().axioms.empty()) {
-        wrapped.put(T_name, r.value().wrapped_goal);
-    }
+    thm_facts.put(T_name, r.value().facts);
     return std::move(r).unwrap();
 }
 
@@ -937,9 +926,8 @@ void test_apply_theorem_use_one_axiom() {
         ++g_failed; return;
     }
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms);
 
     // Outer rewrap.
     Program<nd::Instr> outer_prog =
@@ -951,16 +939,18 @@ void test_apply_theorem_use_one_axiom() {
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
-    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms);
     auto r = pass.apply(outer_prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
         std::cerr << r.error().to_string() << "\n"; return;
     }
-    // Outer's axioms = transitive closure via t1: {a_holds}.
-    EXPECT_EQ(r.value().axioms.size(), size_t{1});
-    if (!r.value().axioms.empty()) {
-        EXPECT_EQ(r.value().axioms[0], std::string("a_holds"));
+    // Outer's facts = {a_holds, t1} — direct axiom plus the cited theorem
+    // itself under uniform fact treatment.
+    EXPECT_EQ(r.value().facts.size(), size_t{2});
+    if (r.value().facts.size() == 2) {
+        EXPECT_EQ(r.value().facts[0], std::string("a_holds"));
+        EXPECT_EQ(r.value().facts[1], std::string("t1"));
     }
     // Phase 4 contract still holds: no axiom Use ops.
     EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
@@ -998,9 +988,8 @@ void test_apply_theorem_use_two_axioms() {
         ++g_failed; return;
     }
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    setup_wrapped_theorem(rt, parsed.value(), "t", thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    setup_wrapped_theorem(rt, parsed.value(), "t", thm_axioms);
 
     Program<nd::Instr> outer_prog =
         lower_or_die(*[&]() -> const ParsedProof* {
@@ -1011,13 +1000,15 @@ void test_apply_theorem_use_two_axioms() {
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
-    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms);
     auto r = pass.apply(outer_prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
         std::cerr << r.error().to_string() << "\n"; return;
     }
-    EXPECT_EQ(r.value().axioms.size(), size_t{2});
+    // outer cites t which uses {a_holds, b_holds}. facts(outer) =
+    // {a_holds, b_holds, t} (t plus its transitive facts).
+    EXPECT_EQ(r.value().facts.size(), size_t{3});
     EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
 
     nd::NDVerifier verifier;
@@ -1030,7 +1021,7 @@ void test_apply_theorem_use_two_axioms() {
 }
 
 // Phase 5 Test 3: theorem chain T_2 → T_1 → A. Verifies the
-// transitive-closure threading + composition of unwrap macros.
+// transitive-closure threading: facts(outer) includes t1, t2, a_holds.
 void test_apply_theorem_chain() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -1053,10 +1044,9 @@ void test_apply_theorem_chain() {
         ++g_failed; return;
     }
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms, wrapped);
-    setup_wrapped_theorem(rt, parsed.value(), "t2", thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms);
+    setup_wrapped_theorem(rt, parsed.value(), "t2", thm_axioms);
 
     Program<nd::Instr> outer_prog =
         lower_or_die(*[&]() -> const ParsedProof* {
@@ -1067,13 +1057,14 @@ void test_apply_theorem_chain() {
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
-    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms);
     auto r = pass.apply(outer_prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
         std::cerr << r.error().to_string() << "\n"; return;
     }
-    EXPECT_EQ(r.value().axioms.size(), size_t{1});
+    // outer uses t2 → t1 → a_holds. facts(outer) = {a_holds, t1, t2}.
+    EXPECT_EQ(r.value().facts.size(), size_t{3});
     EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
 
     nd::NDVerifier verifier;
@@ -1085,7 +1076,8 @@ void test_apply_theorem_chain() {
     if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
 }
 
-// Phase 5 Test 4: theorem with axioms(T) = ∅; Use(T) stays as-is (no unwrap).
+// Phase 5 Test 4: theorem with no facts of its own; Use(T) is dropped
+// and aliased to the extracted h_taut (taut's formula sits in H_outer).
 void test_apply_theorem_no_axioms_no_unwrap() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -1107,13 +1099,10 @@ void test_apply_theorem_no_axioms_no_unwrap() {
         ++g_failed; return;
     }
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
+    TheoremFactsMap thm_axioms;
     auto taut_result =
-        setup_wrapped_theorem(rt, parsed.value(), "taut", thm_axioms, wrapped);
-    EXPECT_EQ(taut_result.axioms.size(), size_t{0});
-    // No wrapped form should have been registered (axioms(taut) = ∅).
-    EXPECT_TRUE(!wrapped.contains("taut"));
+        setup_wrapped_theorem(rt, parsed.value(), "taut", thm_axioms);
+    EXPECT_EQ(taut_result.facts.size(), size_t{0});
 
     Program<nd::Instr> outer_prog =
         lower_or_die(*[&]() -> const ParsedProof* {
@@ -1124,25 +1113,26 @@ void test_apply_theorem_no_axioms_no_unwrap() {
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
-    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms);
     auto r = pass.apply(outer_prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
         std::cerr << r.error().to_string() << "\n"; return;
     }
-    // Outer uses a_holds (direct axiom) + taut (theorem, no axioms).
-    // axioms(outer) = {a_holds} only.
-    EXPECT_EQ(r.value().axioms.size(), size_t{1});
+    // Outer uses a_holds (direct axiom) + taut (theorem).
+    // Under uniform design, facts(outer) = {a_holds, taut} (both go in H_outer).
+    EXPECT_EQ(r.value().facts.size(), size_t{2});
     EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
 
-    // The Use(taut) op should survive in the output (no unwrap macro).
+    // No Use(taut) op should survive — drop-and-alias treats theorems
+    // exactly like axioms.
     int use_taut_count = 0;
     for (const auto& instr : r.value().proof.instrs) {
         if (const auto* u = std::get_if<nd::Use>(&instr)) {
             if (u->axiom.name == "taut") ++use_taut_count;
         }
     }
-    EXPECT_EQ(use_taut_count, 1);
+    EXPECT_EQ(use_taut_count, 0);
 
     nd::NDVerifier verifier;
     Proof p{};
@@ -1153,48 +1143,9 @@ void test_apply_theorem_no_axioms_no_unwrap() {
     if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
 }
 
-// Phase 5 Test 5: cite theorem T with axioms(T) ≠ ∅ but no wrapped form
-// registered → input error.
-void test_apply_theorem_missing_wrapped_form_errors() {
-    Runtime rt;
-    auto parsed = rt.load_with_proofs(R"(
-        axiom a_holds: a
-        claim t: a
-        proof t:
-            h = use a_holds
-            qed h
-        claim outer: a
-        proof outer:
-            h = use t
-            qed h
-    )");
-    if (!parsed.ok()) {
-        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
-        ++g_failed; return;
-    }
-
-    // Register t as a theorem WITH axioms but WITHOUT a wrapped form.
-    auto t_claim = rt.context().find_claim("t");
-    if (!t_claim) { std::cerr << "missing\n"; ++g_failed; return; }
-    rt.context().add_theorem("t", t_claim.value());
-
-    TheoremAxiomMap thm_axioms;
-    thm_axioms.put("t", std::vector<std::string>{"a_holds"});
-    WrappedTheoremMap wrapped;   // intentionally empty
-
-    Program<nd::Instr> outer_prog =
-        lower_or_die(*[&]() -> const ParsedProof* {
-            for (const auto& p : parsed.value().proofs)
-                if (p.claim_name == "outer") return &p;
-            return nullptr;
-        }());
-    auto outer_claim = rt.context().find_claim("outer");
-    FormulaHandle outer_goal = outer_claim.value().get().root();
-
-    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
-    auto r = pass.apply(outer_prog);
-    EXPECT_TRUE(r.is_error());
-}
+// (Former Phase 5 Test 5: tested missing WrappedTheoremMap entry — no
+// longer applicable under the uniform fact treatment, where there is
+// no WrappedTheoremMap to be missing from. Deleted 2026-05-18.)
 
 // =========================================================================
 // Phase 6: End-to-end pipeline integration.
@@ -1235,9 +1186,8 @@ void test_integration_simple_axiom_to_comb() {
     FormulaHandle goal = claim.value().get().root();
 
     // Stage 1: axiom_rewrap. Output: ND proof of p → p (axiom-free).
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap rewrap(rt.context(), goal, thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    AxiomRewrap rewrap(rt.context(), goal, thm_axioms);
     auto rwr = rewrap.apply(prog);
     if (!rwr.ok()) {
         std::cerr << "axiom_rewrap fail: " << rwr.error().to_string() << "\n";
@@ -1286,9 +1236,8 @@ void test_integration_two_axioms_to_comb() {
     auto claim = rt.context().find_claim("derive_ab");
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap rewrap(rt.context(), goal, thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    AxiomRewrap rewrap(rt.context(), goal, thm_axioms);
     auto rwr = rewrap.apply(prog);
     if (!rwr.ok()) {
         std::cerr << "axiom_rewrap fail: " << rwr.error().to_string() << "\n";
@@ -1355,9 +1304,8 @@ void test_integration_nested_forall_axiom() {
     auto claim = rt.context().find_claim("same");
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap rewrap(rt.context(), goal, thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    AxiomRewrap rewrap(rt.context(), goal, thm_axioms);
     auto rwr = rewrap.apply(prog);
     if (!rwr.ok()) {
         std::cerr << "axiom_rewrap fail: " << rwr.error().to_string() << "\n";
@@ -1431,9 +1379,8 @@ void test_integration_zfc_eq_refl() {
     auto claim = rt.context().find_claim("eq_refl");
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap rewrap(rt.context(), goal, thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    AxiomRewrap rewrap(rt.context(), goal, thm_axioms);
     auto rwr = rewrap.apply(prog);
     if (!rwr.ok()) {
         std::cerr << "axiom_rewrap fail: " << rwr.error().to_string() << "\n";
@@ -1485,9 +1432,8 @@ void test_integration_zfc_style_quantified_axiom() {
     auto claim = rt.context().find_claim("ax_q_again");
     FormulaHandle goal = claim.value().get().root();
 
-    TheoremAxiomMap thm_axioms;
-    WrappedTheoremMap wrapped;
-    AxiomRewrap rewrap(rt.context(), goal, thm_axioms, wrapped);
+    TheoremFactsMap thm_axioms;
+    AxiomRewrap rewrap(rt.context(), goal, thm_axioms);
     auto rwr = rewrap.apply(prog);
     if (!rwr.ok()) {
         std::cerr << "axiom_rewrap fail: " << rwr.error().to_string() << "\n";
@@ -1514,7 +1460,7 @@ void test_integration_zfc_style_quantified_axiom() {
 }  // namespace
 
 int main() {
-    // Phase 1 — compute_transitive_axioms
+    // Phase 1 — compute_transitive_facts
     test_empty_axiom_set();
     test_single_axiom_used_once();
     test_same_axiom_used_many_times();
@@ -1546,7 +1492,6 @@ int main() {
     test_apply_theorem_use_two_axioms();
     test_apply_theorem_chain();
     test_apply_theorem_no_axioms_no_unwrap();
-    test_apply_theorem_missing_wrapped_form_errors();
 
     // Phase 6 — end-to-end integration (axiom_rewrap → NDtoLKR → LKRtoComb)
     test_integration_simple_axiom_to_comb();

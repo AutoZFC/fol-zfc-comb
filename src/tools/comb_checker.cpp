@@ -66,13 +66,12 @@ std::string load_headers(Runtime& rt,
 }
 
 // Process every theorem in `proof_path` through the full comb pipeline.
-// Populates `theorem_axioms`, `wrapped_theorems`, `lemma_lkr_programs`
-// in-place so subsequent files see this file's results.
+// Populates `theorem_facts` and `lemma_lkr_programs` in-place so
+// subsequent files see this file's results.
 void process_proof_file(
     Runtime&                  rt,
     const std::string&        proof_path,
-    ar::TheoremAxiomMap&      theorem_axioms,
-    ar::WrappedTheoremMap&    wrapped_theorems,
+    ar::TheoremFactsMap&      theorem_facts,
     lc::LemmaCombProofs&      lemma_lkr_programs,
     std::vector<StageResult>& results)
 {
@@ -136,17 +135,16 @@ void process_proof_file(
             prog = std::move(r).unwrap();
         }
 
-        auto ax_r = ar::compute_transitive_axioms(
-            prog, rt.context(), theorem_axioms);
-        if (!ax_r.ok()) {
-            results.push_back({proof_path, name, "compute_axioms",
-                              ax_r.error().to_string()});
+        auto fc_r = ar::compute_transitive_facts(
+            prog, rt.context(), theorem_facts);
+        if (!fc_r.ok()) {
+            results.push_back({proof_path, name, "compute_facts",
+                              fc_r.error().to_string()});
             continue;
         }
-        theorem_axioms.put(name, ax_r.value());
+        theorem_facts.put(name, fc_r.value());
 
-        ar::AxiomRewrap rewrap(rt.context(), goal,
-                                theorem_axioms, wrapped_theorems);
+        ar::AxiomRewrap rewrap(rt.context(), goal, theorem_facts);
         auto rwr_r = rewrap.apply(prog);
         if (!rwr_r.ok()) {
             fail("axiom_rewrap", rwr_r.error().to_string());
@@ -154,7 +152,6 @@ void process_proof_file(
             continue;
         }
         FormulaHandle wrapped_goal = rwr_r.value().wrapped_goal;
-        wrapped_theorems.put(name, wrapped_goal);
 
         ntl::NDtoLKR ndl(rt.context(), wrapped_goal);
         auto lkr_r = ndl.apply(rwr_r.value().proof);
@@ -220,20 +217,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    ar::TheoremAxiomMap   theorem_axioms;
-    ar::WrappedTheoremMap wrapped_theorems;
+    ar::TheoremFactsMap   theorem_facts;
     lc::LemmaCombProofs   lemma_lkr_programs;
     std::vector<StageResult> results;
 
     // Process dep proofs first (in argv order — caller is responsible
     // for topological ordering), then the main proof file. All theorems
-    // share the same maps so dep theorems' axioms/wrapped-forms are
-    // available to the main file.
+    // share the same maps so dep theorems' facts are available to the
+    // main file.
     for (const auto& dep : dep_proofs) {
-        process_proof_file(rt, dep, theorem_axioms, wrapped_theorems,
+        process_proof_file(rt, dep, theorem_facts,
                             lemma_lkr_programs, results);
     }
-    process_proof_file(rt, proof_path, theorem_axioms, wrapped_theorems,
+    process_proof_file(rt, proof_path, theorem_facts,
                         lemma_lkr_programs, results);
 
     // Report.

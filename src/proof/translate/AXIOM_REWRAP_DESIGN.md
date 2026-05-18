@@ -1,6 +1,8 @@
 # Axiom Rewrap (ND → ND): Mathematical Specification
 
-Status: spec draft. Implementation not started.
+Status: implemented. Revised 2026-05-18 to treat axioms and theorems
+uniformly as "facts" (see §2.3, which supersedes the original
+unwrap-macro mechanism).
 
 This translator discharges the "axiom CombProofs" obligation
 (COMPLETENESS.md §4.3). It runs the deduction theorem at the ND layer:
@@ -95,25 +97,59 @@ The `TheoremAxiomMap` (built incrementally as theorems translate) gives
 `axioms(T)` for each cited `T`. Computing `axioms(P)` is one pass over
 `P.instrs`.
 
-### 2.3 Theorem citations: unwrap macro
+### 2.3 Uniform fact treatment (SUPERSEDES the unwrap macro)
 
-For each `Use(T)` in `P` where `T` has wrapped form `H_T → T`:
+**2026-05-18 revision.** This section originally described a separate
+"unwrap macro" for `Use(T)` ops on theorems: emit
+`Use{resolved: H_T → φ_T}` + and_intro chain + ImpliesElim. The
+mechanism relied on `Use{resolved}` propagating through NDtoLKR's
+`close_use` to LKR's `CloseByLemma`, which surfaced as 28 / 207 ZFC
+theorems failing with `close_by_lemma: unknown axiom/theorem ''`
+(NDtoLKR forwarded only `axiom.name`, dropping `resolved`).
+
+The unwrap-macro approach was an optimization choice (preserve T's
+lemma identity for compact CombProof splicing via lemma_inliner)
+bought at the cost of two-mechanism complexity. The deduction
+theorem doesn't distinguish axioms from theorems — both are
+"previously-established facts" — so the cleaner design treats them
+uniformly.
+
+**New definition.** `facts(P)` is the transitive closure of
+everything `P` depends on, both axioms and theorems:
 
 ```
-# Replace the single Use(T) op with:
-h_T_wrapped = use T                # binds H_T → T
-h_axioms_for_T = <and_intro chain over {h_A_i : A_i ∈ axioms(T)}>
-h_T = implies_elim h_T_wrapped, h_axioms_for_T
+direct_facts(P) := { name F : Use(F) appears in P, F ∈ ctx as axiom or theorem }
+facts(P)        := direct_facts(P) ∪ ⋃_{T ∈ theorems(direct_facts(P))} facts(T)
 ```
 
-`h_T` now binds `T`'s formula. Any downstream step that referenced the
-original `Use(T)`'s `StepRef` is rewritten to reference `h_T`'s index.
+A cited theorem T contributes both T (its formula goes into H_P) AND
+T's transitive facts (so all transitive dependencies are also in H_P).
 
-If `axioms(T) = ∅` (rare; the theorem is a tautology), the unwrap
-collapses to `h_T = use T` directly — `H_T = ⊤` doesn't appear in our
-encoding; that case is handled by the no-op short-circuit (§1 last
-para). For uniformity in the rewrap, treat empty-antecedent theorems
-as un-wrapped at registration.
+```
+H        := ⋀_{F ∈ facts(P), lex-sorted} φ_F
+P'  proves  H → φ
+```
+
+`Use(F)` ops — regardless of whether F is an axiom or theorem — are
+dropped from the body and aliased to extracted `h_F` steps from the
+prelude. No `Use` op of any kind survives in P'. No `Use{resolved}`
+emissions. No `WrappedTheoremMap`.
+
+**Trade-off.** H grows by one conjunct per cited theorem (on top of
+the axioms). For ZFC, the growth is bounded. Benefits:
+
+- One mechanism: drop and alias. No special-case for theorems.
+- Eliminates the NDtoLKR / LKR integration crack on Use{resolved}.
+- `lemma_inliner` is no longer needed for axiom_rewrap'd output (it
+  remains useful for hand-crafted CloseByLemma programs).
+
+**External composition (optional).** Each cited theorem T has its own
+wrapped CombProof of `facts(T) → φ_T`. Composing the main artifact
+with each theorem's artifact discharges T's φ_T conjuncts from H_P,
+eventually producing a CombProof of `axioms → φ`. This is the same
+composition lemma_inliner did internally, just shifted to the artifact
+level. Not implemented as a pass; the comb-layer artifact directly
+witnesses `H → φ`.
 
 ### 2.4 Schemas (out of scope — handled upstream)
 
