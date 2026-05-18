@@ -134,7 +134,7 @@ and a test exercises the rule under the relevant verifier gate.
 | AxiomLit     | LKR_TO_COMB_DESIGN.md §4.1         | walk.cpp::build_leaf_axiom_lit       | lkr_to_comb_test::self_implication    | ✓ done   |
 | One          | LKR_TO_COMB_DESIGN.md §4.2         | walk.cpp::build_leaf_one + fograph.cpp | lkr_to_comb_test::one_minimal/with_sibling, comb_test::builder_one_* | ✓ done   |
 | Exchange     | LKR_TO_COMB_DESIGN.md §4.3         | walk.cpp (no-op linear)              | covered by and_commute                | ✓ done   |
-| Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp (no-op linear, partial)     | partial                               | partial  |
+| Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp (no-op linear, scaffolding) | (spec only, gate not yet implemented) | spec     |
 | Contraction  | LKR_TO_COMB_DESIGN.md §4.5 (stub)  | pending                              | pending                               | open     |
 | Or           | LKR_TO_COMB_DESIGN.md §4.6         | walk.cpp (no-op linear)              | covered by self_implication           | ✓ done   |
 | Forall       | LKR_TO_COMB_DESIGN.md §4.7 + §7.5  | walk.cpp::rule_forall                | forall_em + nd_to_comb_forall_self    | ✓ done   |
@@ -143,12 +143,23 @@ and a test exercises the rule under the relevant verifier gate.
 | Cut          | LKR_TO_COMB_DESIGN.md §4.10 + §15  | walk.cpp::rule_cut + cut_augment     | cut_no_use, cut_with_lemma            | ✓ done   |
 | CloseByLemma | LKR_TO_COMB_DESIGN.md §4.12        | lemma_inliner.cpp (Strategy A)       | cut_with_lemma + cut_with_forall_lemma + cut_with_exists_lemma + inline_hand_crafted_cut_lemma + inline_lemma_with_cuts | ✓ done |
 
-**`Weakening`** is "partial" because the current code returns
-`child` unchanged whenever a Weakening op fires. This is correct as
-long as the weakened entry's positions stay inside the canonical
-target's range, but breaks if Weakening introduces an entry outside
-that range. Spec extension: §4.4 needs an augmentation-style fix
-analogous to §15 Cut. See [roadmap §1A item 3].
+**`Weakening`** (spec status: full spec in `LKR_TO_COMB_DESIGN.md §4.4`,
+implementation of the gate-level check pending).
+
+The spec distinguishes two cases:
+- **Scaffolding** (weakened entry never referenced): supported by the
+  current no-op handler. CombProof witnesses `goal_nnf` directly; no
+  target augmentation is needed because the source has no vertices in
+  `G(φ)`.
+- **Load-bearing** (weakened entry used by later ops): out of scope.
+  Naively augmenting the target with `∨ φ` would break the soundness
+  contract — `goal ∨ φ` is not classically equivalent to `goal`
+  when `φ` isn't contradictory (unlike §15's `(θ ∧ ¬θ)`).
+
+To flip the row to ✓ done, an input-gate check
+(`weakening_is_scaffolding`) needs to reject load-bearing Weakening
+with a clear error pointing at the offending reference. The walk and
+sequent_replay are already correct for the scaffolding case.
 
 **`CloseByLemma`** (✓ done — Strategy A via `LKR_TO_COMB_DESIGN.md §4.12`).
 The lemma registry stores LKR programs (not CombProofs). The

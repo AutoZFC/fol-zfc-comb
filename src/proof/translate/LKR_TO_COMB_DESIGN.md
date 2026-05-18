@@ -410,9 +410,147 @@ Exchange is a no-op.
 
 ### 4.4 `Weakening(φ)`
 
-`G(C) = G(H) + G(φ)`. `N` unchanged. `f' = ι ∘ f` where `ι : G(H) ↪ G(C)`
-is the canonical injection. The new `G(φ)` vertices are *uncovered* in
-`f`.
+#### Rule semantics
+
+`Weakening(φ)`: append `φ` to the sequent.
+Hughes §11.1 W-case operation:
+
+- `G(C) = G(H) + G(φ)` — the target extends.
+- `N` is unchanged.
+- `f' = ι ∘ f` where `ι : G(H) ↪ G(C)` is the canonical injection.
+- The new `G(φ)` vertices are *uncovered* in `f`.
+
+LKRVerifier accepts `Weakening(φ)` unconditionally (any formula can be
+weakened in).
+
+#### The §15-mismatch (why this isn't free)
+
+§15 cut handling absorbs `Cut(θ)` into the augmented goal by adding
+`(θ ∧ ¬θ)` — a **contradiction**. `goal ∨ (θ ∧ ¬θ)` is classically
+equivalent to `goal`, so proving the augmented form witnesses `goal`.
+
+Weakening would naively add `∨ φ` to the augmented goal. But
+`goal ∨ φ` is **not** classically equivalent to `goal` when `φ` isn't
+contradictory: `goal ∨ φ` can be valid while `goal` isn't (e.g.,
+take `φ ≡ ¬goal`, then `goal ∨ φ` is the excluded middle).
+
+So a CombProof of `goal ∨ φ` doesn't generally witness `goal`. The
+§15 trick can't be reused for Weakening as-is.
+
+#### Two cases by usage pattern
+
+**Case A — scaffolding Weakening (supported).** The weakened entry
+is never referenced by a subsequent LKR op. Concretely: no later op's
+position field (`principal`, `lit_a`/`lit_b`, `idx`, `i`/`j`, or any
+element of `left_partition`) targets a sequent index originating from
+this Weakening, and no And/Cut split-by-partition routes such an index
+to a subsequent op.
+
+In this case, the source has **no vertices** fibrating to `G(φ)`'s
+positions. We can leave `G(φ)` out of the augmented goal entirely:
+the canonical target is built from `goal_nnf ∨ ⋁(θ ∧ ¬θ)` (no `φ`),
+and `walk` treats the Weakening op as a no-op (the fonet just doesn't
+cover the weakened entry — the entry's positions are an empty vector
+in `sequent_replay`).
+
+This is the current implementation. It's sound: the CombProof
+witnesses `goal_nnf ∨ ⋁(θ ∧ ¬θ)`, which is `goal_nnf` classically.
+
+**Case B — load-bearing Weakening (out of scope).** A subsequent op
+references the weakened entry. To handle this, the canonical target
+must include `G(φ)`'s positions. But then the augmented goal includes
+`φ` as a non-contradictory disjunct, and the CombProof witnesses a
+**classically weaker** statement than `goal_nnf`. The pipeline's
+soundness contract ("CombProof witnesses the user's `goal_formula`")
+breaks.
+
+We could support load-bearing Weakening by changing the contract —
+the CombProof would witness `goal_formula ∨ ⋁ ψ_j` for the load-
+bearing weakening formulas. The user's effective claim weakens.
+For the current scope (classical FOL proof libraries where the
+user's claim is their actual theorem), this isn't useful: a proof of
+`theorem ∨ ψ` for irrelevant `ψ` is just `theorem` with extra
+junk that doesn't help prove `theorem` itself.
+
+#### State construction (Case A)
+
+- `N` unchanged.
+- `f` unchanged (no new fibration targets in `G(φ)` since `G(φ)`
+  isn't in the canonical target).
+- Per-rule effect on `walk`: return child unchanged.
+
+#### Soundness lemma (Case A)
+
+**Claim.** When all Weakening ops in `P` are scaffolding (Case A),
+the CombProof produced by `walk` is a valid CombProof of
+`goal_nnf ∨ ⋁(θ ∧ ¬θ)`, which is classically equivalent to
+`goal_nnf`.
+
+**Proof.** The CombProof's source has no vertices fibrating to any
+weakened entry's positions (precondition of Case A: no later op
+references those entries, so AxiomLit / Forall / etc. never assigns
+source vertices there). The fonet, fibrations, and links are
+independent of Weakening's existence. The output gate
+(`CombVerifier::verify(ctx, augmented_goal, cp)`) accepts. ∎
+
+#### Detection of load-bearing Weakening
+
+Static check on the LKR program. For each `Weakening` op at position
+`i`, track the set of sequent indices it introduces. Each subsequent
+op's position fields are checked against this set; if any match (and
+the entry hasn't been Contracted away), the Weakening is load-bearing.
+
+The check piggybacks on `sequent_replay`'s structure: weakened
+entries have empty position vectors. Any later op reading an empty
+position vector is using a load-bearing weakening.
+
+Implementation strategy:
+- Add an input-gate check `weakening_is_scaffolding(P)` that walks
+  the program, tracking weakened-entry origins through And/Cut
+  splits, and verifies no non-weakening op references them.
+- Reject with a clear error pointing at the load-bearing reference
+  if the check fails.
+
+For the current scope, this gate-level check is the right discipline:
+load-bearing Weakening shouldn't happen in NDtoLKR output (which
+doesn't emit Weakening at all) or in well-formed hand-crafted LKR
+programs. The gate catches misuse cleanly.
+
+#### Completeness scope
+
+Theorem A's "every LKR-accepted `Q`" obligation is narrowed: we
+guarantee completeness only for LKR programs whose Weakening ops are
+scaffolding. Load-bearing Weakening is rejected at the input gate.
+
+This narrowing is **necessary**, not a defect: the §15 framework can
+keep cuts but cannot uniformly keep weakenings without changing the
+proven statement. Supporting load-bearing Weakening would require a
+different soundness contract.
+
+#### Test plan
+
+1. **`weakening_scaffolding_passes`** — hand-crafted LKR program with
+   a Weakening of unused `ψ`. Closes via AxiomLit on goal atoms only;
+   the weakened entry is uncovered.
+2. **`weakening_load_bearing_rejected`** — hand-crafted LKR program
+   that Weakens in `ψ` and then references it (e.g., `AxiomLit` on
+   the weakened entry's position). Input gate should reject with a
+   clear error.
+3. (Optional) **`weakening_in_branching`** — Weakening followed by
+   And or Cut, where the weakened entry routes into a subgoal's
+   complement. Verifies the gate's tracking through branching ops.
+
+#### Implementation order
+
+1. Add the input-gate check `weakening_is_scaffolding` to
+   `input_gate.{h,cpp}`. Walks the program, tracks weakened entries
+   through op effects, fires error if a non-Weakening op references
+   one.
+2. Add the two/three tests above.
+3. `walk` and `sequent_replay` are already correct for Case A — no
+   changes needed.
+4. Update the obligation table row for Weakening from "partial" to
+   "✓ done (scaffolding)" with a footnote pointing here.
 
 ### 4.5 `Contraction(i, j)` (φ' ≡_α φ)
 
