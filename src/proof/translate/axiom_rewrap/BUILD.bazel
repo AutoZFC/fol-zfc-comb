@@ -1,0 +1,15 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# theorem_axioms: TheoremAxiomMap + transitive axiom closure (Phase 1).
+cc_library(
+    name = "theorem_axioms",
+    srcs = ["theorem_axioms.cpp"],
+    hdrs = ["theorem_axioms.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)

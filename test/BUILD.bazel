@@ -112,9 +112,23 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "axiom_rewrap_test",
+    srcs = ["axiom_rewrap_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate/axiom_rewrap:theorem_axioms",
+        "//src/runtime",
+    ],
+)
+
 test_suite(
     name = "all_tests",
     tests = [
+        ":axiom_rewrap_test",
         ":comb_test",
         ":core_test",
         ":iota_translator_test",
