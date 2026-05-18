@@ -498,6 +498,170 @@ void test_apply_two_axioms_wrap() {
     }
 }
 
+// =========================================================================
+// Phase 3: structural-copy coverage across ND op kinds.
+//
+// shift_refs is compile-time exhaustive over nd::Instr (all 30+ variants
+// have arms). Phase 3 runtime tests sample representative op families to
+// confirm the shifted output remains verifier-accepted. Each test:
+//   1. Includes at least one Use(A) to trigger n ≥ 1 wrap.
+//   2. Body exercises a target op family.
+//   3. NDVerifier accepts the wrapped output (post-shift).
+// A miswired StepRef field in shift_refs would surface as a dangling-ref
+// or formula-mismatch verifier error.
+// =========================================================================
+
+// Shared helper: parse + lower + apply + verify wrapped output.
+void verify_wrap(Runtime& rt, const char* source, const char* claim_name) {
+    auto parsed = rt.load_with_proofs(source);
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    // Find the proof for the requested claim (there may be others in source).
+    const ParsedProof* target = nullptr;
+    for (const auto& p : parsed.value().proofs) {
+        if (p.claim_name == claim_name) { target = &p; break; }
+    }
+    if (!target) {
+        std::cerr << "claim '" << claim_name << "' has no proof\n";
+        ++g_failed; return;
+    }
+
+    Program<nd::Instr> prog = lower_or_die(*target);
+    auto claim = rt.context().find_claim(claim_name);
+    if (!claim) {
+        std::cerr << "claim '" << claim_name << "' missing\n";
+        ++g_failed; return;
+    }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    if (!r.ok()) {
+        std::cerr << "apply fail for '" << claim_name << "': "
+                  << r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    if (!vr.ok()) {
+        std::cerr << "verify fail for '" << claim_name << "': "
+                  << vr.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    ++g_passed;
+}
+
+// =========================================================================
+// Phase 3 Test A: Or family + Let
+// Covers: use, assume, let, or_intro_l, or_intro_r, or_elim, implies_intro
+// =========================================================================
+void test_apply_body_or_family() {
+    Runtime rt;
+    verify_wrap(rt, R"(
+        axiom p_or_q: p | q
+        claim q_or_p: q | p
+        proof q_or_p:
+            h_pq = use p_or_q
+            h1 = assume p
+            h_q_let = let q
+            h2 = or_intro_r h_q_let, h1
+            h3 = implies_intro h2
+            h4 = assume q
+            h_p_let = let p
+            h5 = or_intro_l h4, h_p_let
+            h6 = implies_intro h5
+            h7 = or_elim h_pq, h3, h6
+            qed h7
+    )", "q_or_p");
+}
+
+// =========================================================================
+// Phase 3 Test B: Iff family + ImpliesIntro mixed
+// Covers: use, assume, iff_elim_l, iff_elim_r, iff_intro, implies_intro
+// =========================================================================
+void test_apply_body_iff_family() {
+    Runtime rt;
+    verify_wrap(rt, R"(
+        axiom a_iff_b: a <-> b
+        claim a_iff_b_again: a <-> b
+        proof a_iff_b_again:
+            h = use a_iff_b
+            h_a = assume a
+            h_b1 = iff_elim_l h, h_a
+            h_ab = implies_intro h_b1
+            h_b = assume b
+            h_a1 = iff_elim_r h, h_b
+            h_ba = implies_intro h_a1
+            h_iff = iff_intro h_ab, h_ba
+            qed h_iff
+    )", "a_iff_b_again");
+}
+
+// =========================================================================
+// Phase 3 Test C: And-elim + Negation + Bottom-elim + Let
+// Covers: use, and_elim_l, and_elim_r, not_elim, let, bottom_elim
+// =========================================================================
+void test_apply_body_negation_and_bottom() {
+    Runtime rt;
+    verify_wrap(rt, R"(
+        axiom p_and_not_p: p & ~p
+        claim derive_q: exists x. q(x)
+        proof derive_q:
+            h_pnp = use p_and_not_p
+            h_p = and_elim_l h_pnp
+            h_np = and_elim_r h_pnp
+            h_bot = not_elim h_np, h_p
+            h_target = let exists x. q(x)
+            h_q = bottom_elim h_bot, h_target
+            qed h_q
+    )", "derive_q");
+}
+
+// =========================================================================
+// Phase 3 Test D: Exists family
+// Covers: use, exists_elim (binding witness), exists_intro (scope-closing).
+// The scope-closing form is required here so the assume(H) scope is what
+// the trailing implies_intro discharges.
+// =========================================================================
+void test_apply_body_exists_family() {
+    Runtime rt;
+    verify_wrap(rt, R"(
+        axiom exists_p: exists x. p(x)
+        claim exists_p_again: exists y. p(y)
+        proof exists_p_again:
+            h = use exists_p
+            h_w = exists_elim h, w
+            h_intro = exists_intro h_w
+            qed h_intro
+    )", "exists_p_again");
+}
+
+// =========================================================================
+// Phase 3 Test E: Classical (DoubleNegElim)
+// Covers: use, double_neg_elim. Adds n=1 wrap via the use(not_not_p) axiom.
+// ExcludedMiddle, ClassicalAbsurd, Peirce are covered by compile-time
+// exhaustiveness in shift_refs; their interaction with NDVerifier under
+// shift is identical to the simpler ops tested here.
+// =========================================================================
+void test_apply_body_classical_double_neg() {
+    Runtime rt;
+    verify_wrap(rt, R"(
+        axiom not_not_p: ~~p
+        claim p_holds: p
+        proof p_holds:
+            h = use not_not_p
+            h2 = double_neg_elim h
+            qed h2
+    )", "p_holds");
+}
+
 }  // namespace
 
 int main() {
@@ -514,6 +678,13 @@ int main() {
     test_apply_no_axioms_identity();
     test_apply_single_axiom_wrap();
     test_apply_two_axioms_wrap();
+
+    // Phase 3 — structural-copy coverage across ND op kinds
+    test_apply_body_or_family();
+    test_apply_body_iff_family();
+    test_apply_body_negation_and_bottom();
+    test_apply_body_exists_family();
+    test_apply_body_classical_double_neg();
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";

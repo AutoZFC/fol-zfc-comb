@@ -214,7 +214,7 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 
 | Item                          | Spec                              | Status |
 |-------------------------------|-----------------------------------|--------|
-| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec done; Phases 1 (TheoremAxiomMap) + 2 (boundary wrap) impl + tests landed; Phases 3–7 open |
+| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec done; Phases 1 (TheoremAxiomMap) + 2 (boundary wrap) + 3 (structural-copy coverage across ND op kinds) impl + tests landed; Phases 4–7 open |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
 | NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
 
