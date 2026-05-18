@@ -27,9 +27,13 @@ util::Result<std::vector<std::string>> compute_transitive_axioms(
                     << "') resolves to neither an axiom nor a theorem in ctx";
             }
         } else if (std::holds_alternative<nd::SchemaInst>(instr)) {
+            // Schemas are eliminated by an upstream ND→ND inline pass; see
+            // AXIOM_REWRAP_DESIGN.md §2.4. If we see one here, that pass
+            // either didn't run or missed an instance — surface clearly.
             return MAKE_ERROR
-                << "compute_transitive_axioms: SchemaInst is out of Phase 1 "
-                   "scope (see AXIOM_REWRAP_DESIGN.md §1)";
+                << "compute_transitive_axioms: SchemaInst should have been "
+                   "eliminated by the upstream schema_elim pass "
+                   "(see AXIOM_REWRAP_DESIGN.md §2.4)";
         }
     }
 

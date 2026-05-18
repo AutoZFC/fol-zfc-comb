@@ -13,8 +13,10 @@
 // and deduplicated. Errors if a cited theorem is missing from the registry
 // (build-order bug) or if an unresolvable Use name is encountered.
 //
-// Phase 1 scope: handles Use(name) only. SchemaInst is rejected with a
-// clear error (the ZFC corpus uses no schemas; deferred to a later phase).
+// Handles Use(name) only. SchemaInst is rejected as an input-gate error:
+// schemas are eliminated by an upstream ND→ND inline pass (analogous to
+// iota_elim), so by the time axiom_rewrap runs no SchemaInst should
+// remain. See AXIOM_REWRAP_DESIGN.md §2.4.
 
 #include "src/core/formula.h"
 #include "src/proof/nd/ops.h"

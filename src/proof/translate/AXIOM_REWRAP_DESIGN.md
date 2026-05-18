@@ -115,27 +115,30 @@ encoding; that case is handled by the no-op short-circuit (§1 last
 para). For uniformity in the rewrap, treat empty-antecedent theorems
 as un-wrapped at registration.
 
-### 2.4 Schema axioms
+### 2.4 Schemas (out of scope — handled upstream)
 
-A schema axiom is universally quantified: `axiom A_schema: ∀x. φ(x)`.
-ND offers two ways to use it:
+Schema instantiation (`nd::SchemaInst`) is eliminated by a separate
+upstream ND→ND inline pass, analogous to `iota_elim`. By the time
+`axiom_rewrap` runs, the proof contains no `SchemaInst` ops — every
+schema use has already been replaced by the equivalent
+`Use(schema_definition) + ForallElim` chain inlined at the call site.
 
-- `Use(A_schema)` — pulls in `∀x. φ(x)` as a step.
-- `SchemaInst(A_schema, [x ↦ t])` — pulls in `φ(t)` directly (sugar for
-  `Use` + `ForallElim`).
-
-The rewrap puts the schema once in the antecedent (not each
-instantiation):
-
+The pipeline (full):
 ```
-H ∋ A_schema   (the bare universally-quantified form)
-
-Use(A_schema)                    → h_A_schema
-SchemaInst(A_schema, [x ↦ t])    → forall_elim h_A_schema, t
-SchemaInst(A_schema, [x₁,…,xk ↦ t₁,…,tk])  → forall_elim chain
+ND  ──iota_elim──▶  ND(ι-free)  ──schema_elim──▶  ND(ι-free, schema-free)
+                                                            │
+                                                            ▼
+                                                     axiom_rewrap
+                                                            │
+                                                            ▼
+                                                  NDtoLKR  →  LKRtoComb
 ```
 
-This keeps `H` small (one entry per schema, not per instance).
+`axiom_rewrap`'s input gate rejects any surviving `SchemaInst` with a
+clear pointer to the upstream `schema_elim` pass. The wrap then treats
+schema-definition axioms as ordinary axioms — they sit in `H` once,
+and downstream `ForallElim`s on the cached extract handle each (now
+explicit) instantiation site.
 
 ### 2.5 Canonical form
 
@@ -227,10 +230,12 @@ It can fail (return Error) only if:
 ### 3.4 Rewrap algorithm
 
 **Pass 1 — analysis** (single linear scan over `in.instrs`):
-- Collect `direct_axioms = {name : Use(name) ∨ SchemaInst(name, _)}`
-  whose `name` resolves to an axiom in `GlobalContext`.
-- Collect `cited_theorems = {name : Use(name) ∨ SchemaInst(name, _)}`
-  whose `name` resolves to a theorem.
+- Reject any `SchemaInst` (input-gate; see §2.4 — schema elimination is
+  upstream).
+- Collect `direct_axioms = {name : Use(name)}` whose `name` resolves to
+  an axiom in `GlobalContext`.
+- Collect `cited_theorems = {name : Use(name)}` whose `name` resolves
+  to a theorem.
 - Compute
   `axioms(P) = direct_axioms ∪ ⋃_{T ∈ cited_theorems} theorem_axioms[T]`.
 - Sort `axioms(P)` lex; emit canonical `H` formula handle.
@@ -243,10 +248,6 @@ It can fail (return Error) only if:
 3. Walk `in.instrs` in order. For each op:
    - `Use(A)` where `A ∈ direct_axioms`: drop the op; record
      `(in-StepRef → axiom_step_table[A])` in a `step_remap` table.
-   - `SchemaInst(A, σ)` where `A ∈ direct_axioms` (schema): emit
-     `ForallElim` chain on `axiom_step_table[A]` against `σ`'s terms.
-     Record the input op's StepRef → final ForallElim's index in
-     `step_remap`.
    - `Use(T)` where `T ∈ cited_theorems`: emit unwrap macro (§2.3):
      `Use(T)` followed by an `and_intro` chain over
      `{axiom_step_table[A_i] : A_i ∈ theorem_axioms[T]}`, then
@@ -273,10 +274,8 @@ For each ND op kind, what `axiom_rewrap` emits:
 | Input op                       | Rewrap output                                             |
 |--------------------------------|-----------------------------------------------------------|
 | `Use(A)` — `A` axiom           | (drop, alias to `axiom_step_table[A]`)                    |
-| `Use(A)` — `A` schema axiom    | (drop, alias to `axiom_step_table[A]`)                    |
 | `Use(T)` — `T` theorem         | `Use(T) ; <and_intro chain> ; ImpliesElim`                |
-| `SchemaInst(A, σ)` — axiom     | `ForallElim` chain on `axiom_step_table[A]` per `σ`       |
-| `SchemaInst(T, σ)` — theorem   | unwrap macro for `T` (yields `T`), then `ForallElim` chain |
+| `SchemaInst(_, _)`             | (input-gate reject: schema_elim runs upstream; see §2.4)  |
 | `Assume`, `Let`, `Fix`         | structural copy                                           |
 | `AndIntro`, `AndElimL/R`       | structural copy                                           |
 | `OrIntroL/R`, `OrElim`         | structural copy                                           |
@@ -405,13 +404,13 @@ prior phase is green. Per `feedback_math_first_discipline`.
 4. **`Use(A)` axiom drop**.
    Implement axiom_step_table + drop-with-alias for direct axiom Use.
    Tests: single-axiom multi-use, two-axiom mixed uses.
-5. **`SchemaInst(A, σ)` axiom expansion**.
-   Implement ForallElim chain. Tests: schema with 1 binding, schema
-   with multiple bindings.
-6. **`Use(T)` theorem unwrap macro**.
+5. **`Use(T)` theorem unwrap macro**.
    Implement and_intro chain + implies_elim. Tests: theorem-uses-
    axiom, theorem-uses-theorem.
-7. **End-to-end ZFC integration**.
+   (Former "Phase 5: SchemaInst expansion" removed — see §2.4; schemas
+   are eliminated by an upstream ND→ND inline pass, so axiom_rewrap
+   never sees SchemaInst ops.)
+6. **End-to-end ZFC integration**.
    Translate one proof from `zfc/basics/ordered_pair.fol.proof`
    through the full pipeline; verify the CombProof against the
    wrapped goal. Promote the COMPLETENESS.md row from `open` to
@@ -434,9 +433,10 @@ tests live in `test/lkr_to_comb_test.cpp` (extend existing fixture).
    twice. Validates the cache.
 4. **`multiple_axioms_lex_sort`** — proof using axioms `b_ax`, `a_ax`,
    `c_ax` in source order; output's `H` is `(a_ax ∧ b_ax) ∧ c_ax`.
-5. **`schema_axiom_inst`** — axiom is `∀x. (P(x) → Q(x))`. Proof uses
-   `SchemaInst` with `x ↦ y`. Output emits `forall_elim` against
-   the schema's cached extract.
+5. **`schema_inst_rejected_at_input_gate`** — proof contains
+   `SchemaInst`. `apply` returns Error pointing at the upstream
+   `schema_elim` pass; nothing is emitted. (Schema expansion is not
+   `axiom_rewrap`'s job; see §2.4.)
 6. **`theorem_use_with_axioms`** — theorem `T` proved earlier from
    axiom `A`; current proof uses `T`. Output's `H` includes `A` (from
    the transitive closure); output emits unwrap macro at the
@@ -468,10 +468,8 @@ tests live in `test/lkr_to_comb_test.cpp` (extend existing fixture).
   possible — `TheoremAxiomMap` is built in topological order.
   Forward-ref attempts surface as missing keys in `theorem_axioms`
   during pass 1.
-- **Schema axiom never explicitly `Use`d, only `SchemaInst`'d**: still
-  put it once in `H` (§2.4). `Use(A_schema)` may be absent; the
-  presence of any `SchemaInst(A_schema, _)` is sufficient to include
-  `A_schema` in `axioms(P)`.
+- **Schemas**: out of scope, handled upstream — `axiom_rewrap`'s input
+  gate rejects any surviving `SchemaInst` (§2.4).
 
 ## 10. Open questions
 
