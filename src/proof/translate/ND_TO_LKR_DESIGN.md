@@ -325,6 +325,29 @@ recurse on body items
 emit_close(step_to_neg_idx[NotElim.negation], step_to_neg_idx[NotElim.formula])
 ```
 
+### 4.4* CLASSICAL_ABSURD block (body proves `A` via `assume ¬A; ... ⊥`)
+
+ND pattern: `assume ¬A`; body derives `⊥` via `not_elim`;
+`classical_absurd h_bot` discharges the assumption, deriving `A`.
+
+Structurally identical to the NOT block (§4.4) with the roles of `A`
+and `¬A` swapped at the assumption site:
+
+- F_block = `A` (the conclusion, from `trace[closer_idx]`).
+- F_block_nnf = `NNF(A)`.
+- LKR emission: `Cut(NNF(A))`. LEFT.entries[f_block_idx] = NNF(A).
+- The assumption is `¬A`; its negation `NNF(¬¬A) = NNF(A)` coincides
+  with the cut formula at f_block_idx. So
+  `step_to_neg_idx[opener_idx] := f_block_idx` — the same line as NOT.
+- Body derives `⊥` via `NotElim(neg, formula)`. `emit_close` pairs
+  the operands' negations as duals (same as NOT).
+- RIGHT subgoal carries `NNF(¬A)` for siblings.
+
+The reductio realisation: prove `A` by Cut on `A`; LEFT proves `A`
+under the same scope where `¬A` is "available" (it's the assumption,
+whose negation slot is exactly the cut formula `A`); the body's
+contradiction discharges `¬A`'s presence in the proof structure.
+
 ### 4.5 EXISTS_ELIM block (body proves something using `∃x.φ`'s witness)
 
 The cut-spine has already processed the underlying `ExistsElim` ND

@@ -5,11 +5,12 @@
 // Per ND_TO_LKR_DESIGN.md §3.1, the ND op stream is reorganised into a
 // tree of *blocks*:
 //
-//   OUTER       — root; opens at instr 0, closes at Qed.
-//   FORALL[v]   — Fix         → ForallIntro
-//   IMPLIES[A]  — Assume      → ImpliesIntro
-//   NOT[A]      — Assume      → NotIntro
-//   EXISTS_ELIM — ExistsElim  → ExistsIntro (no witness)
+//   OUTER             — root; opens at instr 0, closes at Qed.
+//   FORALL[v]         — Fix          → ForallIntro
+//   IMPLIES[A]        — Assume       → ImpliesIntro
+//   NOT[A]            — Assume       → NotIntro
+//   CLASSICAL_ABSURD  — Assume(¬A)   → ClassicalAbsurd (derives A)
+//   EXISTS_ELIM       — ExistsElim   → ExistsIntro (no witness)
 //
 // A block carries:
 //   - kind        — which of the five kinds above
@@ -47,6 +48,7 @@ enum class BlockKind {
     FORALL,
     IMPLIES,
     NOT_,        // NOT is a Win32 macro; trailing underscore avoids the clash
+    CLASSICAL_ABSURD,  // assume ¬A; ... derive ⊥; classical_absurd → A
     EXISTS_ELIM,
 };
 

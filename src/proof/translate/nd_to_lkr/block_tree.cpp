@@ -32,6 +32,9 @@ util::Result<CloserInfo> classify_closer(const nd::Instr& instr,
     if (auto* ni = std::get_if<nd::NotIntro>(&instr)) {
         return CloserInfo{BlockKind::NOT_, ni->bottom.idx};
     }
+    if (auto* ca = std::get_if<nd::ClassicalAbsurd>(&instr)) {
+        return CloserInfo{BlockKind::CLASSICAL_ABSURD, ca->bottom.idx};
+    }
     if (auto* ei = std::get_if<nd::ExistsIntro>(&instr); ei && !ei->witness.has_value()) {
         return CloserInfo{BlockKind::EXISTS_ELIM, ei->body.idx};
     }
@@ -54,6 +57,7 @@ util::ResultStatus check_opener_matches(const nd::Instr& opener_instr,
                 return std::holds_alternative<nd::Fix>(opener_instr);
             case BlockKind::IMPLIES:
             case BlockKind::NOT_:
+            case BlockKind::CLASSICAL_ABSURD:
                 return std::holds_alternative<nd::Assume>(opener_instr);
             case BlockKind::EXISTS_ELIM:
                 return std::holds_alternative<nd::ExistsElim>(opener_instr);
@@ -81,6 +85,7 @@ bool is_closer(const nd::Instr& instr) {
     if (std::holds_alternative<nd::ForallIntro>(instr)) return true;
     if (std::holds_alternative<nd::ImpliesIntro>(instr)) return true;
     if (std::holds_alternative<nd::NotIntro>(instr)) return true;
+    if (std::holds_alternative<nd::ClassicalAbsurd>(instr)) return true;
     if (auto* ei = std::get_if<nd::ExistsIntro>(&instr)) {
         return !ei->witness.has_value();
     }

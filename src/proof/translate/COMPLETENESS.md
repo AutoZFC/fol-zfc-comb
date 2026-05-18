@@ -206,7 +206,7 @@ Input-gate exclusions (rejected, so not in scope): `IotaElim`, `EqSubst`,
 | ExcludedMiddle             | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
 | Qed                        | closer of OUTER block                 | cut_spine.cpp::translate_outer                   | ✓ done |
 | Peirce                     | dispatch_close → Cut + Or + And + emit_close | cut_spine.cpp::(Peirce branch) + parser keyword | ✓ done |
-| ClassicalAbsurd            | TBD (needs new BlockKind)             | pending                                          | open   |
+| ClassicalAbsurd            | closer of CLASSICAL_ABSURD block      | cut_spine.cpp::translate_block_classical_absurd  | ✓ done |
 
 Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 
@@ -217,20 +217,12 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 | Axiom CombProofs (deduction)  | LKR_TO_COMB_DESIGN.md §16 (TBD)   | open   |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
 | NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
-| Parser keyword for ClassicalAbsurd | src/parser/formula.{l,y} | partial (Peirce done) |
 
 The "NDtoLKR emission for `One`" row tracks an enhancement to
 `translate_block_not` (or Fograph) so that ND proofs producing the
 truth literal `¬⊥` flow end-to-end. The LKR→Comb side is done;
 NDtoLKR currently never emits `lkr::One` ops.
 
-The "Parser keyword for ClassicalAbsurd" row: `nd::ClassicalAbsurd`
-has an ND op definition (`src/proof/nd/ops.h`) and a verifier
-handler (`stack.cpp`), and the parser now has a `classical_absurd`
-keyword wired in (added together with `peirce`). The remaining work
-is the `dispatch_close` handler in `cut_spine.cpp` plus the new
-BlockKind in `block_tree.cpp` (ClassicalAbsurd closes an assumption
-scope via `¬A → ⊥ ⊢ A` — needs scope tracking like NOT).
 
 The earlier "Cut-free lemma export" row was dissolved by Strategy A
 (§4.12): lemma reuse now works regardless of internal cuts.

@@ -361,6 +361,24 @@ void test_e2e_exists_elim_block() {
     )", "ex_p_again");
 }
 
+// ClassicalAbsurd: classical reductio ad absurdum.
+// Goal: ¬¬p → p. ND proof: assume p's double-negation; assume ¬p; derive ⊥;
+// classical_absurd closes the assumption-of-¬p scope, deriving p; then
+// implies_intro discharges the ¬¬p assumption.
+void test_e2e_classical_absurd() {
+    run_e2e(R"(
+        claim dne_via_ca: ~~p -> p
+
+        proof dne_via_ca:
+            hnnp = assume ~~p
+            hnp = assume ~p
+            hbot = not_elim hnnp, hnp
+            hp = classical_absurd hbot
+            himpl = implies_intro hp
+            qed himpl
+    )", "dne_via_ca");
+}
+
 // Peirce: classical ((A → B) → A) → A as a built-in ND rule.
 // Uses two let-defined formulas for A and B. Tests close_peirce
 // (ND_TO_LKR_DESIGN.md §4.7): Cut(A) + Or + And + emit_close pattern.
@@ -809,6 +827,7 @@ int main() {
     test_e2e_iff_elim_r();
     test_e2e_not_block();
     test_e2e_bottom_elim();
+    test_e2e_classical_absurd();
     test_e2e_peirce();
     test_e2e_excluded_middle();
     test_e2e_or_elim();

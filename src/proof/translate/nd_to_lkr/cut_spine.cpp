@@ -1227,6 +1227,83 @@ util::ResultStatus translate_block_not(
 }
 
 // =========================================================================
+// Block: CLASSICAL_ABSURD  (Assume(¬A) → ClassicalAbsurd; ND_TO_LKR_DESIGN.md §4.4*)
+//
+// ND opener: nd::Assume ¬A (assumes the NEGATION of the target).
+// ND closer: nd::ClassicalAbsurd (bottom = NotElim at body end).
+// F_block = A — the conclusion, read from trace[closer_idx].
+//
+// LKR emission pattern (mirrors NOT block, with A and ¬A swapped):
+//   1. Cut(F_block_nnf) where F_block_nnf = NNF(A).
+//   2. NNF(A) at f_block_idx serves double-duty as the cut formula AND the
+//      assumption ¬A's negation slot — NNF(¬¬A) = NNF(A) = f_block_nnf —
+//      so step_to_neg_idx[opener_idx] := f_block_idx.
+//   3. Body derives ⊥ via NotElim(neg, formula); emit_close pairs the
+//      operands' negations as duals (same recipe as NOT block).
+//   4. RIGHT subgoal carries NNF(¬A) for siblings.
+//
+// Soundness: ND ClassicalAbsurd discharges ¬A and produces A when the body
+//   derives ⊥. Cut(A) + emit_close on the body's contradiction realises
+//   the classical reductio: prove A by showing ¬A leads to ⊥.
+util::ResultStatus translate_block_classical_absurd(
+    CutSpineContext&         cc,
+    const Block&             blk,
+    SequentShadow&           shadow,
+    std::vector<lkr::Instr>& out)
+{
+    if (blk.closer_idx >= cc.trace.step_env.size() ||
+        !cc.trace.step_env[blk.closer_idx].valid()) {
+        return MAKE_ERROR
+            << "translate_block_classical_absurd: missing trace for closer at #"
+            << blk.closer_idx;
+    }
+    FormulaHandle f_block = cc.trace.step_env[blk.closer_idx];
+    FormulaHandle f_block_nnf = cc.builder.to_nnf(f_block);
+    FormulaHandle neg_f_block_nnf = cc.builder.to_nnf_neg(f_block);
+
+    {
+        lkr::Cut op{};
+        op.cut_formula = f_block_nnf;
+        out.emplace_back(std::move(op));
+    }
+    SequentShadow left = shadow;
+    size_t f_block_idx = left.append(f_block_nnf);
+    // Assumption ¬A: its negation NNF(¬¬A) = NNF(A) = f_block_nnf, at
+    // f_block_idx. step_to_neg_idx routes body references to the assumption
+    // here (same slot the cut formula occupies — they coincide).
+    left.step_to_neg_idx[blk.opener_idx] = f_block_idx;
+
+    TRY(translate_body(cc, blk.body, left, out));
+
+    // ClassicalAbsurd.bottom is a NotElim step; pair its operands' negations.
+    const auto& closer_instr = cc.prog.instrs[blk.closer_idx];
+    const auto& ca = std::get<nd::ClassicalAbsurd>(closer_instr);
+    const auto& bot_instr = cc.prog.instrs[ca.bottom.idx];
+    if (!std::holds_alternative<nd::NotElim>(bot_instr)) {
+        return MAKE_ERROR
+            << "translate_block_classical_absurd: ClassicalAbsurd.bottom at #"
+            << ca.bottom.idx
+            << " is not a NotElim (got variant " << bot_instr.index() << ")";
+    }
+    const auto& ne = std::get<nd::NotElim>(bot_instr);
+    auto i_neg_it  = left.step_to_neg_idx.find(ne.negation.idx);
+    auto i_form_it = left.step_to_neg_idx.find(ne.formula.idx);
+    if (i_neg_it  == left.step_to_neg_idx.end() ||
+        i_form_it == left.step_to_neg_idx.end()) {
+        return MAKE_ERROR
+            << "translate_block_classical_absurd: NotElim operand has no negation entry "
+            << "(negation step=" << ne.negation.idx
+            << ", formula step=" << ne.formula.idx << ")";
+    }
+    EmitCloseContext ecc{cc.builder};
+    TRY(emit_close(ecc, left, i_neg_it->second, i_form_it->second, out));
+
+    size_t neg_idx = shadow.append(neg_f_block_nnf);
+    shadow.step_to_neg_idx[blk.closer_idx] = neg_idx;
+    return util::Ok();
+}
+
+// =========================================================================
 // Block: EXISTS_ELIM  (ExistsElim → ExistsIntro; COMPLETENESS.md row "ExistsElim")
 //
 // ND opener: nd::ExistsElim h_src, w — eliminate ∃x.φ from h_src,
@@ -1359,6 +1436,8 @@ util::ResultStatus translate_block(
             return translate_block_implies(cc, blk, shadow, out);
         case BlockKind::NOT_:
             return translate_block_not(cc, blk, shadow, out);
+        case BlockKind::CLASSICAL_ABSURD:
+            return translate_block_classical_absurd(cc, blk, shadow, out);
         case BlockKind::EXISTS_ELIM:
             return translate_block_exists_elim(cc, blk, shadow, out);
         case BlockKind::OUTER:
