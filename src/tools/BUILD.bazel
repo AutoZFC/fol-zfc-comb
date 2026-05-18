@@ -24,3 +24,23 @@ cc_binary(
         "//src/runtime",
     ],
 )
+
+# comb_checker — runs ND→iota_elim→axiom_rewrap→NDtoLKR→LKRtoComb on
+# every theorem in a .fol.proof file and reports per-theorem
+# pipeline status. Used for ZFC end-to-end coverage measurement.
+cc_binary(
+    name = "comb_checker",
+    srcs = ["comb_checker.cpp"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/library",
+        "//src/parser",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate/axiom_rewrap",
+        "//src/proof/translate/axiom_rewrap:theorem_axioms",
+        "//src/proof/translate/iota_elim:eliminate_iota",
+        "//src/proof/translate/lkr_to_comb",
+        "//src/proof/translate/nd_to_lkr",
+        "//src/runtime",
+    ],
+)
