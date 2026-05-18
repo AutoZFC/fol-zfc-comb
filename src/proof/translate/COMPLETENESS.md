@@ -214,7 +214,7 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 
 | Item                          | Spec                              | Status |
 |-------------------------------|-----------------------------------|--------|
-| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec done; Phases 1 (TheoremAxiomMap) + 2 (boundary wrap) + 3 (structural-copy coverage) + 4 (Use(A) drop + extraction chain — output is axiom-free) impl + tests landed; Phases 5–7 open |
+| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec done; Phases 1–5 impl + tests landed (TheoremAxiomMap, boundary wrap, structural-copy coverage, Use(A) drop, Use(T) unwrap macro). Pipeline now handles theorem-citing proofs end-to-end at the ND layer; transitive axiom closure threads correctly across the theorem DAG. Phase 6 (ZFC integration) open. |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
 | NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
 

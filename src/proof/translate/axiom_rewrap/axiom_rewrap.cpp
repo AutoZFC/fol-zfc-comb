@@ -276,13 +276,77 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
     for (uint32_t i = 0; i < in.instrs.size(); ++i) {
         if (i == qed_idx) continue;   // original Qed is replaced by postlude
 
-        // Drop direct-axiom Use ops: alias to the cached extract.
-        // Theorem Use ops are kept verbatim (Phase 6 will wrap them).
         if (const auto* u = std::get_if<nd::Use>(&in.instrs[i])) {
+            // Drop direct-axiom Use ops: alias to the cached extract.
             if (ctx_.find_axiom(u->axiom.name).has_value()) {
                 step_remap[i] = axiom_step_table.at(u->axiom.name).idx;
                 continue;
             }
+            // Theorem Use ops: emit the unwrap macro (Phase 5).
+            // Modus ponens on (H_T → φ_T) with H_T rebuilt from
+            // axiom_step_table over axioms(T) (lex-sorted to match H_T).
+            if (ctx_.find_theorem(u->axiom.name).has_value()) {
+                const std::string& T_name = u->axiom.name;
+                const auto& axioms_T = theorem_axioms_.get(T_name);
+
+                if (axioms_T.empty()) {
+                    // No wrap happened for T (axioms(T) = ∅); plain Use(T)
+                    // returns φ_T directly.
+                    uint32_t out_idx = static_cast<uint32_t>(out.instrs.size());
+                    step_remap[i] = out_idx;
+                    out.instrs.push_back(remap_refs(in.instrs[i], step_remap));
+                    continue;
+                }
+
+                if (!wrapped_theorems_.contains(T_name)) {
+                    return MAKE_ERROR
+                        << "axiom_rewrap: theorem '" << T_name
+                        << "' has axioms(T) = " << axioms_T.size()
+                        << " but no wrapped form in WrappedTheoremMap "
+                           "(runtime must register the wrapped form after "
+                           "rewrapping T's proof, in build-topological order)";
+                }
+                FormulaHandle wrapped_T = wrapped_theorems_.get(T_name);
+
+                // Emit Use{resolved: H_T → φ_T} — bypasses ctx name lookup.
+                uint32_t use_wrap_idx =
+                    static_cast<uint32_t>(out.instrs.size());
+                nd::Use use_op{};
+                use_op.resolved = wrapped_T;
+                out.instrs.push_back(nd::Instr{use_op});
+
+                // Build H_T via and_intro left-fold:
+                //   H = A_1, then iteratively H := H ∧ A_{i+1}.
+                // This reproduces the canonical left-associated lex-sorted
+                // shape (((A_1 ∧ A_2) ∧ A_3) … ∧ A_k) that the wrapped form
+                // T's prelude was constructed against.
+                StepRef H_T_step = axiom_step_table.at(axioms_T[0]);
+                for (size_t j = 1; j < axioms_T.size(); ++j) {
+                    nd::AndIntro and_op{};
+                    and_op.a = H_T_step;
+                    and_op.b = axiom_step_table.at(axioms_T[j]);
+                    uint32_t and_idx =
+                        static_cast<uint32_t>(out.instrs.size());
+                    out.instrs.push_back(nd::Instr{and_op});
+                    H_T_step = StepRef{and_idx};
+                }
+
+                // Modus ponens: (H_T → φ_T), H_T ⊢ φ_T.
+                uint32_t mp_idx =
+                    static_cast<uint32_t>(out.instrs.size());
+                nd::ImpliesElim mp_op{};
+                mp_op.impl = StepRef{use_wrap_idx};
+                mp_op.ant  = H_T_step;
+                out.instrs.push_back(nd::Instr{mp_op});
+
+                step_remap[i] = mp_idx;
+                continue;
+            }
+            // Unresolved name — compute_transitive_axioms would have
+            // caught this earlier; defensive error.
+            return MAKE_ERROR
+                << "axiom_rewrap: Use('" << u->axiom.name
+                << "') resolves to neither axiom nor theorem in ctx";
         }
 
         uint32_t out_idx = static_cast<uint32_t>(out.instrs.size());

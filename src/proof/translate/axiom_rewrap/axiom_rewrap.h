@@ -50,15 +50,19 @@ class AxiomRewrap {
 public:
     AxiomRewrap(GlobalContext& ctx,
                 FormulaHandle goal_formula,
-                const TheoremAxiomMap& theorem_axioms)
-        : ctx_(ctx), goal_(goal_formula), theorem_axioms_(theorem_axioms) {}
+                const TheoremAxiomMap& theorem_axioms,
+                const WrappedTheoremMap& wrapped_theorems)
+        : ctx_(ctx), goal_(goal_formula),
+          theorem_axioms_(theorem_axioms),
+          wrapped_theorems_(wrapped_theorems) {}
 
     util::Result<RewrapResult> apply(const Program<nd::Instr>& in);
 
 private:
-    GlobalContext&         ctx_;
-    FormulaHandle          goal_;
-    const TheoremAxiomMap& theorem_axioms_;
+    GlobalContext&           ctx_;
+    FormulaHandle            goal_;
+    const TheoremAxiomMap&   theorem_axioms_;
+    const WrappedTheoremMap& wrapped_theorems_;
 };
 
 }  // namespace logic::proof::translate::axiom_rewrap

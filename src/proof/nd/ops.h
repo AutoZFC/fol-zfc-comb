@@ -64,9 +64,18 @@ struct Let {
 // =========================================================================
 // Use pulls a previously-proven axiom or theorem in by name. The name is
 // resolved against GlobalContext at execute time.
+//
+// `resolved`, if set, supplies the formula to bind directly and bypasses
+// the name lookup. This path exists for translator-synthesized Use ops
+// (e.g., axiom_rewrap's unwrap macro citing a theorem's wrapped form
+// `H_T → φ_T` that lives outside the ctx name registry). Mutually
+// exclusive with `axiom.name` in practice: lowering sets `axiom.name`
+// from the source; translators set `resolved`. Mirrors the
+// `Assume.resolved` convention.
 struct Use {
     OpHeader h{};
     AxiomRef axiom{};
+    std::optional<FormulaHandle> resolved{};
 };
 
 // SchemaInst instantiates a proven schema with concrete bindings.

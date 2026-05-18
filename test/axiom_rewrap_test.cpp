@@ -30,6 +30,7 @@ using namespace logic::proof;
 using logic::proof::translate::axiom_rewrap::AxiomRewrap;
 using logic::proof::translate::axiom_rewrap::RewrapResult;
 using logic::proof::translate::axiom_rewrap::TheoremAxiomMap;
+using logic::proof::translate::axiom_rewrap::WrappedTheoremMap;
 using logic::proof::translate::axiom_rewrap::compute_transitive_axioms;
 
 namespace {
@@ -384,7 +385,8 @@ void test_apply_no_axioms_identity() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
@@ -425,7 +427,8 @@ void test_apply_single_axiom_wrap() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -485,7 +488,8 @@ void test_apply_two_axioms_wrap() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -553,7 +557,8 @@ void verify_wrap(Runtime& rt, const char* source, const char* claim_name) {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     if (!r.ok()) {
         std::cerr << "apply fail for '" << claim_name << "': "
@@ -706,7 +711,8 @@ void test_apply_axiom_dropped_no_other_uses() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -740,7 +746,8 @@ void test_apply_axiom_cached_across_multi_use() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) {
@@ -783,7 +790,8 @@ void test_apply_two_axioms_dropped_with_extracts() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
@@ -828,7 +836,8 @@ void test_apply_three_axioms_dropped_with_extracts() {
     FormulaHandle goal = claim.value().get().root();
 
     TheoremAxiomMap registry;
-    AxiomRewrap pass(rt.context(), goal, registry);
+    WrappedTheoremMap wrapped;
+    AxiomRewrap pass(rt.context(), goal, registry, wrapped);
     auto r = pass.apply(prog);
     EXPECT_TRUE(r.ok());
     if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
@@ -847,6 +856,341 @@ void test_apply_three_axioms_dropped_with_extracts() {
     if (!vr.ok()) {
         std::cerr << "verify fail: " << vr.error().to_string() << "\n";
     }
+}
+
+// =========================================================================
+// Phase 5: Use(T) theorem unwrap macro.
+//
+// For Use(T) where axioms(T) ≠ ∅, emit:
+//   [k₀]  Use{resolved: H_T → φ_T}        ← bind the wrapped form
+//   [k₁]  and_intro chain over            ← rebuild H_T from axiom_step_table
+//          axiom_step_table[A_i]           (lex order matches H_T's shape)
+//   [k₂]  ImpliesElim([k₀], [k₁])         ← modus ponens, binds φ_T
+//
+// Downstream refs to the original Use(T) are aliased to [k₂].
+// For axioms(T) = ∅: no unwrap; emit Use(T) as-is (it binds φ_T directly).
+// =========================================================================
+
+// Helper: run axiom_rewrap on theorem T's proof, register T as a theorem
+// in ctx, and populate the registries. Returns the rewrap result for the
+// caller to inspect (e.g., to confirm the wrapped form). The caller
+// supplies the input registries so chained theorems compose correctly
+// (T_2 needs T_1's entries already populated).
+RewrapResult setup_wrapped_theorem(
+    Runtime& rt,
+    const ParseResult& parsed,
+    const std::string& T_name,
+    TheoremAxiomMap& thm_axioms,
+    WrappedTheoremMap& wrapped)
+{
+    const ParsedProof* p = nullptr;
+    for (const auto& pp : parsed.proofs) {
+        if (pp.claim_name == T_name) { p = &pp; break; }
+    }
+    if (!p) {
+        std::cerr << "setup_wrapped_theorem: no proof for '" << T_name << "'\n";
+        std::abort();
+    }
+    Program<nd::Instr> prog = lower_or_die(*p);
+    auto claim = rt.context().find_claim(T_name);
+    if (!claim) {
+        std::cerr << "setup_wrapped_theorem: no claim for '" << T_name << "'\n";
+        std::abort();
+    }
+    FormulaHandle T_goal = claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), T_goal, thm_axioms, wrapped);
+    auto r = pass.apply(prog);
+    if (!r.ok()) {
+        std::cerr << "setup_wrapped_theorem(" << T_name << "): "
+                  << r.error().to_string() << "\n";
+        std::abort();
+    }
+
+    rt.context().add_theorem(T_name, claim.value());
+    thm_axioms.put(T_name, r.value().axioms);
+    if (!r.value().axioms.empty()) {
+        wrapped.put(T_name, r.value().wrapped_goal);
+    }
+    return std::move(r).unwrap();
+}
+
+// Phase 5 Test 1: theorem T uses one axiom A; outer proof uses T.
+void test_apply_theorem_use_one_axiom() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_holds: a
+        claim t1: a
+        proof t1:
+            h = use a_holds
+            qed h
+        claim outer: a
+        proof outer:
+            h = use t1
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    TheoremAxiomMap thm_axioms;
+    WrappedTheoremMap wrapped;
+    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms, wrapped);
+
+    // Outer rewrap.
+    Program<nd::Instr> outer_prog =
+        lower_or_die(*[&]() -> const ParsedProof* {
+            for (const auto& p : parsed.value().proofs)
+                if (p.claim_name == "outer") return &p;
+            return nullptr;
+        }());
+    auto outer_claim = rt.context().find_claim("outer");
+    FormulaHandle outer_goal = outer_claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    auto r = pass.apply(outer_prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    // Outer's axioms = transitive closure via t1: {a_holds}.
+    EXPECT_EQ(r.value().axioms.size(), size_t{1});
+    if (!r.value().axioms.empty()) {
+        EXPECT_EQ(r.value().axioms[0], std::string("a_holds"));
+    }
+    // Phase 4 contract still holds: no axiom Use ops.
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    // Output gate already ran NDVerifier; re-verify for visibility.
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
+}
+
+// Phase 5 Test 2: theorem T uses two axioms; outer uses T.
+// Exercises the and_intro chain in the unwrap macro.
+void test_apply_theorem_use_two_axioms() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_holds: a
+        axiom b_holds: b
+        claim t: a & b
+        proof t:
+            h_a = use a_holds
+            h_b = use b_holds
+            h_ab = and_intro h_a, h_b
+            qed h_ab
+        claim outer: a & b
+        proof outer:
+            h = use t
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    TheoremAxiomMap thm_axioms;
+    WrappedTheoremMap wrapped;
+    setup_wrapped_theorem(rt, parsed.value(), "t", thm_axioms, wrapped);
+
+    Program<nd::Instr> outer_prog =
+        lower_or_die(*[&]() -> const ParsedProof* {
+            for (const auto& p : parsed.value().proofs)
+                if (p.claim_name == "outer") return &p;
+            return nullptr;
+        }());
+    auto outer_claim = rt.context().find_claim("outer");
+    FormulaHandle outer_goal = outer_claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    auto r = pass.apply(outer_prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    EXPECT_EQ(r.value().axioms.size(), size_t{2});
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
+}
+
+// Phase 5 Test 3: theorem chain T_2 → T_1 → A. Verifies the
+// transitive-closure threading + composition of unwrap macros.
+void test_apply_theorem_chain() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_holds: a
+        claim t1: a
+        proof t1:
+            h = use a_holds
+            qed h
+        claim t2: a
+        proof t2:
+            h = use t1
+            qed h
+        claim outer: a
+        proof outer:
+            h = use t2
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    TheoremAxiomMap thm_axioms;
+    WrappedTheoremMap wrapped;
+    setup_wrapped_theorem(rt, parsed.value(), "t1", thm_axioms, wrapped);
+    setup_wrapped_theorem(rt, parsed.value(), "t2", thm_axioms, wrapped);
+
+    Program<nd::Instr> outer_prog =
+        lower_or_die(*[&]() -> const ParsedProof* {
+            for (const auto& p : parsed.value().proofs)
+                if (p.claim_name == "outer") return &p;
+            return nullptr;
+        }());
+    auto outer_claim = rt.context().find_claim("outer");
+    FormulaHandle outer_goal = outer_claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    auto r = pass.apply(outer_prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    EXPECT_EQ(r.value().axioms.size(), size_t{1});
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
+}
+
+// Phase 5 Test 4: theorem with axioms(T) = ∅; Use(T) stays as-is (no unwrap).
+void test_apply_theorem_no_axioms_no_unwrap() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_holds: a
+        claim taut: p -> p
+        proof taut:
+            h = assume p
+            h2 = implies_intro h
+            qed h2
+        claim outer: a & (p -> p)
+        proof outer:
+            h_a = use a_holds
+            h_taut = use taut
+            h = and_intro h_a, h_taut
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    TheoremAxiomMap thm_axioms;
+    WrappedTheoremMap wrapped;
+    auto taut_result =
+        setup_wrapped_theorem(rt, parsed.value(), "taut", thm_axioms, wrapped);
+    EXPECT_EQ(taut_result.axioms.size(), size_t{0});
+    // No wrapped form should have been registered (axioms(taut) = ∅).
+    EXPECT_TRUE(!wrapped.contains("taut"));
+
+    Program<nd::Instr> outer_prog =
+        lower_or_die(*[&]() -> const ParsedProof* {
+            for (const auto& p : parsed.value().proofs)
+                if (p.claim_name == "outer") return &p;
+            return nullptr;
+        }());
+    auto outer_claim = rt.context().find_claim("outer");
+    FormulaHandle outer_goal = outer_claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    auto r = pass.apply(outer_prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    // Outer uses a_holds (direct axiom) + taut (theorem, no axioms).
+    // axioms(outer) = {a_holds} only.
+    EXPECT_EQ(r.value().axioms.size(), size_t{1});
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    // The Use(taut) op should survive in the output (no unwrap macro).
+    int use_taut_count = 0;
+    for (const auto& instr : r.value().proof.instrs) {
+        if (const auto* u = std::get_if<nd::Use>(&instr)) {
+            if (u->axiom.name == "taut") ++use_taut_count;
+        }
+    }
+    EXPECT_EQ(use_taut_count, 1);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << vr.error().to_string() << "\n";
+}
+
+// Phase 5 Test 5: cite theorem T with axioms(T) ≠ ∅ but no wrapped form
+// registered → input error.
+void test_apply_theorem_missing_wrapped_form_errors() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_holds: a
+        claim t: a
+        proof t:
+            h = use a_holds
+            qed h
+        claim outer: a
+        proof outer:
+            h = use t
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    // Register t as a theorem WITH axioms but WITHOUT a wrapped form.
+    auto t_claim = rt.context().find_claim("t");
+    if (!t_claim) { std::cerr << "missing\n"; ++g_failed; return; }
+    rt.context().add_theorem("t", t_claim.value());
+
+    TheoremAxiomMap thm_axioms;
+    thm_axioms.put("t", std::vector<std::string>{"a_holds"});
+    WrappedTheoremMap wrapped;   // intentionally empty
+
+    Program<nd::Instr> outer_prog =
+        lower_or_die(*[&]() -> const ParsedProof* {
+            for (const auto& p : parsed.value().proofs)
+                if (p.claim_name == "outer") return &p;
+            return nullptr;
+        }());
+    auto outer_claim = rt.context().find_claim("outer");
+    FormulaHandle outer_goal = outer_claim.value().get().root();
+
+    AxiomRewrap pass(rt.context(), outer_goal, thm_axioms, wrapped);
+    auto r = pass.apply(outer_prog);
+    EXPECT_TRUE(r.is_error());
 }
 
 }  // namespace
@@ -878,6 +1222,13 @@ int main() {
     test_apply_axiom_cached_across_multi_use();
     test_apply_two_axioms_dropped_with_extracts();
     test_apply_three_axioms_dropped_with_extracts();
+
+    // Phase 5 — Use(T) theorem unwrap macro
+    test_apply_theorem_use_one_axiom();
+    test_apply_theorem_use_two_axioms();
+    test_apply_theorem_chain();
+    test_apply_theorem_no_axioms_no_unwrap();
+    test_apply_theorem_missing_wrapped_form_errors();
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";

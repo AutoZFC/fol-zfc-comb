@@ -46,6 +46,35 @@ struct TheoremAxiomMap {
     }
 };
 
+// Wrapped form of each previously-rewrapped theorem.
+//
+// For theorem T with axioms(T) = {A_1, …, A_k} (k ≥ 1), the wrapped form
+// is the FormulaHandle for (A_1 ∧ … ∧ A_k) → φ_T, lex-sorted and
+// left-associated to match the canonical H_T shape used by the prelude
+// extraction chain (so the unwrap macro's modus ponens type-checks).
+//
+// For T with axioms(T) = ∅, no entry is needed — the unwrap macro
+// degenerates to a plain Use(T) which returns φ_T directly.
+//
+// Populated by whoever runs AxiomRewrap on T's proof (typically the
+// runtime / proof_checker, in build-topological order). Consumed by
+// AxiomRewrap when it sees Use(T) in a downstream proof.
+struct WrappedTheoremMap {
+    std::unordered_map<std::string, FormulaHandle> map;
+
+    bool contains(const std::string& theorem_name) const {
+        return map.count(theorem_name) > 0;
+    }
+
+    FormulaHandle get(const std::string& theorem_name) const {
+        return map.at(theorem_name);
+    }
+
+    void put(const std::string& theorem_name, FormulaHandle wrapped) {
+        map[theorem_name] = wrapped;
+    }
+};
+
 util::Result<std::vector<std::string>> compute_transitive_axioms(
     const Program<nd::Instr>& prog,
     const GlobalContext& ctx,

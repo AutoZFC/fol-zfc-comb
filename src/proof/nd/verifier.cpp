@@ -222,12 +222,21 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const Let& op) {
 }
 
 util::ResultStatus exec_op(Session& s, uint32_t idx, const Use& op) {
-    auto found = s.ctx.find_known(op.axiom.name);
-    if (!found.has_value()) {
-        return MAKE_ERROR << "use: unknown axiom/theorem '" << op.axiom.name << "'";
+    SentenceHandle sent;
+    if (op.resolved.has_value()) {
+        // Translator-synthesized: bind to the supplied formula directly.
+        // Wrap into a fresh Sentence so use_theorem's add_sentence path
+        // is uniform; no entry in used_names since there's no name to
+        // track (this op is internal to the translator chain).
+        sent = s.ctx.add_sentence(Sentence(*op.resolved));
+    } else {
+        auto found = s.ctx.find_known(op.axiom.name);
+        if (!found.has_value()) {
+            return MAKE_ERROR << "use: unknown axiom/theorem '" << op.axiom.name << "'";
+        }
+        s.used_names.insert(op.axiom.name);
+        sent = found.value();
     }
-    s.used_names.insert(op.axiom.name);
-    SentenceHandle sent = found.value();
     auto r = s.stack.use_theorem(sent);
     if (!r.ok()) return r.error();
     s.bind_step(idx, r.value());
