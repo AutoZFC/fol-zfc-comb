@@ -469,6 +469,32 @@ void test_builder_negated_atom() {
     EXPECT(g.binding_edges.empty());
 }
 
+// Fograph extension for ¬⊥ (truth literal 1).
+// LKR_TO_COMB_DESIGN.md §4.2: Compound{Not, Compound{Bottom}} produces
+// a single VertexKind::One vertex with no edges. No pred/negated/args
+// fields are meaningful for One.
+void test_builder_one_vertex() {
+    BuilderFixture f;
+    Fograph g(f.fb.make_not(f.fb.make_bottom()));
+    EXPECT(g.labels.size() == 1);
+    EXPECT(g.labels[0].kind == VertexKind::One);
+    EXPECT(g.cograph_edges.empty());
+    EXPECT(g.binding_edges.empty());
+}
+
+// ¬⊥ inside a larger formula: (p ∨ ¬⊥) — the One vertex is a
+// +-disjunct of p, no cograph edges between them.
+void test_builder_one_in_disjunction() {
+    BuilderFixture f;
+    FormulaHandle one_lit = f.fb.make_not(f.fb.make_bottom());
+    Fograph g(f.fb.make_or(f.pred0(f.P0), one_lit));
+    EXPECT(g.labels.size() == 2);
+    EXPECT(g.labels[0].kind == VertexKind::Atom);
+    EXPECT(g.labels[1].kind == VertexKind::One);
+    EXPECT(g.cograph_edges.empty());
+    EXPECT(g.binding_edges.empty());
+}
+
 // --- compound cases --------------------------------------------------
 
 void test_builder_and() {
@@ -1108,6 +1134,8 @@ int main() {
 
     test_builder_atom_zero_ary();
     test_builder_negated_atom();
+    test_builder_one_vertex();
+    test_builder_one_in_disjunction();
     test_builder_and();
     test_builder_or_no_edges();
     test_builder_forall_unary();

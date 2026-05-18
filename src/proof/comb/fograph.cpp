@@ -86,10 +86,29 @@ std::vector<size_t> build(FormulaHandle           f,
         const Compound& c = formula.as_compound();
 
         if (c.op == Op::Not) {
+            // Truth literal: ¬⊥ is the NNF encoding of 1. Produces one
+            // VertexKind::One vertex (no pred/args/negated meaningful).
+            // See LKR_TO_COMB_DESIGN.md §4.2.
+            if (c.left->is_compound() &&
+                c.left->as_compound().op == Op::Bottom) {
+                size_t id = out.labels.size();
+                VertexLabel lbl;
+                lbl.kind = VertexKind::One;
+                out.labels.push_back(std::move(lbl));
+                return {id};
+            }
+            // Negated predicate: one Atom vertex, negated=true.
             assert(c.left->is_predicate() && "Fograph builder: input not in NNF");
             size_t id = push_atom(c.left->as_predicate(), /*negated=*/true,
                                   binder_stack, out);
             return {id};
+        }
+
+        // Bare Bottom (0) is unprovable. Verified LKR programs never have
+        // it as an entry; assert defensively.
+        if (c.op == Op::Bottom) {
+            assert(false && "Fograph builder: bare Bottom (0) is unprovable");
+            return {};
         }
 
         if (c.op == Op::And || c.op == Op::Or) {

@@ -344,33 +344,62 @@ mirroring the Fograph builder's stance.
 
 #### Test plan
 
-Three tests, smallest first:
+Targeted tests at the layers where `One` is reachable:
 
-1. **`fograph_one_vertex`** — direct Fograph construction of `¬⊥`
-   produces a single `VertexKind::One` vertex; `CombVerifier`'s
-   target check accepts a `CombProof` whose target is `G(¬⊥)`.
-2. **`lkr_to_comb_one_closer`** — LKR program `[Or(0); One(1)]` (or
-   the simplest shape that places `¬⊥` as a sequent entry) translates
-   and verifies.
-3. **`nd_to_lkr_to_comb_bottom_elim`** — an ND proof that uses
-   `bottom_elim` (`⊢ ⊥ → ψ`) goes ND → LKR → Comb end-to-end. ND's
-   `BottomElim` is what NDtoLKR translates into `One` ops in the
-   target sequent (see `cut_spine.cpp::close_bottom_elim`), so this
-   exercises the full pipeline.
+1. **`fograph_one_vertex`** + **`fograph_one_in_disjunction`** — direct
+   Fograph construction: `¬⊥` produces a single `VertexKind::One`
+   vertex; in larger formulas, it sits as a leaf with no incident
+   cograph edges (under `∨`) or with cograph edges from enclosing
+   `∧` (handled identically to atom positions).
+2. **`lkr_to_comb_one_minimal`** — LKR `[One(0)]` on goal `¬⊥`.
+   Smallest possible exercise of the leaf builder.
+3. **`lkr_to_comb_one_with_sibling`** — LKR `[Or(0); One(1)]` on goal
+   `p ∨ ¬⊥`. Exercises the One leaf alongside sibling sequent
+   entries (which become uncovered in source).
 
-Each test runs the existing output-gate verifiers. No new verifier
-plumbing needed.
+#### End-to-end via NDtoLKR: not currently reachable
+
+`One` is emitted by `emit_close` (only) when one of the two closing
+entries is `¬⊥` (the `is_top_literal` check). Tracing NDtoLKR shows
+this never fires for the supported ND rule set:
+
+- `BottomElim`'s `emit_close` pair is `(NNF(formula), NNF(¬formula))`
+  from the wrapped `NotElim`, neither of which is `¬⊥` for any
+  reasonable proof.
+- A step with formula exactly `⊥` would put `¬⊥` in
+  `step_to_neg_idx`, but the only such steps (`not_elim`) are
+  classified as no-emit, so they don't generate flat-step cuts.
+- `assume _|_` followed by `not_intro` is rejected by
+  `translate_block_not` (which requires `NotIntro.bottom` to be a
+  `NotElim`).
+- Goals containing `¬⊥` cause `⊥` to appear in negated cut formulas
+  via NNF, which the Fograph builder asserts on (bare `⊥` is `0` and
+  is unprovable).
+
+The `One` leaf builder is therefore complete for **hand-crafted LKR
+programs** (Phase 2 covered above) but currently unreachable through
+the full ND pipeline. Lifting this requires either:
+
+- Extending `translate_block_not` to accept `NotIntro` over a direct
+  `Assume _|_` (so `not_intro (assume _|_)` translates to `¬⊥`), or
+- Extending Fograph + the per-rule operations to handle bare `⊥` as
+  an unprovable sentinel (so `⊥`-containing intermediates can pass
+  through structurally).
+
+Both are out of scope for Phase 2; track as a NDtoLKR enhancement.
 
 #### Implementation order
 
-1. Add the Fograph `¬⊥` case + targeted test 1.
+1. Add the Fograph `¬⊥` case + targeted Fograph tests.
 2. Add `walk.cpp::build_leaf_one` and wire it into `walk_recursive`'s
-   leaf dispatch (parallel to `build_leaf_axiom_lit`) + test 2.
-3. Verify end-to-end test 3 passes.
+   leaf dispatch (parallel to `build_leaf_axiom_lit`) + the two
+   `lkr_to_comb_one_*` tests.
 
 The walk leaf builder is ~15 lines (build a 1-vertex source, no edges,
 fibration of `[entry_positions[idx][0]]`). No changes to per-rule
-linear or branching code.
+linear or branching code. COMPLETENESS.md row "One" flips to ✓ once
+the LKR layer is covered; an NDtoLKR-emission obligation is added as
+a separate row tracking the enhancement above.
 
 ### 4.3 `Exchange(i, j)`
 

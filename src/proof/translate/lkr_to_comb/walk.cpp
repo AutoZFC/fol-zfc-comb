@@ -133,6 +133,50 @@ util::Result<comb::CombProof> build_leaf_close_by_lemma(
 //   vacuous, no induced bimatching in the trivially-empty leap graph.
 //   The skew bifibration conditions are discharged by the surrounding
 //   per-rule operations after composition.
+// =====================================================================
+// Rule: One  (Hughes §11.1 base case; LKR_TO_COMB_DESIGN.md §4.2)
+//
+// Premise: (none — closing leaf)
+// Conclusion: CombProof of any sequent containing the truth literal
+//   ¬⊥ at index `op.idx`. LKRVerifier enforces entries[idx] = ¬⊥.
+//
+// Operation: build N = {u_1} with one vertex of kind One (no link;
+//   the truth literal is unlinked per Def. 5.3). No cograph or binding
+//   edges, empty dualizer. f maps the single source vertex to the
+//   canonical position of entries[idx] — that position holds a single
+//   VertexKind::One vertex in the canonical target (Fograph extension
+//   in fograph.cpp::build for Compound{Not, Compound{Bottom}}).
+//
+// Soundness: the leaf is a well-formed fonet piece (Def. 5.3).
+//   Link covering vacuous (no Atom). Dualizer totality vacuous (no
+//   binders). Leap graph empty. The skew/binding fibration conditions
+//   are discharged by the surrounding per-rule operations after
+//   composition — identical framing to AxiomLit.
+util::Result<comb::CombProof> build_leaf_one(
+    WalkContext&                                 cc,
+    const lkr::One&                              op,
+    const std::vector<FormulaHandle>&            conclusion_entries,
+    const std::vector<std::vector<size_t>>&      entry_positions)
+{
+    if (op.idx >= conclusion_entries.size()) {
+        return MAKE_ERROR << "walk(One): idx OOR";
+    }
+    // One precondition: entries[idx] = ¬⊥, which Fograph maps to a
+    // single VertexKind::One vertex — so exactly one canonical position.
+    if (entry_positions[op.idx].size() != 1) {
+        return MAKE_ERROR
+            << "walk(One): entry at idx=" << op.idx << " has "
+            << entry_positions[op.idx].size()
+            << " canonical positions (expected 1 for ¬⊥)";
+    }
+    comb::CombProof cp;
+    cp.target = cc.canonical_target;
+    cp.source.num_vertex = 1;
+    cp.fibration.resize(1);
+    cp.fibration[0] = entry_positions[op.idx][0];
+    return cp;
+}
+
 util::Result<comb::CombProof> build_leaf_axiom_lit(
     WalkContext&                                 cc,
     const lkr::AxiomLit&                         op,
@@ -629,6 +673,9 @@ util::Result<comb::CombProof> walk_recursive(
         const auto& instr  = cc.prog.instrs[leaf->op_idx];
         if (auto* ax = std::get_if<lkr::AxiomLit>(&instr)) {
             return build_leaf_axiom_lit(cc, *ax, seq, posv);
+        }
+        if (auto* one = std::get_if<lkr::One>(&instr)) {
+            return build_leaf_one(cc, *one, seq, posv);
         }
         if (auto* cbl = std::get_if<lkr::CloseByLemma>(&instr)) {
             return build_leaf_close_by_lemma(cc, *cbl, posv);

@@ -132,7 +132,7 @@ and a test exercises the rule under the relevant verifier gate.
 | Rule         | Math spec                          | Implementation                       | Test                                  | Status   |
 |--------------|------------------------------------|--------------------------------------|---------------------------------------|----------|
 | AxiomLit     | LKR_TO_COMB_DESIGN.md §4.1         | walk.cpp::build_leaf_axiom_lit       | lkr_to_comb_test::self_implication    | ✓ done   |
-| One          | LKR_TO_COMB_DESIGN.md §4.2         | pending                              | pending                               | spec     |
+| One          | LKR_TO_COMB_DESIGN.md §4.2         | walk.cpp::build_leaf_one + fograph.cpp | lkr_to_comb_test::one_minimal/with_sibling, comb_test::builder_one_* | ✓ done   |
 | Exchange     | LKR_TO_COMB_DESIGN.md §4.3         | walk.cpp (no-op linear)              | covered by and_commute                | ✓ done   |
 | Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp (no-op linear, partial)     | partial                               | partial  |
 | Contraction  | LKR_TO_COMB_DESIGN.md §4.5 (stub)  | pending                              | pending                               | open     |
@@ -193,6 +193,12 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 |-------------------------------|-----------------------------------|--------|
 | Axiom CombProofs (deduction)  | LKR_TO_COMB_DESIGN.md §16 (TBD)   | open   |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
+| NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
+
+The "NDtoLKR emission for `One`" row tracks an enhancement to
+`translate_block_not` (or Fograph) so that ND proofs producing the
+truth literal `¬⊥` flow end-to-end. The LKR→Comb side is done;
+NDtoLKR currently never emits `lkr::One` ops.
 
 ## 5. Out-of-scope inputs
 

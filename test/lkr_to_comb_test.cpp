@@ -61,6 +61,47 @@ void test_lkr_to_comb_self_implication() {
     EXPECT_OK(pass.apply(prog));
 }
 
+// One leaf (LKR_TO_COMB_DESIGN.md §4.2): close a goal whose entry is
+// the truth literal ¬⊥ via the One(idx) closing op.
+//
+// Smallest case: goal = ¬⊥. LKR = [One(0)]. CombProof: source = one
+// vertex (kind=One, unlinked), target = G(¬⊥) = single One vertex,
+// fibration [0]. No links, no edges, empty dualizer.
+void test_lkr_to_comb_one_minimal() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "~_|_");
+
+    LKRProgram prog;
+    prog.claim_name = "one_minimal";
+    prog.instrs.push_back(lkr::One{{}, 0});
+
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    translate::lkr_to_comb::LKRtoComb pass(ctx, goal, lemmas);
+    EXPECT_OK(pass.apply(prog));
+}
+
+// One with sibling disjunct: goal = p | ¬⊥. The ¬⊥ entry alone closes
+// the goal regardless of p (Weakening-style; p stays uncovered in
+// source). LKR = [Or(0); One(1)] — Or splits the goal into [p, ¬⊥],
+// then One(1) closes via the truth literal at idx 1.
+void test_lkr_to_comb_one_with_sibling() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "p | ~_|_");
+
+    LKRProgram prog;
+    prog.claim_name = "one_with_sibling";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::One{{}, 1});
+
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    translate::lkr_to_comb::LKRtoComb pass(ctx, goal, lemmas);
+    EXPECT_OK(pass.apply(prog));
+}
+
 // And rule (worked example B from WALKTHROUGH.md): prove (p ∧ q) ⇒ (q ∧ p).
 // NNF: (¬p ∨ ¬q) ∨ (q ∧ p). LKR:
 //   Or(0)            → [(¬p ∨ ¬q), (q ∧ p)]
@@ -323,6 +364,8 @@ void test_end_to_end_nd_to_comb_forall_self_impl() {
 
 int main() {
     test_lkr_to_comb_self_implication();
+    test_lkr_to_comb_one_minimal();
+    test_lkr_to_comb_one_with_sibling();
     test_lkr_to_comb_and_commute();
     test_lkr_to_comb_forall_em();
     test_lkr_to_comb_cut_no_use();
