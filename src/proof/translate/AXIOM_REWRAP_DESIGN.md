@@ -410,11 +410,25 @@ prior phase is green. Per `feedback_math_first_discipline`.
    (Former "Phase 5: SchemaInst expansion" removed — see §2.4; schemas
    are eliminated by an upstream ND→ND inline pass, so axiom_rewrap
    never sees SchemaInst ops.)
-6. **End-to-end ZFC integration**.
-   Translate one proof from `zfc/basics/ordered_pair.fol.proof`
-   through the full pipeline; verify the CombProof against the
-   wrapped goal. Promote the COMPLETENESS.md row from `open` to
-   `✓ done`.
+6. **End-to-end pipeline integration**.
+   Wire axiom_rewrap between iota_elim and NDtoLKR in the build flow.
+   Tests: minimal (1 axiom), two-axiom (extraction chain through pipeline),
+   single-quantifier-nesting axiom. Verify each end-to-end CombProof
+   under CombVerifier against the wrapped goal.
+
+   **Known limitation (downstream, NOT axiom_rewrap):** when the wrapped
+   goal has 2-level nested quantifiers on each side of the implication
+   (e.g. `(∀x.∀y.r(x,y)) → ∀a.∀b.r(a,b)`, or anything wrapping ZFC
+   axioms like `extensionality`), LKRtoComb's CombVerifier rejects with
+   "is_fonet: C.2 expected a singleton binder, got part of size 2". This
+   is the `LKR_TO_COMB_DESIGN.md §8` cotree-decomposition issue; the fix
+   belongs in LKRtoComb's binder handling. axiom_rewrap's NDVerifier
+   output gate accepts these inputs, and NDtoLKR processes them — only
+   the final CombProof construction trips.
+
+   Tests for the failing shapes are kept in `#if 0` blocks in
+   `test/axiom_rewrap_test.cpp` (Phase 6 Tests 4 and 5) for easy
+   re-enablement once the downstream limitation is addressed.
 
 ## 8. Test plan
 

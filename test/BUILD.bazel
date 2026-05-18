@@ -119,10 +119,13 @@ cc_test(
         "//src/core:formula",
         "//src/parser",
         "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
         "//src/proof/nd:lowering",
         "//src/proof/nd:verifier",
         "//src/proof/translate/axiom_rewrap:axiom_rewrap",
         "//src/proof/translate/axiom_rewrap:theorem_axioms",
+        "//src/proof/translate/lkr_to_comb",
+        "//src/proof/translate/nd_to_lkr",
         "//src/runtime",
     ],
 )

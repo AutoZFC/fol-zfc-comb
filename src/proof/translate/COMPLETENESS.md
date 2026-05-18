@@ -214,7 +214,7 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 
 | Item                          | Spec                              | Status |
 |-------------------------------|-----------------------------------|--------|
-| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec done; Phases 1–5 impl + tests landed (TheoremAxiomMap, boundary wrap, structural-copy coverage, Use(A) drop, Use(T) unwrap macro). Pipeline now handles theorem-citing proofs end-to-end at the ND layer; transitive axiom closure threads correctly across the theorem DAG. Phase 6 (ZFC integration) open. |
+| Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec + Phases 1–5 done; Phase 6 (pipeline integration) partial — axiom_rewrap integrates cleanly into ND → NDtoLKR → LKRtoComb for inputs where the wrapped goal stays within current downstream capability (single-level quantifier nesting); deeper ZFC theorems (eq_refl, anything wrapping a 2-level-nested-forall axiom) block on a pre-existing LKRtoComb cotree limitation surfaced by the C.2 singleton-binder check. See LKR_TO_COMB_DESIGN.md §8 "Modular decomposition during translation". |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
 | NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
 

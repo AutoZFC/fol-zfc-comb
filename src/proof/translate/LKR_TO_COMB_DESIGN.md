@@ -1223,6 +1223,16 @@ verbatim.
   demand using `comb::Cotree`'s constructor (cheap at small sizes).
   Decide when the per-rule code starts hitting binder additions.
 
+  **Now blocking (surfaced 2026-05-17 during axiom_rewrap Phase 6).**
+  Wrapped goals with 2-level nested quantifiers on each side of an
+  implication — e.g. `(∀x.∀y.r(x,y)) → ∀a.∀b.r(a,b)`, which is the
+  natural shape `axiom_rewrap` produces when an axiom body has nested
+  quantifiers — trip CombVerifier with `is_fonet: C.2 expected a
+  singleton binder, got part of size 2` (leap.cpp:575). Currently
+  blocks deeper ZFC theorems (`eq_refl`, anything wrapping
+  `extensionality`). Repro fixtures live in
+  `test/axiom_rewrap_test.cpp` under `#if 0` (Phase 6 Tests 4 and 5).
+
 - **Eigenvariable identity vs occurrence.** Hughes treats vertices as
   occurrences. Our `comb::CombProof` uses positional indices. Exchange,
   Contraction in particular must reconcile these. For the first
