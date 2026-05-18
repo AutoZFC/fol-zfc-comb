@@ -141,7 +141,7 @@ and a test exercises the rule under the relevant verifier gate.
 | Exists       | LKR_TO_COMB_DESIGN.md §4.8 + §7.5  | walk.cpp::rule_exists                | nd_to_comb_forall_self                | ✓ done   |
 | And          | LKR_TO_COMB_DESIGN.md §4.9         | walk.cpp::rule_and                   | and_commute                           | ✓ done   |
 | Cut          | LKR_TO_COMB_DESIGN.md §4.10 + §15  | walk.cpp::rule_cut + cut_augment     | cut_no_use, cut_with_lemma            | ✓ done   |
-| CloseByLemma | LKR_TO_COMB_DESIGN.md §4.11        | walk.cpp::build_leaf_close_by_lemma  | cut_with_lemma + cut_with_forall_lemma + cut_with_exists_lemma | ✓ done* |
+| CloseByLemma | LKR_TO_COMB_DESIGN.md §4.12        | lemma_inliner.cpp (Strategy A)       | cut_with_lemma + cut_with_forall_lemma + cut_with_exists_lemma + inline_hand_crafted_cut_lemma + inline_lemma_with_cuts | ✓ done |
 
 **`Weakening`** is "partial" because the current code returns
 `child` unchanged whenever a Weakening op fires. This is correct as
@@ -150,19 +150,25 @@ target's range, but breaks if Weakening introduces an entry outside
 that range. Spec extension: §4.4 needs an augmentation-style fix
 analogous to §15 Cut. See [roadmap §1A item 3].
 
-**`CloseByLemma`** (✓ done* — scope-limited).
-The σ + σ_T dualizer remap is implemented per `LKR_TO_COMB_DESIGN.md
-§4.11`. Lemmas with universal and existential binders both work
-(verified by `cut_with_forall_lemma` and `cut_with_exists_lemma`).
+**`CloseByLemma`** (✓ done — Strategy A via `LKR_TO_COMB_DESIGN.md §4.12`).
+The lemma registry stores LKR programs (not CombProofs). The
+`lemma_inliner` pre-pass splices each lemma's LKR ops into the outer
+program at the `CloseByLemma` point; the combined program is then
+translated normally (alpha-rename + cut_augment + walk). Lemma cuts
+propagate into the outer's augmented goal naturally — no
+CombProof-level composition is needed.
 
-The asterisk: **lemma CombProofs must be Cut-free** (their `target`
-must equal `G(lemma_formula_nnf)`, not the §15-augmented form).
-Lemmas built via the full ND→Comb pipeline currently target their
-augmented goal — those don't compose. Lifting this requires either
-(a) building a separate "exportable" CombProof for each lemma that
-targets the original formula, or (b) generalising Strategy B's
-position remap to handle augmented lemma targets. Tracked as a new
-cross-cutting row below.
+Soundness: by gate (combined program LKR-verifies; resulting CombProof
+verifies against the combined augmented goal).
+Completeness: every registered lemma composes, regardless of internal
+cuts or quantifier structure. Verified by `cut_with_lemma`,
+`cut_with_forall_lemma`, `cut_with_exists_lemma`, the cut-bearing
+`inline_hand_crafted_cut_lemma`, and the NDtoLKR-emitted
+`inline_lemma_with_cuts`.
+
+The dual σ remap leaf builder (`build_leaf_close_by_lemma` per §4.11)
+is retained as a safety net — it errors clearly if a `CloseByLemma`
+op survives the inliner pre-pass.
 
 ### 4.2 ND → LKR (per-rule, Theorem B)
 
@@ -204,20 +210,14 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 | Axiom CombProofs (deduction)  | LKR_TO_COMB_DESIGN.md §16 (TBD)   | open   |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
 | NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
-| Cut-free lemma export         | LKR_TO_COMB_DESIGN.md §4.11 (end) | open   |
 
 The "NDtoLKR emission for `One`" row tracks an enhancement to
 `translate_block_not` (or Fograph) so that ND proofs producing the
 truth literal `¬⊥` flow end-to-end. The LKR→Comb side is done;
 NDtoLKR currently never emits `lkr::One` ops.
 
-The "Cut-free lemma export" row tracks the missing infrastructure
-for using lemmas with internal Cuts via Strategy B: lemma CombProofs
-built through the full ND→Comb pipeline target their §15-augmented
-goal (extra positions for the lemma's own Cut blocks), which doesn't
-match the outer cut formula's slice. Currently only Cut-free lemmas
-(hand-crafted LKR programs without `lkr::Cut`) are reusable via
-`CloseByLemma`.
+The earlier "Cut-free lemma export" row was dissolved by Strategy A
+(§4.12): lemma reuse now works regardless of internal cuts.
 
 ## 5. Out-of-scope inputs
 

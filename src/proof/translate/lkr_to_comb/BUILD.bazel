@@ -60,6 +60,23 @@ cc_library(
     ],
 )
 
+# LemmaInliner — Strategy A pre-pass: splice lemma LKR programs into
+# the outer at CloseByLemma points. Replaces Strategy B's CombProof-
+# level composition (which only worked for Cut-free lemmas). See
+# LKR_TO_COMB_DESIGN.md §4.12.
+cc_library(
+    name = "lemma_inliner",
+    srcs = ["lemma_inliner.cpp"],
+    hdrs = ["lemma_inliner.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
 # AlphaRename — pre-pass that aligns Forall eigens (and any free
 # fix-vars baked into Cut/Weakening formula handles) with the canonical
 # binder vars Fograph allocates for the §15-augmented goal. Required
@@ -88,6 +105,7 @@ cc_library(
     hdrs = ["walk.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":lemma_inliner",
         ":sequent_replay",
         ":tree",
         "//src/core:formula",
@@ -125,6 +143,7 @@ cc_library(
         ":alpha_rename",
         ":cut_augment",
         ":input_gate",
+        ":lemma_inliner",
         ":output_gate",
         ":sequent_replay",
         ":tree",

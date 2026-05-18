@@ -678,6 +678,194 @@ theorem registers its CombProof, and downstream proofs cite it via
 quantifier-free theorems are reusable — which excludes most theorems
 of practical interest (any `∀x.P(x)` or `∃x.P(x)` lemma).
 
+### 4.12 Lemma composition by LKR-level inlining (Strategy A)
+
+#### Why this section exists
+
+`CloseByLemma` (§4.11) provides Strategy B: paste a lemma's standalone
+`CombProof` into the outer fonet at the cut formula's position. The
+math is clean but requires the lemma's `CombProof.target` to equal
+`G(φ_L_nnf)` exactly. Lemmas built via the full ND→Comb pipeline
+target their *§15-augmented* goal (with extra positions for the
+lemma's internal cuts), so Strategy B only handles Cut-free lemmas.
+
+Cut-elimination at the combinatorial-proof level is open (Hughes §17).
+Without it, we have no algorithm to convert a cut-bearing lemma proof
+into a Cut-free one.
+
+But §15 itself supplies the answer. §15 **keeps cuts** and witnesses
+the augmented goal. If we inline a lemma's LKR program at the outer's
+`CloseByLemma` point, *the lemma's cuts become outer cuts in the
+combined LKR program*. The outer's augmentation then includes the
+lemma's cut blocks naturally, and the lemma's source fibrates into
+the combined augmented target without any composition gymnastics.
+
+This is the "keep cuts under composition" principle, expressed at the
+LKR layer where it has a direct realization.
+
+#### Rule semantics
+
+Given outer LKR program $P$ and a lemma registry mapping
+$\text{name} \mapsto P_L$ (each $P_L$ LKR-verifies against $\varphi_L$),
+`inline_lemmas(P, \text{lemmas})` returns a combined program $P'$ with
+every `CloseByLemma` op replaced by the corresponding lemma's LKR ops.
+$P'$ LKR-verifies against the outer goal; `LKRtoComb` then handles it
+uniformly via `alpha_rename + cut_augment + walk`.
+
+After inlining, the dispatch table in `walk_recursive` never sees a
+`CloseByLemma` op. Strategy B's per-leaf builder
+(`build_leaf_close_by_lemma`) is retained as a safety net (errors
+clearly if a `CloseByLemma` somehow survives).
+
+#### Splicing operation
+
+At each `CloseByLemma(L)` in the outer's op stream:
+
+1. Look up $P_L$ in the registry. (Error if not found.)
+2. **Compute splice offset** $k$. The top open goal at the
+   `CloseByLemma` point is $[\text{outer-stuff}_0, \ldots,
+   \text{outer-stuff}_{k-1}, \varphi_{L\text{-nnf}}]$ (size $k+1$).
+   $\varphi_{L\text{-nnf}}$ is at position $k = \text{size} - 1$.
+   $P_L$'s op #0 expects to operate on the singleton sequent
+   $[\varphi_{L\text{-nnf}}]$ (position 0); we shift all of $P_L$'s
+   position references by $+k$.
+3. **Allocate fresh eigens** $\rho : V_{P_L}^{\text{eigen}} \to \mathbb{N}$
+   for each Forall eigen in $P_L$, drawn from a fresh range above any
+   var used in $P$ or any earlier splice. This preserves LKR's
+   freshness condition; alpha-rename later re-canonicalizes them.
+4. **Compute per-op offset map** for $P_L$. Position offsets are
+   *per-goal* on the LKR open-goals stack and change only on
+   branching ops:
+   - **And**: pop, push RIGHT (offset = parent), push LEFT (offset = **0**).
+     Justification: LEFT subgoal's entries are $\text{sorted}(L) \cup
+     \{\text{LEFT}\_\phi\}$ where $L$ is the partition; the partition
+     contains only lemma indices (outer-stuff isn't in $L$), so
+     outer-stuff goes to RIGHT and LEFT has no outer-stuff prefix.
+   - **Cut**: pop, push RIGHT (offset = parent), push LEFT (offset = parent).
+     Both subgoals inherit the parent's outer-stuff prefix.
+   - **Linear ops** (Or, Forall, Exists, Weakening, Contraction, Exchange):
+     offset unchanged.
+   - **Closing ops** (AxiomLit, One, nested CloseByLemma): pop.
+5. **Rewrite each $P_L$ op** with its computed offset:
+   - `principal, lit_a, lit_b, idx, i, j`: add offset.
+   - `And.left_partition`: add offset to each element.
+   - `Forall.eigen`: apply $\rho$.
+   - `Cut.cut_formula`, `Weakening.formula`: walk the `FormulaHandle`
+     substituting `Fixed(v) → Fixed(ρ(v))` for $v \in \text{dom}(\rho)$
+     (one-pass simultaneous substitution, like `alpha_rename.cpp`).
+   - `Exists.witness.idx` (a `TermRef`): add the combined-program op
+     index of the corresponding spliced Forall op (computed via a
+     per-splice index map).
+   - Nested `CloseByLemma`: recursively splice (lemmas may reference
+     other lemmas).
+6. Append rewritten ops to the output program.
+
+#### Soundness
+
+**Claim.** If $P$ LKR-verifies against $\psi$ (with `CloseByLemma` resolved
+against `lemmas`) and each $P_L \in \text{lemmas}$ LKR-verifies against
+$\varphi_L$, then `inline_lemmas(P, \text{lemmas})` LKR-verifies against
+$\psi$.
+
+**Proof sketch.**
+
+At each splice point, the top goal is $[\text{outer-stuff} \ldots, \varphi_L]$.
+$P_L$'s ops, when run with offset $k$, operate on this goal as if it
+were $[\varphi_L]$ — the outer-stuff entries are "weakening" $P_L$
+doesn't touch. Each $P_L$ op's effect on the LKR sequent:
+
+- **Or, Forall, Exists, Exchange, Weakening, Contraction**: act on
+  one entry at offset $k + p$ (for $P_L$-local index $p$); other
+  entries (outer-stuff) untouched. ✓
+- **And, Cut**: split the sequent; LEFT/RIGHT subgoals defined by
+  partition + appended entries. By the analysis in step 4 above,
+  the per-subgoal offsets keep position references coherent.
+- **AxiomLit, One**: close the top goal. The outer-stuff entries
+  are popped along with the goal — they were never "used", but
+  closing requires only that *some* atomic-literal pair (or
+  truth-literal) exists in the entries, and $P_L$'s closer points to
+  the lemma's atoms at offset $k + p$. ✓
+
+Eigen rename $\rho$ ensures Forall freshness: $P_L$'s eigens, after
+rename, don't appear in outer's sequents (because $\rho$'s range is
+above all existing vars). LKRVerifier accepts. ✓
+
+`Cut.cut_formula` rewriting: the formula handle is rewritten so its
+free Fixed terms use renamed eigens. The cut's emitted entries
+(${\theta\_\text{nnf}}$ on LEFT, $\neg\theta\_\text{nnf}$ on RIGHT)
+inherit these renamed vars consistently. ✓
+
+The combined $P'$ verifies. The output (a verified LKR program) goes
+through alpha-rename + cut_augment + walk normally. ∎
+
+#### Completeness
+
+**Claim.** For every $P$ accepted by LKRVerifier against $\psi$
+(modulo the registry providing every referenced lemma), `inline_lemmas`
+returns Ok.
+
+**Proof.** Splicing is total: every `CloseByLemma` finds its lemma
+(registry precondition), the offset and rename data are computable
+from the LKR program structure, and recursive splicing terminates
+because the registry is acyclic. ∎
+
+#### Trade-off (the only one)
+
+Size: $|P'| = |P| + \sum_{\text{use}} |P_L|$. Multiplicative in lemma
+reuse. The combined augmented goal grows accordingly: each lemma use
+contributes a copy of the lemma's cut blocks.
+
+This is no worse than the worst-case bound for cut-elimination in
+classical sequent calculus (Gentzen's `Hauptsatz` gives super-
+exponential blowup in the worst case; polynomial for common cases).
+We're getting the same asymptotic complexity via the much simpler
+"keep cuts" route.
+
+For deep lemma chains (lemma A uses lemma B uses lemma C...), the
+blowup is multiplicative in the depth. If this becomes a problem, two
+optimizations are available without changing the math:
+
+- **Deduplication of identical cut blocks** in the augmented goal:
+  $(\theta \wedge \neg\theta)$ appearing multiple times can be
+  classically collapsed (each disjunct is contradictory and adds no
+  information). Saves Fograph vertex count.
+- **Cut-free fast path (Strategy B)**: when a lemma's `LKR` program
+  has no Cut ops, `lemma.CombProof.target = G(\varphi_L)` exactly,
+  and the leaf-builder pasting in §4.11 can be used instead of
+  inlining. The dispatcher picks based on a one-line check on
+  `lemma_program.has_any_cut`.
+
+For our current scope (classical FOL, modest proof libraries), the
+naive Strategy A is sufficient.
+
+#### Test plan
+
+1. **`inline_simple_lemma`** — regression: existing
+   `cut_with_lemma` test reformulated to use Strategy A. Lemma is a
+   single-step `[Or, AxiomLit]` program; inlining splices it in
+   place of `CloseByLemma`.
+2. **`inline_lemma_with_internal_cut`** — the case Strategy B
+   couldn't handle. Lemma is a non-trivial proof (e.g., produced by
+   NDtoLKR for `forall x. (p(x) -> p(x))`) that contains its own
+   Cut ops. Inlined into an outer proof, the cuts propagate into
+   the outer's augmented goal naturally.
+3. **`inline_lemma_chain`** — lemma A uses lemma B uses ... a
+   chain. Recursive splicing should produce a correct combined
+   program. Optional, defer if the first two pass cleanly.
+
+#### Implementation order
+
+1. New module `lemma_inliner.{h,cpp}` (~150 LOC).
+2. Change `LKRtoComb`'s registry type from
+   `LemmaCombProofs` (name → CombProof) to `LemmaPrograms`
+   (name → LKR program).
+3. Wire `inline_lemmas` into `LKRtoComb::apply` before alpha_rename.
+4. Update existing tests to construct the registry with LKR programs.
+5. Add the new tests above.
+6. The leaf builder `build_leaf_close_by_lemma` (§4.11) becomes
+   dead code in the normal path but stays as a safety net for
+   unspliced `CloseByLemma` (returns a clear error).
+
 ## 5. Soundness contract
 
 **Input gate**:

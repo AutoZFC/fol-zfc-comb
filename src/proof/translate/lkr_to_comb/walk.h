@@ -16,6 +16,7 @@
 //   - Branching: And (multiplicative, both-strong + degenerate cases).
 //   - Cut, Contraction, Forall, Exists, CloseByLemma deferred.
 
+#include "lemma_inliner.h"
 #include "sequent_replay.h"
 #include "tree.h"
 
@@ -33,7 +34,13 @@ namespace logic::proof::translate::lkr_to_comb {
 // Mirror of LemmaCombProofs in lkr_to_comb.h. We can't include
 // lkr_to_comb.h here (it transitively depends on us); instead we keep
 // the typedef in both places — they're identical.
-using LemmaCombProofs_ = std::unordered_map<std::string, comb::CombProof>;
+//
+// After Strategy A (§4.12): the registry holds LKR programs, not
+// CombProofs. CloseByLemma is spliced out by the lemma_inliner
+// pre-pass before walk runs, so this map is consulted only by
+// build_leaf_close_by_lemma as a safety-net (which should never fire
+// for spliced programs).
+using LemmaCombProofs_ = LemmaPrograms;
 
 struct WalkContext {
     FormulaBuilder&             builder;

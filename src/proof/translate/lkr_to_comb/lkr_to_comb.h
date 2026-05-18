@@ -16,6 +16,8 @@
 // Program<comb::Instr>. Comb is the ultimate witness layer per Hughes
 // Theorem 6.4 + 15.1.
 
+#include "lemma_inliner.h"
+
 #include "src/core/formula.h"
 #include "src/proof/comb/comb_proof.h"
 #include "src/proof/lkr/ops.h"
@@ -26,10 +28,12 @@
 
 namespace logic::proof::translate::lkr_to_comb {
 
-// Registry of previously-translated lemma combinatorial proofs, used by
-// CloseByLemma via Strategy B (cut-via-§15). Caller populates this as
-// theorems are proven and translated.
-using LemmaCombProofs = std::unordered_map<std::string, comb::CombProof>;
+// Registry of previously-proven lemmas, used by `CloseByLemma` via
+// Strategy A (LKR-level inlining; see LKR_TO_COMB_DESIGN.md §4.12).
+// Each entry's LKR program must standalone-verify under LKRVerifier
+// against the lemma's formula. Caller populates this as theorems are
+// translated.
+using LemmaCombProofs = LemmaPrograms;
 
 class LKRtoComb {
 public:

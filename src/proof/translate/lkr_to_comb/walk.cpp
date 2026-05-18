@@ -73,103 +73,19 @@ util::Result<comb::CombProof> build_leaf_close_by_lemma(
     const lkr::CloseByLemma&                     op,
     const std::vector<std::vector<size_t>>&      entry_positions)
 {
-    auto it = cc.lemmas.find(op.axiom.name);
-    if (it == cc.lemmas.end()) {
-        return MAKE_ERROR
-            << "close_by_lemma: lemma '" << op.axiom.name
-            << "' not in registry";
-    }
-    const comb::CombProof& lemma_cp = it->second;
-    if (entry_positions.empty()) {
-        return MAKE_ERROR << "close_by_lemma: empty sequent";
-    }
-    // Strategy B precondition: the cut formula (φ_L) is the last entry
-    // of the LEFT subgoal. Its canonical positions are
-    // entry_positions.back().
-    const auto& lemma_target_positions = entry_positions.back();
-    if (lemma_cp.target.labels.size() != lemma_target_positions.size()) {
-        return MAKE_ERROR
-            << "close_by_lemma: lemma '" << op.axiom.name
-            << "' vertex count (" << lemma_cp.target.labels.size()
-            << ") doesn't match cut formula positions ("
-            << lemma_target_positions.size() << ")";
-    }
-
-    // σ build (LKR_TO_COMB_DESIGN.md §4.11): for each binder vertex
-    // b in lemma_cp.target, pair its lemma-canonical var with the
-    // outer-canonical var at the position-remapped vertex. Fograph
-    // preserves binder kind under the structural iso between
-    // lemma.target and the outer slice (both built from the same
-    // formula), so kind/pred parity is a precondition we verify here.
-    std::unordered_map<var_index, var_index> sigma;
-    for (size_t i = 0; i < lemma_cp.target.labels.size(); ++i) {
-        const comb::VertexLabel& lbl_L = lemma_cp.target.labels[i];
-        const comb::VertexLabel& lbl_O =
-            cc.canonical_target.labels[lemma_target_positions[i]];
-        if (lbl_L.kind != lbl_O.kind) {
-            return MAKE_ERROR
-                << "close_by_lemma: lemma '" << op.axiom.name
-                << "' label kind mismatch at vertex " << i
-                << " (lemma=" << static_cast<int>(lbl_L.kind)
-                << ", outer=" << static_cast<int>(lbl_O.kind) << ")";
-        }
-        if (lbl_L.kind == comb::VertexKind::Binder) {
-            if (lbl_L.is_existential != lbl_O.is_existential) {
-                return MAKE_ERROR
-                    << "close_by_lemma: lemma '" << op.axiom.name
-                    << "' binder polarity mismatch at vertex " << i;
-            }
-            sigma[lbl_L.var] = lbl_O.var;
-        } else if (lbl_L.kind == comb::VertexKind::Atom) {
-            if (lbl_L.pred != lbl_O.pred || lbl_L.negated != lbl_O.negated) {
-                return MAKE_ERROR
-                    << "close_by_lemma: lemma '" << op.axiom.name
-                    << "' atom label mismatch at vertex " << i;
-            }
-        }
-    }
-
-    // σ_T: simultaneous substitution on Fixed terms. Mirrors
-    // alpha_rename.cpp's rewrite_term_simultaneous — Gen and other
-    // Term shapes pass through unchanged.
-    auto sigma_T = [&sigma](const Term& t) -> Term {
-        if (t.is_fixed()) {
-            auto it = sigma.find(t.as_variable());
-            if (it != sigma.end()) return Term::fixed(it->second);
-        }
-        return t;
-    };
-
-    comb::CombProof cp;
-    cp.target = cc.canonical_target;
-    cp.source = lemma_cp.source;  // edges/links inherited; dualizer rebuilt below
-    cp.source.dualizer.clear();
-    for (const auto& [x_L, t_L] : lemma_cp.source.dualizer) {
-        auto sigma_it = sigma.find(x_L);
-        if (sigma_it == sigma.end()) {
-            return MAKE_ERROR
-                << "close_by_lemma: lemma '" << op.axiom.name
-                << "' dualizer key " << x_L
-                << " is not a lemma binder var (corrupt lemma proof)";
-        }
-        var_index x_O = sigma_it->second;
-        cp.source.dualizer.emplace(x_O, sigma_T(t_L));
-    }
-
-    cp.fibration.reserve(lemma_cp.fibration.size());
-    for (size_t fib : lemma_cp.fibration) {
-        if (fib >= lemma_target_positions.size()) {
-            return MAKE_ERROR
-                << "close_by_lemma: lemma fibration position " << fib
-                << " out of remap range";
-        }
-        cp.fibration.push_back(lemma_target_positions[fib]);
-    }
-
-    // Propagate the lemma's dependency-tracking last_used through.
-    cp.last_used = lemma_cp.last_used;
-    cp.last_used.insert(op.axiom.name);
-    return cp;
+    // After Strategy A (LKR_TO_COMB_DESIGN.md §4.12), CloseByLemma ops
+    // are spliced out of the LKR program by the lemma_inliner pre-pass
+    // before walk runs. If walk encounters one, the pre-pass either
+    // wasn't run or the lemma was missing from the registry — both are
+    // translator bugs that should surface here as a clear error rather
+    // than as an obscure verifier failure downstream.
+    (void)cc;
+    (void)entry_positions;
+    return MAKE_ERROR
+        << "walk(CloseByLemma): op for lemma '" << op.axiom.name
+        << "' reached the walk; lemma_inliner pre-pass should have "
+        << "spliced it (Strategy A, §4.12). Likely cause: lemma not "
+        << "in the registry, or pipeline ordering bug.";
 }
 
 // =====================================================================
