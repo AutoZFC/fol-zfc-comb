@@ -13,3 +13,21 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# axiom_rewrap: boundary-wrap ND→ND pass (Phase 2).
+# Emits assume(H) + body + implies_intro + qed. Per AXIOM_REWRAP_DESIGN.md §7.2.
+cc_library(
+    name = "axiom_rewrap",
+    srcs = ["axiom_rewrap.cpp"],
+    hdrs = ["axiom_rewrap.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":theorem_axioms",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)

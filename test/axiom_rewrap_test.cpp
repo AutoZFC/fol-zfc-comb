@@ -13,17 +13,22 @@
 #include "src/core/formula.h"
 #include "src/parser/parser.h"
 #include "src/proof/nd/lowering.h"
+#include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/axiom_rewrap/axiom_rewrap.h"
 #include "src/proof/translate/axiom_rewrap/theorem_axioms.h"
 #include "src/runtime/runtime.h"
 
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <variant>
 #include <vector>
 
 using namespace logic;
 using namespace logic::proof;
+using logic::proof::translate::axiom_rewrap::AxiomRewrap;
+using logic::proof::translate::axiom_rewrap::RewrapResult;
 using logic::proof::translate::axiom_rewrap::TheoremAxiomMap;
 using logic::proof::translate::axiom_rewrap::compute_transitive_axioms;
 
@@ -328,9 +333,175 @@ void test_theorem_not_in_registry_errors() {
     EXPECT_TRUE(r.is_error());
 }
 
+// =========================================================================
+// Phase 2: AxiomRewrap::apply — boundary wrap mechanism.
+// =========================================================================
+
+// Helper: count Assume ops in a program (excluding ones with AST formulas).
+int count_synthetic_assume(const Program<nd::Instr>& prog) {
+    int n = 0;
+    for (const auto& instr : prog.instrs) {
+        if (const auto* a = std::get_if<nd::Assume>(&instr)) {
+            if (a->resolved.has_value() && !a->formula) ++n;
+        }
+    }
+    return n;
+}
+
+// =========================================================================
+// Phase 2 Test 1: apply on a proof with no axiom uses → identity
+// =========================================================================
+void test_apply_no_axioms_identity() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim p_self: p -> p
+        proof p_self:
+            h = assume p
+            h2 = implies_intro h
+            qed h2
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    size_t input_size = prog.instrs.size();
+    auto claim = rt.context().find_claim("p_self");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
+
+    const auto& res = r.value();
+    EXPECT_EQ(res.axioms.size(), size_t{0});
+    EXPECT_EQ(res.wrapped_goal, goal);
+    EXPECT_EQ(res.proof.instrs.size(), input_size);
+    EXPECT_EQ(count_synthetic_assume(res.proof), 0);
+}
+
+// =========================================================================
+// Phase 2 Test 2: apply on a proof using one axiom → wrapped
+// Boundary scaffold only — Phase 2 does NOT drop the body's Use(A).
+// The wrap produces a verifiable H → φ proof regardless.
+// =========================================================================
+void test_apply_single_axiom_wrap() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_true: forall x. p(x)
+        claim p_y: forall y. p(y)
+        proof p_y:
+            fix y
+            h = use a_true
+            h2 = forall_elim h, y
+            h3 = forall_intro h2
+            qed h3
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    size_t input_size = prog.instrs.size();
+    auto claim = rt.context().find_claim("p_y");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "apply fail: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    const auto& res = r.value();
+    EXPECT_EQ(res.axioms.size(), size_t{1});
+    if (res.axioms.size() == 1) {
+        EXPECT_EQ(res.axioms[0], std::string("a_true"));
+    }
+    // Wrapped goal != original goal (now H → φ).
+    EXPECT_TRUE(res.wrapped_goal != goal);
+    // Layout: +1 Assume (prelude), -1 Qed (dropped), +2 (ImpliesIntro+Qed).
+    EXPECT_EQ(res.proof.instrs.size(), input_size + 2);
+    EXPECT_EQ(count_synthetic_assume(res.proof), 1);
+
+    // Output gate already ran NDVerifier inside apply(); also re-verify
+    // explicitly to make the contract visible at the test layer.
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = res.proof;
+    auto vr = verifier.verify(rt.context(), res.wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify fail: " << vr.error().to_string() << "\n";
+    }
+}
+
+// =========================================================================
+// Phase 2 Test 3: apply on a proof using two axioms → conjunction H
+// =========================================================================
+void test_apply_two_axioms_wrap() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom b_ax: q2
+        axiom a_ax: q1
+        claim q1_and_q2: q1 & q2
+        proof q1_and_q2:
+            ha = use a_ax
+            hb = use b_ax
+            hab = and_intro ha, hb
+            qed hab
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    auto claim = rt.context().find_claim("q1_and_q2");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "apply fail: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    const auto& res = r.value();
+    // Two axioms, lex-sorted: a_ax, b_ax.
+    EXPECT_EQ(res.axioms.size(), size_t{2});
+    if (res.axioms.size() == 2) {
+        EXPECT_EQ(res.axioms[0], std::string("a_ax"));
+        EXPECT_EQ(res.axioms[1], std::string("b_ax"));
+    }
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = res.proof;
+    auto vr = verifier.verify(rt.context(), res.wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify fail: " << vr.error().to_string() << "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
+    // Phase 1 — compute_transitive_axioms
     test_empty_axiom_set();
     test_single_axiom_used_once();
     test_same_axiom_used_many_times();
@@ -338,6 +509,11 @@ int main() {
     test_one_theorem_dep();
     test_chained_theorem_deps();
     test_theorem_not_in_registry_errors();
+
+    // Phase 2 — AxiomRewrap::apply boundary wrap
+    test_apply_no_axioms_identity();
+    test_apply_single_axiom_wrap();
+    test_apply_two_axioms_wrap();
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";

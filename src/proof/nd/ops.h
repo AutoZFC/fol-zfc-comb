@@ -38,9 +38,17 @@ struct Fix {
 // Assume opens an assumption scope and derives its formula. The deferred
 // AST is parsed at execute time against the verifier's name->Term table,
 // matching today's runtime behavior.
+//
+// `resolved`, if set, supplies the assumed formula directly and bypasses
+// AST parsing. This path exists for translator-synthesized Assume ops
+// (e.g., axiom_rewrap's boundary `assume H`) where the formula is already
+// a closed sentence built via FormulaBuilder and has no source-level
+// var-name dependencies. Mutually exclusive with `formula` in practice:
+// lowering sets `formula` (AST-deferred); translators set `resolved`.
 struct Assume {
     OpHeader h{};
-    std::shared_ptr<ASTNode> formula{};
+    std::shared_ptr<ASTNode>      formula{};
+    std::optional<FormulaHandle>  resolved{};
 };
 
 // Let creates a formula handle without deriving it. Used as a payload for

@@ -120,6 +120,8 @@ cc_test(
         "//src/parser",
         "//src/proof:proof_value",
         "//src/proof/nd:lowering",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/axiom_rewrap:axiom_rewrap",
         "//src/proof/translate/axiom_rewrap:theorem_axioms",
         "//src/runtime",
     ],

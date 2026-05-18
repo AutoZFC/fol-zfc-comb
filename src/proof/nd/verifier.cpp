@@ -201,9 +201,15 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const Fix& op) {
 }
 
 util::ResultStatus exec_op(Session& s, uint32_t idx, const Assume& op) {
-    auto f = parse_deferred(s, op.formula.get(), "assume");
-    if (!f.ok()) return f.error();
-    FormulaHandle h = s.stack.assume(f.value());
+    FormulaHandle f;
+    if (op.resolved.has_value()) {
+        f = *op.resolved;
+    } else {
+        auto r = parse_deferred(s, op.formula.get(), "assume");
+        if (!r.ok()) return r.error();
+        f = r.value();
+    }
+    FormulaHandle h = s.stack.assume(f);
     s.bind_step(idx, h);
     return util::Ok();
 }
