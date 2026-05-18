@@ -60,6 +60,27 @@ cc_library(
     ],
 )
 
+# AlphaRename — pre-pass that aligns Forall eigens (and any free
+# fix-vars baked into Cut/Weakening formula handles) with the canonical
+# binder vars Fograph allocates for the §15-augmented goal. Required
+# whenever the LKR program's eigens diverge from Fograph's pre-order
+# allocation; see LKR_TO_COMB_DESIGN.md §7.5 (Option B).
+cc_library(
+    name = "alpha_rename",
+    srcs = ["alpha_rename.cpp"],
+    hdrs = ["alpha_rename.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cut_augment",
+        ":sequent_replay",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
 # §11.1 walk — recursive translation of DerivationTree → CombProof.
 cc_library(
     name = "walk",
@@ -101,6 +122,7 @@ cc_library(
     hdrs = ["lkr_to_comb.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":alpha_rename",
         ":cut_augment",
         ":input_gate",
         ":output_gate",

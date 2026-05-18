@@ -373,43 +373,73 @@ witness for the original goal.
 Each phase's tests verify the output of that phase's covered rules
 under `CombVerifier`. A phase doesn't ship until its tests pass.
 
-## 7.5. Known limitations (post-implementation, 2026-05-17)
+## 7.5. Quantifier var-mismatch — resolved (2026-05-18)
 
-After implementation through phase 8 (Cut + CloseByLemma), the
-end-to-end pipeline `ND → ND(iota-free) → LKR → CombProof` works for
-**quantifier-free** ND proofs (demonstrated in
-`test/lkr_to_comb_test.cpp::test_end_to_end_nd_to_comb_self_impl` on
-`p → p`).
+The pipeline `ND → ND(iota-free) → LKR → CombProof` now handles
+quantified goals end-to-end. The first quantified test
+(`test/lkr_to_comb_test.cpp::test_end_to_end_nd_to_comb_forall_self_impl`,
+goal `forall x. (p(x) → p(x))`) passes.
 
-For ND proofs containing `forall`/`exists` blocks, NDtoLKR emits Cut
-formulas that bake in ND's fix-var indices (e.g., `forall x. (¬p(0) ∨
-p(0))` where `0` is the ND trace's allocated var for the bound `x`).
-LKRtoComb builds the canonical target via `Fograph(augmented_goal)`,
-which allocates **fresh** binder vars per occurrence (`next_binder_var`
-incrementing from 0). The two var-allocation schemes diverge: a cut
-block's inner `∀` gets, say, canonical var 1, but the LKR Forall op
-uses eigen 0. The fonet's link check (verifier `verify_fonet`, args
-must unify under dualizer) then fails because the link's two source
-labels — read from the canonical target — have args with different
-fixed-var indices.
+Two coupled fixes were needed; both are math-grounded rather than
+patches around the verifier.
 
-**Fix options** (each substantial; deferred):
+### Fix 1 — alpha-rename pre-pass (Option B from the original design)
 
-- **Alpha-rename cut formulas** in `cut_augment` so that bound vars
-  match the LKR program's eigens. Requires walking each cut formula
-  and substituting; collisions with other formulas need fresh names.
-- **Use Fograph's allocation as authoritative** by alpha-renaming the
-  LKR program's Forall/Exists eigens to canonical positions. Pre-pass
-  over the LKR ops, computing the canonical var for each binder
-  occurrence in advance.
-- **Extend Fograph** to accept a pre-set var assignment (per-binder
-  override). LKRtoComb computes the override map from the LKR
-  program's eigens.
+Module: `src/proof/translate/lkr_to_comb/alpha_rename.{h,cpp}`.
 
-The math is unaffected; this is a pure implementation-coupling issue
-between two upstream-independent var allocators (ND's trace +
-NDtoLKR's `emit_close`, vs. Fograph's `next_binder_var`). Any of the
-three fixes above closes it.
+NDtoLKR emits `Forall(eigen=K)` where `K` is ND's trace fix-var, and
+emits cut formulas whose atom args contain `Fixed(K_outer)` for any
+outer-Forall fix-var still in scope. Independently, Fograph allocates
+fresh binder vars in pre-order over the §15-augmented goal. The two
+allocators are disjoint, so the LKR program's eigens generally don't
+match Fograph's. After running cut_augment / sequent_replay / Fograph
+on the original program, the pre-pass:
+
+1. computes `binder_pos` for each `Forall` op as
+   `entry_positions[i][principal][0]`;
+2. reads `canonical_var = Fograph_target.labels[binder_pos].var`;
+3. records `eigen → canonical_var` in a rename map;
+4. rewrites the program: `Forall.eigen` to `canonical_var`, and every
+   `Term::fixed(old)` inside `Cut.cut_formula` / `Weakening.formula`
+   to `Term::fixed(new)`. The rewrite is a *simultaneous*
+   substitution (one-pass tree walk) — chained single substitutions
+   clobber themselves whenever the map is a permutation
+   (e.g. `{0→1, 1→0}`).
+
+`Exists`'s witness `TermRef` resolves through `term_env`, which
+inherits the renamed `Forall` eigen automatically.
+
+Fograph's allocation order depends only on the augmented goal's
+structure, not on its atom args, so the canonical_var at any position
+is the same whether computed against the original or the renamed
+program. That's what makes the pre-pass well-defined.
+
+### Fix 2 — derive source binding edges from labels (Hughes Def. 3.1)
+
+Module: `src/proof/translate/lkr_to_comb/walk.cpp` (`derive_binding_edges`
+post-pass).
+
+Once vars align, a second issue surfaces: the verifier's unique-lift
+binding fibration check fails on source atoms that reference an outer
+binder's var but live in cut blocks rather than the outer Forall's
+principal body. The previous code added source binding edges inside
+each rule (`rule_forall`: edges to `P` only; `rule_exists`: same), so
+atoms in *carried-over* sequent entries that share the binder var got
+no source binding edge to the binder vertex.
+
+The math is unambiguous: in a fograph (Def. 3.1) — and hence in a
+fonet (Def. 5.3), which is a linked fograph — binding edges are
+**derived** from labels: `(b, a)` is a binding edge iff `b` is a binder
+with var `v` and `a` is an atom whose args contain `Fixed(v)`.
+Fograph's own `add_binding_edges` builds the target this way. The
+source must follow the same recipe.
+
+Implementation: `rule_forall` and `rule_exists` no longer construct
+binding edges; a single post-pass `derive_binding_edges` at the end of
+`walk` clears `source.binding_edges` and rebuilds them by scanning
+source vertices (labels resolved via `target.labels[fibration[v]]`).
+This is the single source of truth and matches Hughes' definition
+verbatim.
 
 ## 8. Open questions
 

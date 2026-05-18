@@ -372,15 +372,15 @@ util::Result<comb::CombProof> rule_forall(
         return child;
     }
 
-    // Case B: add binder vertex; no cograph edges (universal is +-attached);
-    // binding edges from new binder to each P vertex.
+    // Case B: add binder vertex; no cograph edges (universal is +-attached).
+    // Binding edges are NOT added here — they're derived from labels in a
+    // single post-pass at the end of walk(), matching Fograph's spec for
+    // the target. See comment in derive_binding_edges() below.
     comb::CombProof out = std::move(child);
     size_t new_v = out.source.num_vertex;
     out.source.num_vertex = new_v + 1;
     out.fibration.push_back(binder_pos);
-    for (size_t p : P) {
-        out.source.binding_edges.push_back({new_v, p});
-    }
+    (void)P;
     return out;
 }
 
@@ -422,11 +422,12 @@ util::Result<comb::CombProof> rule_exists(
     out.source.num_vertex = new_v + 1;
     out.fibration.push_back(binder_pos);
 
-    // Cograph + binding edges: existential binder is ×-attached to its
-    // body literals in target; mirror in source for the witness portion.
+    // Cograph edges: existential binder is ×-attached to its body
+    // literals in target; mirror in source for the witness portion.
+    // Binding edges are derived from labels in a single post-pass at the
+    // end of walk().
     for (size_t p : P) {
         out.source.cograph_edges.push_back({new_v, p});
-        out.source.binding_edges.push_back({new_v, p});
     }
 
     // Dualizer: δ(eigen_x) = witness. eigen_x is the canonical binder's
@@ -452,9 +453,63 @@ util::Result<comb::CombProof> rule_exists(
     return out;
 }
 
+// =====================================================================
+// Source binding-edge derivation (Hughes Def. 3.1, applied to fonet).
+//
+// In a fograph — and hence in a fonet, which is a linked fograph — the
+// binding edges aren't free parameters: they're DERIVED from labels.
+// Concretely, for each binder vertex b with var v and each atom vertex
+// a whose args contain Fixed(v), the pair (b, a) is a binding edge.
+//
+// Fograph builds the target's binding edges this way in
+// fograph.cpp::add_binding_edges. The source must follow the same
+// recipe — anything else risks producing fonets whose binding edges
+// fail the verifier's unique-lift fibration check against the target.
+//
+// We compute source labels via fibration (source_label(v) =
+// target.labels[fibration[v]]), then run the same per-vertex scan.
+// Any binding edges accumulated by per-rule code earlier in walk are
+// discarded; this is the single source of truth.
+void derive_binding_edges(comb::CombProof& cp,
+                          const comb::Fograph& target) {
+    cp.source.binding_edges.clear();
+    const size_t n = cp.source.num_vertex;
+    for (size_t b = 0; b < n; ++b) {
+        const comb::VertexLabel& b_lbl = target.labels[cp.fibration[b]];
+        if (b_lbl.kind != comb::VertexKind::Binder) continue;
+        var_index v = b_lbl.var;
+        for (size_t a = 0; a < n; ++a) {
+            if (a == b) continue;
+            const comb::VertexLabel& a_lbl = target.labels[cp.fibration[a]];
+            if (a_lbl.kind != comb::VertexKind::Atom) continue;
+            for (const Term& arg : a_lbl.args) {
+                if (arg.is_fixed() && arg.as_variable() == v) {
+                    cp.source.binding_edges.push_back({b, a});
+                    break;
+                }
+            }
+        }
+    }
+}
+
+util::Result<comb::CombProof> walk_recursive(
+    WalkContext&           cc,
+    const DerivationTree&  tree);
+
 }  // namespace
 
 util::Result<comb::CombProof> walk(
+    WalkContext&           cc,
+    const DerivationTree&  tree)
+{
+    TRY_ASSIGN(cp, walk_recursive(cc, tree));
+    derive_binding_edges(cp, cc.canonical_target);
+    return cp;
+}
+
+namespace {
+
+util::Result<comb::CombProof> walk_recursive(
     WalkContext&           cc,
     const DerivationTree&  tree)
 {
@@ -474,7 +529,7 @@ util::Result<comb::CombProof> walk(
     }
 
     if (auto* lin = std::get_if<LinearNode>(&tree.node)) {
-        TRY_ASSIGN(child, walk(cc, *lin->child));
+        TRY_ASSIGN(child, walk_recursive(cc, *lin->child));
         const auto& posv  = cc.replay.entry_positions[lin->op_idx];
         const auto& instr = cc.prog.instrs[lin->op_idx];
         if (auto* op = std::get_if<lkr::Forall>(&instr)) {
@@ -508,14 +563,14 @@ util::Result<comb::CombProof> walk(
         const auto& posv  = cc.replay.entry_positions[br->op_idx];
         const auto& instr = cc.prog.instrs[br->op_idx];
         if (auto* op = std::get_if<lkr::And>(&instr)) {
-            TRY_ASSIGN(left_cp,  walk(cc, *br->left));
-            TRY_ASSIGN(right_cp, walk(cc, *br->right));
+            TRY_ASSIGN(left_cp,  walk_recursive(cc, *br->left));
+            TRY_ASSIGN(right_cp, walk_recursive(cc, *br->right));
             return rule_and(cc, *op, std::move(left_cp),
                              std::move(right_cp), seq, posv);
         }
         if (std::holds_alternative<lkr::Cut>(instr)) {
-            TRY_ASSIGN(left_cp,  walk(cc, *br->left));
-            TRY_ASSIGN(right_cp, walk(cc, *br->right));
+            TRY_ASSIGN(left_cp,  walk_recursive(cc, *br->left));
+            TRY_ASSIGN(right_cp, walk_recursive(cc, *br->right));
             // The Cut's LEFT subgoal has θ as its last entry. Use the
             // FIRST op-position inside the LEFT subtree to read the
             // post-Cut sequent's positions for the cut entry.
@@ -575,5 +630,7 @@ util::Result<comb::CombProof> walk(
 
     return MAKE_ERROR << "walk: unreachable tree node variant";
 }
+
+}  // namespace
 
 }  // namespace logic::proof::translate::lkr_to_comb

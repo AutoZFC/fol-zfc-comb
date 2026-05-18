@@ -268,6 +268,57 @@ void test_end_to_end_nd_to_comb_self_impl() {
     ++g_passed;
 }
 
+// Quantified end-to-end. Goal: forall x. (p(x) → p(x)). Exercises the
+// alpha-rename pre-pass: NDtoLKR emits Forall(eigen=K) where K is ND's
+// trace fix-var; LKRtoComb's canonical target allocates a different
+// fresh var for the cut formula's binder. The pre-pass renames K to
+// the canonical var so the fibration's atom args match the canonical
+// target's labels (LKR_TO_COMB_DESIGN.md §7.5 fix).
+void test_end_to_end_nd_to_comb_forall_self_impl() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim pp_q: forall x. (p(x) -> p(x))
+
+        proof pp_q:
+            fix x
+            h_a = assume p(x)
+            h_i = implies_intro h_a
+            h_f = forall_intro h_i
+            qed h_f
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "load: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto nd_r = nd::lower(parsed.value().proofs[0]);
+    if (!nd_r.ok()) {
+        std::cerr << "lower: " << nd_r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto nd_prog = std::move(nd_r).unwrap();
+    auto claim = rt.context().find_claim("pp_q");
+    if (!claim.has_value()) {
+        std::cerr << "claim not found\n"; ++g_failed; return;
+    }
+    FormulaHandle goal = claim.value().get().root();
+
+    translate::nd_to_lkr::NDtoLKR ndl(rt.context(), goal);
+    auto lkr_r = ndl.apply(nd_prog);
+    if (!lkr_r.ok()) {
+        std::cerr << "nd_to_lkr: " << lkr_r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    translate::lkr_to_comb::LKRtoComb lc(rt.context(), goal, lemmas);
+    auto cp_r = lc.apply(lkr_r.value());
+    if (!cp_r.ok()) {
+        std::cerr << "lkr_to_comb: " << cp_r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    ++g_passed;
+}
+
 }  // namespace
 
 int main() {
@@ -277,6 +328,7 @@ int main() {
     test_lkr_to_comb_cut_no_use();
     test_lkr_to_comb_cut_with_lemma();
     test_end_to_end_nd_to_comb_self_impl();
+    test_end_to_end_nd_to_comb_forall_self_impl();
 
     std::cout << "lkr_to_comb_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
