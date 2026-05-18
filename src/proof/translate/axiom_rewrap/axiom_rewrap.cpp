@@ -3,19 +3,26 @@
 #include "src/proof/nd/verifier.h"
 #include "src/proof/translate/pass.h"   // overloaded
 
+#include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace logic::proof::translate::axiom_rewrap {
 
 namespace {
 
-// Shift every StepRef and TermRef field in `instr` by `k`.
-// Mirrors iota_elim/proof_rewriter.cpp::rewrite_refs but with a uniform
-// additive shift (no index map). Exhaustive on the nd::Instr variant.
-nd::Instr shift_refs(const nd::Instr& instr, uint32_t k) {
-    auto S = [k](StepRef r) { return StepRef{r.idx + k}; };
-    auto T = [k](TermRef r) { return TermRef{r.idx + k}; };
+constexpr uint32_t kInvalid = static_cast<uint32_t>(-1);
+
+// Remap every StepRef and TermRef field in `instr` through `remap`.
+// `remap[i]` is the new index for input instr-index `i`. StepRefs and
+// TermRefs share the same index space (both keyed by the instr that
+// bound them — Fix/ExistsElim/IotaElim for terms, all other ops for
+// steps), so a single table covers both. Exhaustive on the nd::Instr
+// variant — adding a new op kind here is a compile error.
+nd::Instr remap_refs(const nd::Instr& instr, const std::vector<uint32_t>& remap) {
+    auto S = [&](StepRef r) { return StepRef{remap[r.idx]}; };
+    auto T = [&](TermRef r) { return TermRef{remap[r.idx]}; };
 
     return std::visit(overloaded{
         [&](const nd::Fix& op)        -> nd::Instr { return nd::Instr{op}; },
@@ -131,11 +138,6 @@ nd::Instr shift_refs(const nd::Instr& instr, uint32_t k) {
         },
 
         [&](const nd::IotaElim& op) -> nd::Instr {
-            // Input gate would normally reject iota_elim (pipeline runs
-            // iota_elim translator upstream); shift defensively in case
-            // axiom_rewrap is called on a non-iota-free input. The
-            // downstream NDVerifier will catch the iota presence if it
-            // matters semantically.
             nd::IotaElim o = op; o.exists_formula = S(op.exists_formula);
             return nd::Instr{o};
         },
@@ -145,8 +147,6 @@ nd::Instr shift_refs(const nd::Instr& instr, uint32_t k) {
     }, instr);
 }
 
-// Locate the Qed op (expected to be the terminating op at program tail).
-// Returns its index in prog.instrs.
 util::Result<uint32_t> find_qed(const Program<nd::Instr>& prog) {
     for (uint32_t i = 0; i < prog.instrs.size(); ++i) {
         if (std::holds_alternative<nd::Qed>(prog.instrs[i])) {
@@ -170,6 +170,69 @@ FormulaHandle build_conjunction(GlobalContext& ctx,
     return h;
 }
 
+// Emit the prelude: synthetic Assume(H) followed by the and_elim chain
+// that lands each axiom on its own step. Populates `axiom_step_table`
+// mapping axiom name → StepRef in the output.
+//
+// Layout (n = |axioms|, H is left-associated lex-sorted conjunction):
+//   [0]                     Assume(H)                                       ← binds h = H
+//   [1 .. n-1]              AndElimL of h, then of prev result, …          ← (n-1) ops, peel left
+//                                                                            h_2 = (((A_1∧A_2)∧A_3)∧…∧A_{n-1})
+//                                                                            h_{n-1} = (A_1∧A_2)
+//                                                                            h_1 = A_1                        ← bound at index n-1
+//   [n .. 2n-2]             AndElimR of h, of h_2, …, of h_{n-1}            ← (n-1) ops, extract A_n, …, A_2
+//   axiom_step_table[A_1] = StepRef{n-1}        (= h_1 directly)
+//   axiom_step_table[A_k] = AndElimR's index for k = 2..n
+//
+// n = 1: prelude is just [Assume]; axiom_step_table[A_1] = StepRef{0}.
+// n = 0: caller short-circuits before reaching here.
+void emit_prelude(GlobalContext& /*ctx*/,
+                  const std::vector<std::string>& axioms,
+                  FormulaHandle H,
+                  Program<nd::Instr>& out,
+                  std::unordered_map<std::string, StepRef>& axiom_step_table) {
+    nd::Assume assume_h{};
+    assume_h.resolved = H;
+    out.instrs.push_back(nd::Instr{assume_h});
+    StepRef h_step{0};
+
+    const size_t n = axioms.size();
+    if (n == 1) {
+        axiom_step_table[axioms[0]] = h_step;
+        return;
+    }
+
+    // h_steps[i] is the StepRef binding h_{n-i}:
+    //   h_steps[0]   = h_n   = h
+    //   h_steps[1]   = h_{n-1}
+    //   …
+    //   h_steps[n-1] = h_1 = A_1
+    std::vector<StepRef> h_steps;
+    h_steps.reserve(n);
+    h_steps.push_back(h_step);
+
+    // (n-1) AndElimL ops, building h_{n-1} … h_1.
+    for (size_t i = 0; i + 1 < n; ++i) {
+        nd::AndElimL op{};
+        op.of = h_steps[i];
+        uint32_t idx = static_cast<uint32_t>(out.instrs.size());
+        out.instrs.push_back(nd::Instr{op});
+        h_steps.push_back(StepRef{idx});
+    }
+
+    // (n-1) AndElimR ops, extracting A_n, A_{n-1}, …, A_2.
+    for (size_t i = 0; i + 1 < n; ++i) {
+        nd::AndElimR op{};
+        op.of = h_steps[i];        // h_{n-i} = (((A_1∧…∧A_{n-i-1}) ∧ A_{n-i}))
+        uint32_t idx = static_cast<uint32_t>(out.instrs.size());
+        out.instrs.push_back(nd::Instr{op});
+        axiom_step_table[axioms[n - 1 - i]] = StepRef{idx};
+    }
+
+    // A_1 = h_1.
+    axiom_step_table[axioms[0]] = h_steps[n - 1];
+}
+
 }  // namespace
 
 util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
@@ -179,11 +242,7 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
 
     // n = 0: identity pass-through.
     if (axioms.empty()) {
-        return RewrapResult{
-            in,            // copy
-            goal_,
-            std::move(axioms),
-        };
+        return RewrapResult{in, goal_, std::move(axioms)};
     }
 
     // Build H and wrapped goal.
@@ -198,53 +257,67 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
     const auto& qed_op = std::get<nd::Qed>(in.instrs[qed_idx]);
     StepRef proved_step = qed_op.derived;
 
-    // Build wrapped program. Layout:
-    //   [0]                 Assume(H)             ← prelude (size 1)
-    //   [1 .. qed_idx]      body shifted by 1     (input's pre-Qed ops)
-    //   [qed_idx + 1 ..]    body shifted by 1     (any post-Qed ops, rare)
-    //   [N]                 ImpliesIntro(...)     ← postlude
-    //   [N + 1]             Qed(...)
-    constexpr uint32_t kPrelude = 1;  // Phase 2: no extracts yet
-
     Program<nd::Instr> out;
     out.claim_name = in.claim_name;
-    out.instrs.reserve(in.instrs.size() + 2);  // -1 Qed dropped + 2 added
+    out.instrs.reserve(in.instrs.size() + 2 * axioms.size());
 
-    // Prelude: synthetic Assume(H).
-    nd::Assume assume_h{};
-    assume_h.resolved = H;
-    out.instrs.push_back(nd::Instr{assume_h});
+    // ===== Prelude: Assume(H) + and_elim chain =====
+    std::unordered_map<std::string, StepRef> axiom_step_table;
+    emit_prelude(ctx_, axioms, H, out, axiom_step_table);
 
-    // Body: copy all input instrs except Qed, shifted by kPrelude.
+    // ===== Body: copy with remap; drop direct axiom Uses =====
+    //
+    // step_remap[input_idx] is the output StepRef.idx for an input op's
+    // result. For dropped Use(A), the entry points at axiom_step_table[A]'s
+    // StepRef so downstream refs alias the cached extract. For all other
+    // ops, the entry is the op's new instr index in `out`.
+    std::vector<uint32_t> step_remap(in.instrs.size(), kInvalid);
+
     for (uint32_t i = 0; i < in.instrs.size(); ++i) {
-        if (i == qed_idx) continue;
-        out.instrs.push_back(shift_refs(in.instrs[i], kPrelude));
+        if (i == qed_idx) continue;   // original Qed is replaced by postlude
+
+        // Drop direct-axiom Use ops: alias to the cached extract.
+        // Theorem Use ops are kept verbatim (Phase 6 will wrap them).
+        if (const auto* u = std::get_if<nd::Use>(&in.instrs[i])) {
+            if (ctx_.find_axiom(u->axiom.name).has_value()) {
+                step_remap[i] = axiom_step_table.at(u->axiom.name).idx;
+                continue;
+            }
+        }
+
+        uint32_t out_idx = static_cast<uint32_t>(out.instrs.size());
+        step_remap[i] = out_idx;
+        out.instrs.push_back(remap_refs(in.instrs[i], step_remap));
     }
 
-    // Postlude: ImpliesIntro on the proved step, then Qed.
+    // ===== Postlude: ImpliesIntro + Qed =====
     uint32_t impl_intro_idx = static_cast<uint32_t>(out.instrs.size());
     nd::ImpliesIntro impl{};
-    impl.conclusion = StepRef{proved_step.idx + kPrelude};
+    impl.conclusion = StepRef{step_remap[proved_step.idx]};
     out.instrs.push_back(nd::Instr{impl});
 
     nd::Qed qed{};
     qed.derived = StepRef{impl_intro_idx};
     out.instrs.push_back(nd::Instr{qed});
 
-    // Rebuild step_index: each named entry shifts by kPrelude; the Qed
-    // entry (if any) is dropped. The synthetic ops carry no source name.
+    // step_index: source-level step names map to new instr indices via
+    // step_remap. The synthetic prelude/postlude ops carry no source
+    // name; the dropped Qed entry is omitted. Use-aliased entries point
+    // at the cached extract.
     for (const auto& [name, idx] : in.step_index) {
         if (idx == qed_idx) continue;
-        out.step_index[name] = idx + kPrelude;
+        uint32_t new_idx = step_remap[idx];
+        if (new_idx != kInvalid) {
+            out.step_index[name] = new_idx;
+        }
     }
 
-    // Output gate: NDVerifier must accept the wrapped output against the
-    // wrapped goal.
+    // Output gate: NDVerifier must accept the wrapped output against H → φ.
     {
         nd::NDVerifier verifier;
         Proof p{};
         p.system = System::ND;
-        p.body   = out;  // copy into the variant
+        p.body   = out;
         auto vr = verifier.verify(ctx_, wrapped, p);
         if (!vr.ok()) {
             return MAKE_ERROR

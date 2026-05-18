@@ -348,6 +348,18 @@ int count_synthetic_assume(const Program<nd::Instr>& prog) {
     return n;
 }
 
+// Helper: count Use ops in `prog` that resolve to axioms in `ctx`.
+// Phase 4's contract is that this returns 0 in the rewrap output.
+int count_axiom_uses(const Program<nd::Instr>& prog, const GlobalContext& ctx) {
+    int n = 0;
+    for (const auto& instr : prog.instrs) {
+        if (const auto* u = std::get_if<nd::Use>(&instr)) {
+            if (ctx.find_axiom(u->axiom.name).has_value()) ++n;
+        }
+    }
+    return n;
+}
+
 // =========================================================================
 // Phase 2 Test 1: apply on a proof with no axiom uses → identity
 // =========================================================================
@@ -428,9 +440,11 @@ void test_apply_single_axiom_wrap() {
     }
     // Wrapped goal != original goal (now H → φ).
     EXPECT_TRUE(res.wrapped_goal != goal);
-    // Layout: +1 Assume (prelude), -1 Qed (dropped), +2 (ImpliesIntro+Qed).
-    EXPECT_EQ(res.proof.instrs.size(), input_size + 2);
+    // Layout (Phase 4): +1 Assume, -1 Qed, -1 Use(a_true), +2 (ImpliesIntro+Qed).
+    EXPECT_EQ(res.proof.instrs.size(), input_size + 1);
     EXPECT_EQ(count_synthetic_assume(res.proof), 1);
+    // Phase 4 contract: no axiom Use ops survive.
+    EXPECT_EQ(count_axiom_uses(res.proof, rt.context()), 0);
 
     // Output gate already ran NDVerifier inside apply(); also re-verify
     // explicitly to make the contract visible at the test layer.
@@ -486,6 +500,8 @@ void test_apply_two_axioms_wrap() {
         EXPECT_EQ(res.axioms[0], std::string("a_ax"));
         EXPECT_EQ(res.axioms[1], std::string("b_ax"));
     }
+    // Phase 4: axiom Uses dropped from body.
+    EXPECT_EQ(count_axiom_uses(res.proof, rt.context()), 0);
 
     nd::NDVerifier verifier;
     Proof p{};
@@ -662,6 +678,177 @@ void test_apply_body_classical_double_neg() {
     )", "p_holds");
 }
 
+// =========================================================================
+// Phase 4: Use(A) axiom drop + extraction chain.
+//
+// Output's axiom_step_table caches A_i once at the prelude; every body
+// Use(A_i) is dropped and downstream refs alias the cached extract. The
+// output has zero Use ops resolving to axioms. NDVerifier accepts H → φ.
+// =========================================================================
+
+// Phase 4 Test 1: single axiom used once → dropped; cached at prelude.
+void test_apply_axiom_dropped_no_other_uses() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_true: a_pred
+        claim a_again: a_pred
+        proof a_again:
+            h = use a_true
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    auto claim = rt.context().find_claim("a_again");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+    EXPECT_EQ(count_synthetic_assume(r.value().proof), 1);
+}
+
+// Phase 4 Test 2: single axiom used MANY times → cached once, all aliased.
+void test_apply_axiom_cached_across_multi_use() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom p_holds: p
+        claim p_and_p_and_p: p & p & p
+        proof p_and_p_and_p:
+            h1 = use p_holds
+            h2 = use p_holds
+            h3 = use p_holds
+            h12 = and_intro h1, h2
+            h123 = and_intro h12, h3
+            qed h123
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    auto claim = rt.context().find_claim("p_and_p_and_p");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << r.error().to_string() << "\n"; return;
+    }
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify fail: " << vr.error().to_string() << "\n";
+    }
+}
+
+// Phase 4 Test 3: two axioms, mixed uses → extraction chain (n=2),
+// 2 AndElim ops, both Uses dropped.
+void test_apply_two_axioms_dropped_with_extracts() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        axiom b_ax: b_pred
+        claim a_and_b: a_pred & b_pred
+        proof a_and_b:
+            ha = use a_ax
+            hb = use b_ax
+            hab = and_intro ha, hb
+            qed hab
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    auto claim = rt.context().find_claim("a_and_b");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
+    EXPECT_EQ(count_axiom_uses(r.value().proof, rt.context()), 0);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = verifier.verify(rt.context(), r.value().wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify fail: " << vr.error().to_string() << "\n";
+    }
+}
+
+// Phase 4 Test 4: three axioms → extraction chain has depth-2 left peel
+// (h_3 = and_elim_l h, h_2 = and_elim_l h_3 = and_elim_l h_3) plus
+// AndElimR's at h and h_3. Verifies the nested-extract algorithm.
+void test_apply_three_axioms_dropped_with_extracts() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom c_ax: c_pred
+        axiom a_ax: a_pred
+        axiom b_ax: b_pred
+        claim abc: a_pred & b_pred & c_pred
+        proof abc:
+            ha = use a_ax
+            hb = use b_ax
+            hc = use c_ax
+            hab = and_intro ha, hb
+            habc = and_intro hab, hc
+            qed habc
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    auto claim = rt.context().find_claim("abc");
+    if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    TheoremAxiomMap registry;
+    AxiomRewrap pass(rt.context(), goal, registry);
+    auto r = pass.apply(prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << r.error().to_string() << "\n"; return; }
+
+    const auto& res = r.value();
+    // Lex order: a_ax, b_ax, c_ax. H = ((a ∧ b) ∧ c).
+    EXPECT_EQ(res.axioms.size(), size_t{3});
+    EXPECT_EQ(count_axiom_uses(res.proof, rt.context()), 0);
+
+    nd::NDVerifier verifier;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = res.proof;
+    auto vr = verifier.verify(rt.context(), res.wrapped_goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify fail: " << vr.error().to_string() << "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -685,6 +872,12 @@ int main() {
     test_apply_body_negation_and_bottom();
     test_apply_body_exists_family();
     test_apply_body_classical_double_neg();
+
+    // Phase 4 — Use(A) axiom drop + extraction chain
+    test_apply_axiom_dropped_no_other_uses();
+    test_apply_axiom_cached_across_multi_use();
+    test_apply_two_axioms_dropped_with_extracts();
+    test_apply_three_axioms_dropped_with_extracts();
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";
