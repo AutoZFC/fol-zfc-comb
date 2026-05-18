@@ -141,7 +141,7 @@ and a test exercises the rule under the relevant verifier gate.
 | Exists       | LKR_TO_COMB_DESIGN.md §4.8 + §7.5  | walk.cpp::rule_exists                | nd_to_comb_forall_self                | ✓ done   |
 | And          | LKR_TO_COMB_DESIGN.md §4.9         | walk.cpp::rule_and                   | and_commute                           | ✓ done   |
 | Cut          | LKR_TO_COMB_DESIGN.md §4.10 + §15  | walk.cpp::rule_cut + cut_augment     | cut_no_use, cut_with_lemma            | ✓ done   |
-| CloseByLemma | LKR_TO_COMB_DESIGN.md §4.11 (B)    | walk.cpp::build_leaf_close_by_lemma  | cut_with_lemma                        | partial  |
+| CloseByLemma | LKR_TO_COMB_DESIGN.md §4.11        | walk.cpp::build_leaf_close_by_lemma  | cut_with_lemma                        | partial  |
 
 **`Weakening`** is "partial" because the current code returns
 `child` unchanged whenever a Weakening op fires. This is correct as
@@ -150,9 +150,12 @@ target's range, but breaks if Weakening introduces an entry outside
 that range. Spec extension: §4.4 needs an augmentation-style fix
 analogous to §15 Cut. See [roadmap §1A item 3].
 
-**`CloseByLemma`** is "partial" because it rejects lemmas with
-non-empty dualizer (no eigen-var remap implemented). Spec extension:
-§4.11 needs a dualizer-renaming clause. See [roadmap §1A item 4].
+**`CloseByLemma`** is "partial" because the implementation rejects
+lemmas with non-empty dualizer. The math spec for the σ remap is now
+in `LKR_TO_COMB_DESIGN.md §4.11` (Phase 1.2 of the roadmap); only the
+implementation is pending. Flipping this row to ✓ done requires
+implementing the σ-renaming in `build_leaf_close_by_lemma` and adding
+the three tests listed in §4.11's "Test plan" subsection.
 
 ### 4.2 ND → LKR (per-rule, Theorem B)
 

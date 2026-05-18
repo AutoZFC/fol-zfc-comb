@@ -490,17 +490,193 @@ Concretely:
 
 ### 4.11 `CloseByLemma(L)`
 
-Strategy B: require the closing op be preceded by `Cut(φ_L)` such that
-LEFT is the lemma's combinatorial proof.
+#### Rule semantics
 
-At the `CloseByLemma(L)`:
-- Look up `L` in `lemma_registry`. Get `comb::CombProof L_proof`.
-- The current open goal is the LEFT subgoal of the preceding `Cut`,
-  containing `φ_L_nnf` at the end.
-- Push `L_proof` as the combinatorial proof of this leaf.
+Strategy B (Hughes §15 endorsed extension): the closing op
+`CloseByLemma(L)` must be preceded by `Cut(φ_L)` such that LEFT's
+last entry is `φ_L_nnf` and the lemma `L` was previously verified
+standalone, registered in `lemma_registry` as a `comb::CombProof`
+of `φ_L_nnf`. The closing op pastes that proof into the current
+LEFT subgoal.
 
-The §15 augmentation handles the modularity: the lemma's proof is
-referenced as if cut-in, and the augmented goal gains `(φ_L ∧ ¬φ_L)`.
+LKRVerifier accepts `CloseByLemma(L)` whenever entries[last] resolves
+to the lemma's formula in NNF.
+
+#### Setup notation
+
+Let:
+
+- `L_proof = (N_L, T_L, f_L)` — the lemma's CombProof, with
+  `T_L = G(φ_L_nnf)`. Vertex IDs are pre-order from Fograph's
+  standalone build of `φ_L_nnf`.
+- `T = G(augmented_goal)` — the outer canonical target.
+- `σ_pos : [0, |T_L|) → [0, |T|)` — position remap. For each lemma
+  target position `i`, the outer-canonical position is
+  `σ_pos(i) = entry_positions.back()[i]` (LEFT's last entry's
+  positions, in the same pre-order). Bijective onto the slice of `T`
+  occupied by the cut formula.
+- `V^∃_L, V^∀_L ⊆ T_L` — lemma's existential/universal binder vertex
+  sets (Fograph-allocated when building `L_proof`).
+- `var_L(b)` — for binder vertex `b ∈ T_L`, the lemma-canonical var
+  `T_L.labels[b].var` (a `var_index`).
+- `var_O(b)` — for binder vertex `b ∈ T_L`, the outer-canonical var
+  at the position-remapped vertex: `T.labels[σ_pos(b)].var`.
+
+#### State construction (leaf)
+
+The pasted CombProof `cp = (N_L, T, f')`:
+
+- `target` ← `T` (the shared outer canonical target).
+- `source.num_vertex` ← `|N_L|` (lemma vertex count unchanged).
+- `source.cograph_edges, source.binding_edges, source.links` ←
+  inherited from `N_L` (vertex indices unchanged because the source
+  vertex set is unchanged).
+- `fibration[v]` ← `σ_pos(f_L(v))` for each `v ∈ V_{N_L}`.
+- `source.dualizer` ← `σ_remap(δ_L)`, defined below.
+
+#### Dualizer remap (`σ_remap`)
+
+Define the var renaming `σ : var_index → var_index` on lemma binder
+vars:
+
+```
+σ(v) = var_O(b)   where b ∈ T_L is the unique binder vertex with var_L(b) = v
+```
+
+Fograph allocates one var per binder occurrence, so `σ` is well-defined
+on `{var_L(b) : b binder in T_L}`. Outside that domain, `σ` is the
+identity (atom args may contain Fixed terms that aren't binder vars —
+e.g., free fix-vars from outer scopes; those pass through).
+
+Extend `σ` to terms:
+
+```
+σ_T(Fixed(v))      = Fixed(σ(v))      if v ∈ dom(σ),  else Fixed(v)
+σ_T(Gen(k))        = Gen(k)            (Gen never names a binder var directly)
+σ_T(Description t) = (not encountered — comb pipeline is description-free)
+```
+
+Then for each lemma dualizer entry `(x_L, t_L)`:
+
+```
+σ_remap(δ_L) := { (σ(x_L), σ_T(t_L))   :   (x_L, t_L) ∈ δ_L }
+```
+
+#### Soundness lemma
+
+**Claim.** `cp` is a valid CombProof of `T` (when composed with the
+preceding `Cut(φ_L)`).
+
+**Proof.**
+
+1. *Fonet conditions on `N_L`* — unchanged from `L_proof`'s
+   well-formedness (link covering, dualizer totality, scope,
+   bimatching). The source's vertex set, edges, and links are
+   bitwise inherited. The dualizer needs separate justification — see
+   step 2.
+
+2. *Dualizer totality and key correctness.* `δ_L` is total on `V^∃_L`
+   (`L_proof` verifies). After `σ_remap`:
+   - For each `x_L ∈ V^∃_L`'s var, `σ(x_L)` is the outer-canonical
+     var at the position-remapped binder vertex. By Fograph's
+     definition, the binder kind (∃ vs ∀) is preserved by structural
+     isomorphism of `T_L` with its slice in `T` — they're built from
+     the same `φ_L_nnf` formula. So `σ(x_L)` is an outer existential
+     binder var; `δ' := σ_remap(δ_L)` has the right key type.
+   - Source labels (via fibration) are read from `T`. The existential
+     binder vars in `source` are exactly `{var_O(b) : b ∈ V^∃_L}` =
+     `σ(V^∃_L's vars)`. So `δ'`'s key set covers source existentials
+     exactly. Totality preserved.
+
+3. *Dualizer image values.* `δ_L`'s image terms reference universal
+   binder vars of `T_L` (verifier check 2B.2). After `σ_T`, those
+   references become outer universal binder vars. The atom labels on
+   source (read from `T` via fibration) also use outer-canonical vars.
+   So the link check `apply_dualizer_to_args(l1.args, δ') ==
+   apply_dualizer_to_args(l2.args, δ')` holds because:
+
+   - `l1.args, l2.args` are outer-canonical (from `T`).
+   - The lemma's link check held in lemma-canonical:
+     `apply_δ_L(l1_L.args) == apply_δ_L(l2_L.args)`.
+   - `T_L`'s atom labels at lemma positions `i` are σ-related to
+     `T`'s atom labels at `σ_pos(i)` (the structural iso of the slice
+     extends to atom args via σ_T). So the renamed equation holds.
+
+4. *Skew/binding fibration.* The post-pass `derive_binding_edges`
+   rebuilds source binding edges by scanning source labels (which are
+   outer-canonical). The structural iso `T_L ↔ T.slice(σ_pos)` plus
+   `δ_L`'s validity in lemma-canonical implies `δ'`'s validity in
+   outer-canonical. ∎
+
+#### Precondition
+
+`σ_pos` is the position remap given by `entry_positions.back()`. For
+this to be coherent, the lemma's vertex labels must be σ-compatible
+with the outer target at the remapped positions:
+
+- Same vertex count: `|T_L| == |σ_pos|` (already checked).
+- Same kind sequence: for every `i`, `T_L.labels[i].kind ==
+  T.labels[σ_pos(i)].kind` (binder ↔ binder, atom ↔ atom, one ↔ one).
+- Same atom polarity + predicate: for atoms, `pred` and `negated`
+  must match.
+
+If any of these fails, the lemma's formula doesn't equal `φ_L_nnf`
+in the sense Fograph requires — that's a registry corruption or a
+mismatched cut formula, and is an error.
+
+#### Completeness scope
+
+After this spec lands, `CloseByLemma` handles **every** lemma whose
+`CombProof` verifies standalone — including those with non-empty
+dualizer (quantified lemmas). The previous "first-cut limitation"
+(reject lemmas with non-empty dualizer) is lifted.
+
+#### Test plan
+
+Three tests, ordered by ascending dualizer complexity:
+
+1. **`close_by_lemma_empty_dualizer`** — regression: the existing
+   `cut_with_lemma` test (lemma = `p → p`, no quantifiers) must keep
+   passing. Empty dualizer ⇒ remap is a no-op.
+
+2. **`close_by_lemma_with_forall_lemma`** — lemma is `∀x.(p(x) → p(x))`.
+   Its CombProof has one universal binder; dualizer is empty (no
+   existentials in `¬¬p ∨ p` direction), so this exercises the
+   binder-kind-preservation check without exercising dualizer
+   substitution. Cut on `∀x.(p(x) → p(x))` + CloseByLemma.
+
+3. **`close_by_lemma_with_exists_lemma`** — lemma is
+   `∃x.(p(x) ∨ ¬p(x))`. Its CombProof has one existential binder
+   with a non-empty dualizer (some witness term). Cut + CloseByLemma
+   must remap the dualizer key (lemma existential var → outer
+   existential var) and any binder-var refs in the image term.
+
+#### Implementation order
+
+1. Extend `build_leaf_close_by_lemma`:
+   - Build `σ` by scanning `lemma_cp.target.labels` for binders and
+     pairing with `cc.canonical_target.labels[lemma_target_positions[i]]`.
+   - Verify the label-shape preconditions (kind/pred/negated parity)
+     during the scan; error if any fails.
+   - Remove the "non-empty dualizer rejected" early return.
+   - Build `δ'` by iterating `lemma_cp.source.dualizer` and applying
+     `σ` to keys (lookup in `σ` table) and `σ_T` to values (single
+     `is_fixed` + lookup, mirroring `alpha_rename.cpp`'s
+     `rewrite_term_simultaneous`).
+2. Add the three tests in `lkr_to_comb_test.cpp` (smallest first).
+3. Flip the `CloseByLemma` row in COMPLETENESS.md §4.1 from
+   "partial" to "✓ done".
+
+No changes to per-rule linear/branching code. The remap is local to
+the leaf builder.
+
+#### Why this matters
+
+This is the row that unlocks **modular theorem reuse**: each proved
+theorem registers its CombProof, and downstream proofs cite it via
+`CloseByLemma` without re-translating. Without dualizer remap, only
+quantifier-free theorems are reusable — which excludes most theorems
+of practical interest (any `∀x.P(x)` or `∃x.P(x)` lemma).
 
 ## 5. Soundness contract
 
