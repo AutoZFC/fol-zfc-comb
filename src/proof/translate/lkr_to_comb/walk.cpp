@@ -1,12 +1,19 @@
 #include "walk.h"
 
+#include "build_target.h"
+
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 #include <variant>
 
 namespace logic::proof::translate::lkr_to_comb {
 
 namespace {
+
+// =====================================================================
+// Vertex counting (must match Fograph's pre-order layout).
+// =====================================================================
 
 size_t count_fograph_vertices(FormulaHandle f) {
     const Formula& fm = f.get();
@@ -27,591 +34,266 @@ size_t count_fograph_vertices(FormulaHandle f) {
 }
 
 // =====================================================================
-// Leaf builders.
+// WalkResult — per-subtree return value.
 // =====================================================================
+//
+// Each walk_recursive call returns a triple (source, target,
+// fibration) per Hughes §11.1, plus bookkeeping needed by per-rule
+// operations:
+//
+//   - entry_positions[k] = vertex positions in `target` for the k-th
+//     main sequent entry (matches sequent_before[op_idx]).
+//   - cut_summands accumulates the (θ ∧ ¬θ) formulas added by Cut
+//     nodes in this subtree, in op-stream order. They sit AFTER the
+//     main entries in `target`.
+//   - cut_summand_positions[k] mirrors entry_positions for cut_summands.
 
-// =====================================================================
-// Rule: CloseByLemma  (Hughes §15 Strategy B; LKR_TO_COMB_DESIGN.md §4.11)
-//
-// Premise: (none — closing leaf)
-// Conclusion: CombProof of any sequent containing φ_L, where φ_L is
-//   the formula of the lemma named in `op.axiom`. Strategy B
-//   precondition: the closing op must be preceded by Cut(φ_L), so
-//   that the LEFT subgoal's last entry is φ_L.
-//
-// Operation (per §4.11):
-//   - Look up the lemma's pre-built CombProof L_proof in cc.lemmas.
-//   - Target = shared outer canonical target.
-//   - Source = lemma's source (edges/links inherited; dualizer rebuilt).
-//   - Position remap σ_pos = entry_positions.back() (= φ_L's
-//     positions in the outer canonical target).
-//   - Fibration = lemma's fibration composed with σ_pos:
-//       fibration[v] := σ_pos(lemma.fibration[v])
-//   - σ build: for each binder vertex i in lemma.target, pair
-//     lemma-canonical var var_L(i) with outer-canonical var
-//     var_O(σ_pos(i)). Verify binder kind matches as a precondition.
-//   - Dualizer remap (σ_remap): for each (x_L, t_L) in L_proof's
-//     dualizer, emit (σ(x_L), σ_T(t_L)) where σ_T applies σ to
-//     Fixed terms (one-pass, identity on Gen).
-//
-// Soundness: the lemma was verified standalone, so L_proof is a valid
-//   CombProof of φ_L. Position-remapping + σ_remap preserves the
-//   fibration's shape under the structural iso between lemma.target
-//   and the outer slice. Strategy B's pairing with a preceding
-//   Cut(φ_L) handles the §15 augmentation: (φ_L ∧ ¬φ_L) becomes a
-//   new disjunct of the augmented goal.
-//
-// Scope limitation (open obligation; see COMPLETENESS.md): this
-//   implementation assumes lemma_cp.target = G(φ_L_nnf), not the
-//   §15-augmented form. Lemma CombProofs built via the full ND→Comb
-//   pipeline currently target their augmented goal (extra positions
-//   from any internal Cuts in the lemma proof), which doesn't match
-//   the outer cut formula's slice. Cut-free lemmas (and lemmas built
-//   via hand-crafted LKR programs without Cut ops) work cleanly.
-util::Result<comb::CombProof> build_leaf_close_by_lemma(
-    WalkContext&                                 cc,
-    const lkr::CloseByLemma&                     op,
-    const std::vector<std::vector<size_t>>&      entry_positions)
-{
-    // After Strategy A (LKR_TO_COMB_DESIGN.md §4.12), CloseByLemma ops
-    // are spliced out of the LKR program by the lemma_inliner pre-pass
-    // before walk runs. If walk encounters one, the pre-pass either
-    // wasn't run or the lemma was missing from the registry — both are
-    // translator bugs that should surface here as a clear error rather
-    // than as an obscure verifier failure downstream.
-    (void)cc;
-    (void)entry_positions;
-    return MAKE_ERROR
-        << "walk(CloseByLemma): op for lemma '" << op.axiom.name
-        << "' reached the walk; lemma_inliner pre-pass should have "
-        << "spliced it (Strategy A, §4.12). Likely cause: lemma not "
-        << "in the registry, or pipeline ordering bug.";
-}
+struct WalkResult {
+    comb::Fonet                source;
+    comb::Fograph              target;
+    std::vector<size_t>        fibration;
+    std::vector<std::vector<size_t>> entry_positions;
+    std::vector<FormulaHandle>       cut_summands;
+    std::vector<std::vector<size_t>> cut_summand_positions;
+};
 
 // =====================================================================
-// Rule: AxiomLit  (Hughes §11.1 base case; LKR_TO_COMB_DESIGN.md §4.1)
-//
-// Premise: (none — closing leaf)
-// Conclusion: CombProof of any sequent containing atom α at lit_a and
-//   its dual ᾱ at lit_b (atomic literals, opposite polarity, dual args
-//   under the dualizer).
-//
-// Operation: build N = {u_α, u_ᾱ} with one link {u_α, u_ᾱ}; empty
-//   dualizer, no cograph/binding edges (binding edges are derived in
-//   the post-pass, see derive_binding_edges); f maps the two source
-//   vertices to the canonical positions of lit_a and lit_b.
-//
-// Soundness: the leaf is a well-formed fonet piece (Def. 5.3): every
-//   atom in exactly one link, no binders so dualizer totality is
-//   vacuous, no induced bimatching in the trivially-empty leap graph.
-//   The skew bifibration conditions are discharged by the surrounding
-//   per-rule operations after composition.
+// Binder-var renumbering — keep per-hypothesis target vars in a
+// walk-global fresh range so they never collide with LKR Forall
+// eigens (which appear as witness terms in dualizer values).
 // =====================================================================
-// Rule: One  (Hughes §11.1 base case; LKR_TO_COMB_DESIGN.md §4.2)
-//
-// Premise: (none — closing leaf)
-// Conclusion: CombProof of any sequent containing the truth literal
-//   ¬⊥ at index `op.idx`. LKRVerifier enforces entries[idx] = ¬⊥.
-//
-// Operation: build N = {u_1} with one vertex of kind One (no link;
-//   the truth literal is unlinked per Def. 5.3). No cograph or binding
-//   edges, empty dualizer. f maps the single source vertex to the
-//   canonical position of entries[idx] — that position holds a single
-//   VertexKind::One vertex in the canonical target (Fograph extension
-//   in fograph.cpp::build for Compound{Not, Compound{Bottom}}).
-//
-// Soundness: the leaf is a well-formed fonet piece (Def. 5.3).
-//   Link covering vacuous (no Atom). Dualizer totality vacuous (no
-//   binders). Leap graph empty. The skew/binding fibration conditions
-//   are discharged by the surrounding per-rule operations after
-//   composition — identical framing to AxiomLit.
-util::Result<comb::CombProof> build_leaf_one(
-    WalkContext&                                 cc,
-    const lkr::One&                              op,
-    const std::vector<FormulaHandle>&            conclusion_entries,
-    const std::vector<std::vector<size_t>>&      entry_positions)
-{
-    if (op.idx >= conclusion_entries.size()) {
-        return MAKE_ERROR << "walk(One): idx OOR";
-    }
-    // One precondition: entries[idx] = ¬⊥, which Fograph maps to a
-    // single VertexKind::One vertex — so exactly one canonical position.
-    if (entry_positions[op.idx].size() != 1) {
-        return MAKE_ERROR
-            << "walk(One): entry at idx=" << op.idx << " has "
-            << entry_positions[op.idx].size()
-            << " canonical positions (expected 1 for ¬⊥)";
-    }
-    comb::CombProof cp;
-    cp.target = cc.canonical_target;
-    cp.source.num_vertex = 1;
-    cp.fibration.resize(1);
-    cp.fibration[0] = entry_positions[op.idx][0];
-    return cp;
-}
 
-util::Result<comb::CombProof> build_leaf_axiom_lit(
-    WalkContext&                                 cc,
-    const lkr::AxiomLit&                         op,
-    const std::vector<FormulaHandle>&            conclusion_entries,
-    const std::vector<std::vector<size_t>>&      entry_positions)
-{
-    if (op.lit_a == op.lit_b) {
-        return MAKE_ERROR
-            << "walk(AxiomLit): lit_a == lit_b (" << op.lit_a << ")";
-    }
-    if (op.lit_a >= conclusion_entries.size() ||
-        op.lit_b >= conclusion_entries.size()) {
-        return MAKE_ERROR << "walk(AxiomLit): lit OOR";
-    }
-    // AxiomLit precondition: the entries at lit_a/lit_b are atomic
-    // literals — each has exactly one canonical position.
-    if (entry_positions[op.lit_a].size() != 1 ||
-        entry_positions[op.lit_b].size() != 1) {
-        return MAKE_ERROR
-            << "walk(AxiomLit): entries are not atomic (lit_a has "
-            << entry_positions[op.lit_a].size() << " positions, lit_b has "
-            << entry_positions[op.lit_b].size() << ")";
-    }
-    comb::CombProof cp;
-    cp.target = cc.canonical_target;  // shared canonical target
-    cp.source.num_vertex = 2;
-    cp.source.links.push_back({0, 1});
-    cp.fibration.resize(2);
-    cp.fibration[0] = entry_positions[op.lit_a][0];
-    cp.fibration[1] = entry_positions[op.lit_b][0];
-    return cp;
-}
-
-// =====================================================================
-// Rule: And  (Hughes §11.1 ∧-case; LKR_TO_COMB_DESIGN.md §4.9)
-//
-// Premise: CombProof(Γ_1, φ_1)   CombProof(Γ_2, φ_2)
-// Conclusion: CombProof(Γ_1, Γ_2, φ_1 ∧ φ_2)
-//
-// Operation: G(C) = G(Γ_1) + G(Γ_2) + (G(φ_1) × G(φ_2)) — note the
-//   × join on the conjuncts' fographs.
-//
-//   Witness portions:  P_i = f_i^{-1}(V_{G(φ_i)})
-//   Strong/weak:       f_i is strong iff P_i ≠ ∅, weak otherwise.
-//
-//   - Both strong | both weak  → fuse disjointly with cograph edges
-//     P_1 × P_2 added between the witness portions (the new × in C).
-//   - One weak, one strong     → keep the weak side alone (the weak
-//     side doesn't actually use its conjunct; it suffices via the
-//     canonical injection for the joined conclusion).
-//
-// Soundness: Hughes §11.1 ∧-case lemma. Strong/weak classification
-//   preserves fonet well-formedness; the fibration extends to the
-//   join (cograph edges of the source mirror the new × in target).
-util::Result<comb::CombProof> rule_and(
-    WalkContext&                                 cc,
-    const lkr::And&                              op,
-    comb::CombProof                              left_cp,
-    comb::CombProof                              right_cp,
-    const std::vector<FormulaHandle>&            conclusion_entries,
-    const std::vector<std::vector<size_t>>&      entry_positions)
-{
-    if (op.principal >= conclusion_entries.size()) {
-        return MAKE_ERROR << "rule_and: principal OOR";
-    }
-    const Formula& cf = conclusion_entries[op.principal].get();
-    if (!cf.is_compound() || cf.as_compound().op != Op::And) {
-        return MAKE_ERROR << "rule_and: principal entry is not ∧";
-    }
-    FormulaHandle phi = cf.as_compound().left;
-    size_t phi_count = count_fograph_vertices(phi);
-
-    const auto& princ_pos = entry_positions[op.principal];
-    if (princ_pos.size() < phi_count) {
-        return MAKE_ERROR
-            << "rule_and: principal positions vector smaller than phi count";
-    }
-
-    // Witness portions in canonical coordinates.
-    std::unordered_set<size_t> phi_canonical(
-        princ_pos.begin(), princ_pos.begin() + phi_count);
-    std::unordered_set<size_t> theta_canonical(
-        princ_pos.begin() + phi_count, princ_pos.end());
-
-    std::vector<size_t> P_L, P_R;
-    for (size_t v = 0; v < left_cp.fibration.size(); ++v) {
-        if (phi_canonical.count(left_cp.fibration[v])) P_L.push_back(v);
-    }
-    for (size_t v = 0; v < right_cp.fibration.size(); ++v) {
-        if (theta_canonical.count(right_cp.fibration[v])) P_R.push_back(v);
-    }
-
-    bool left_strong  = !P_L.empty();
-    bool right_strong = !P_R.empty();
-
-    comb::CombProof out;
-    out.target = cc.canonical_target;
-
-    auto fuse_disjoint = [&](size_t n_L,
-                              const comb::Fonet& src_L,
-                              const std::vector<size_t>& fib_L,
-                              size_t n_R,
-                              const comb::Fonet& src_R,
-                              const std::vector<size_t>& fib_R,
-                              bool add_cross_edges) {
-        out.source.num_vertex = n_L + n_R;
-        out.source.cograph_edges = src_L.cograph_edges;
-        for (auto e : src_R.cograph_edges) {
-            out.source.cograph_edges.push_back({e.first + n_L, e.second + n_L});
+var_index renumber_binders(comb::Fograph& f, var_index offset) {
+    std::unordered_map<var_index, var_index> map;
+    for (auto& lbl : f.labels) {
+        if (lbl.kind == comb::VertexKind::Binder) {
+            map[lbl.var] = offset;
+            lbl.var = offset++;
         }
-        if (add_cross_edges) {
-            for (size_t l : P_L) {
-                for (size_t r : P_R) {
-                    out.source.cograph_edges.push_back({l, r + n_L});
-                }
+    }
+    for (auto& lbl : f.labels) {
+        if (lbl.kind != comb::VertexKind::Atom) continue;
+        for (auto& t : lbl.args) {
+            if (t.is_fixed()) {
+                auto it = map.find(t.as_variable());
+                if (it != map.end()) t = Term::fixed(it->second);
             }
         }
-        out.source.binding_edges = src_L.binding_edges;
-        for (auto e : src_R.binding_edges) {
-            out.source.binding_edges.push_back({e.first + n_L, e.second + n_L});
-        }
-        out.source.links = src_L.links;
-        for (auto l : src_R.links) {
-            out.source.links.push_back({l.first + n_L, l.second + n_L});
-        }
-        out.source.dualizer = src_L.dualizer;
-        for (const auto& [k, v] : src_R.dualizer) {
-            out.source.dualizer.emplace(k, v);
-        }
-        out.fibration = fib_L;
-        out.fibration.insert(out.fibration.end(), fib_R.begin(), fib_R.end());
-    };
-
-    if (left_strong && right_strong) {
-        fuse_disjoint(left_cp.source.num_vertex, left_cp.source,
-                       left_cp.fibration,
-                       right_cp.source.num_vertex, right_cp.source,
-                       right_cp.fibration, /*add_cross=*/true);
-    } else if (left_strong && !right_strong) {
-        // RIGHT is weak — keep RIGHT alone.
-        out.source    = std::move(right_cp.source);
-        out.fibration = std::move(right_cp.fibration);
-    } else if (!left_strong && right_strong) {
-        // LEFT is weak — keep LEFT alone.
-        out.source    = std::move(left_cp.source);
-        out.fibration = std::move(left_cp.fibration);
-    } else {
-        // Both weak — fuse disjointly (no cross-edges, P_L × P_R = ∅).
-        fuse_disjoint(left_cp.source.num_vertex, left_cp.source,
-                       left_cp.fibration,
-                       right_cp.source.num_vertex, right_cp.source,
-                       right_cp.fibration, /*add_cross=*/false);
     }
+    return offset;
+}
 
-    return out;
+util::Result<SequentTarget> build_target(
+    WalkContext& cc,
+    const std::vector<FormulaHandle>& entries)
+{
+    TRY_ASSIGN(st, build_sequent_target(cc.builder, entries));
+    cc.next_target_var = renumber_binders(st.target, cc.next_target_var);
+    return st;
 }
 
 // =====================================================================
-// Rule: Cut  (Hughes §15; LKR_TO_COMB_DESIGN.md §4.10)
+// Lifting source through a rule's z embedding.
 //
-// Premise: CombProof(Γ ∪ {θ})   CombProof(Γ ∪ {¬θ})
-// Conclusion: CombProof of the §15-augmented goal, where the running
-//   goal gains a disjunct (θ ∧ ¬θ). The augmentation is built once,
-//   ahead of the walk, by cut_augment.cpp; the canonical target
-//   already accounts for every Cut's contribution at stable positions.
-//
-// Operation: identical fusion to the And rule, but the "principal"
-//   entry doesn't exist in the pre-Cut sequent. We treat the cut
-//   formula's θ-portion on LEFT and ¬θ-portion on RIGHT as the
-//   witness portions P_L, P_R; strong/weak classification proceeds
-//   exactly as in rule_and.
-//
-// Soundness: Hughes §15 Theorem 15.1 — cut combinatorial proofs of
-//   φ are by definition ordinary combinatorial proofs of the augmented
-//   φ ∨ ⋁ (θ_i ∧ ¬θ_i), which is classically equivalent to φ. Each
-//   (θ ∧ ¬θ) disjunct is contradictory, so adding them preserves
-//   validity. Thm 15.1 ensures this is sound and complete.
-util::Result<comb::CombProof> rule_cut(
-    WalkContext&                                 cc,
-    comb::CombProof                              left_cp,
-    comb::CombProof                              right_cp,
-    const std::vector<size_t>&                   theta_positions,
-    const std::vector<size_t>&                   neg_theta_positions)
+// For each rule going bottom-up, the source vertices keep their
+// identity but their fibration shifts from child target positions to
+// parent target positions. As a consequence, source labels (derived
+// via fibration from target) change — binder vars and atom args use
+// parent target's var allocation. The dualizer's keys and Fixed
+// values must be remapped to match.
+// =====================================================================
+
+std::unordered_map<var_index, var_index> lift_fibration(
+    std::vector<size_t>&       fibration,
+    const std::vector<size_t>& z,
+    const comb::Fograph&       child_target,
+    const comb::Fograph&       parent_target)
 {
-    std::unordered_set<size_t> theta_canonical(
-        theta_positions.begin(), theta_positions.end());
-    std::unordered_set<size_t> neg_theta_canonical(
-        neg_theta_positions.begin(), neg_theta_positions.end());
-
-    std::vector<size_t> P_L, P_R;
-    for (size_t v = 0; v < left_cp.fibration.size(); ++v) {
-        if (theta_canonical.count(left_cp.fibration[v])) P_L.push_back(v);
-    }
-    for (size_t v = 0; v < right_cp.fibration.size(); ++v) {
-        if (neg_theta_canonical.count(right_cp.fibration[v])) P_R.push_back(v);
-    }
-
-    bool left_strong  = !P_L.empty();
-    bool right_strong = !P_R.empty();
-
-    comb::CombProof out;
-    out.target = cc.canonical_target;
-
-    auto fuse_disjoint = [&](size_t n_L,
-                              const comb::Fonet& src_L,
-                              const std::vector<size_t>& fib_L,
-                              size_t n_R,
-                              const comb::Fonet& src_R,
-                              const std::vector<size_t>& fib_R,
-                              bool add_cross_edges) {
-        out.source.num_vertex = n_L + n_R;
-        out.source.cograph_edges = src_L.cograph_edges;
-        for (auto e : src_R.cograph_edges) {
-            out.source.cograph_edges.push_back({e.first + n_L, e.second + n_L});
+    std::unordered_map<var_index, var_index> var_remap;
+    for (size_t u = 0; u < fibration.size(); ++u) {
+        size_t old_pos = fibration[u];
+        size_t new_pos = z[old_pos];
+        fibration[u] = new_pos;
+        const auto& old_lbl = child_target.labels[old_pos];
+        const auto& new_lbl = parent_target.labels[new_pos];
+        if (old_lbl.kind == comb::VertexKind::Binder &&
+            new_lbl.kind == comb::VertexKind::Binder)
+        {
+            var_remap[old_lbl.var] = new_lbl.var;
         }
-        if (add_cross_edges) {
-            for (size_t l : P_L) {
-                for (size_t r : P_R) {
-                    out.source.cograph_edges.push_back({l, r + n_L});
-                }
+    }
+    return var_remap;
+}
+
+void apply_var_remap_to_dualizer(
+    comb::Fonet&                                            source,
+    const std::unordered_map<var_index, var_index>&         var_remap)
+{
+    if (var_remap.empty()) return;
+    auto remap_var = [&](var_index v) {
+        auto it = var_remap.find(v);
+        return it == var_remap.end() ? v : it->second;
+    };
+    std::unordered_map<var_index, Term> new_d;
+    new_d.reserve(source.dualizer.size());
+    for (const auto& [k, t] : source.dualizer) {
+        Term new_t = t;
+        if (t.is_fixed()) new_t = Term::fixed(remap_var(t.as_variable()));
+        new_d.emplace(remap_var(k), new_t);
+    }
+    source.dualizer = std::move(new_d);
+}
+
+// =====================================================================
+// Build z : child target positions → parent target positions.
+//
+// `entry_map`: for each child main entry index k, where it lands in
+// parent — entry_map[k] = {parent_entry_idx, offset, is_summand}
+// meaning child's k-th entry occupies parent_target's
+// entry_positions[parent_entry_idx][offset..offset+|entry|].
+//
+// `cut_summand_map`: same for child's cut summands; map to parent's
+// cut summands (typically identity-with-offset for sub-trees, or
+// disjoint-union for branching).
+// =====================================================================
+
+struct ZEntryTarget {
+    bool   is_dropped;    // true → this child entry has no parent counterpart (Weakening's scaffolding entry)
+    bool   is_summand;    // false → parent main entry, true → parent cut summand
+    size_t parent_idx;    // which parent entry / cut summand
+    size_t offset;        // offset within parent entry/summand vertex range
+};
+
+std::vector<size_t> build_z(
+    const std::vector<std::vector<size_t>>& child_entry_positions,
+    const std::vector<std::vector<size_t>>& child_summand_positions,
+    const std::vector<std::vector<size_t>>& parent_entry_positions,
+    const std::vector<std::vector<size_t>>& parent_summand_positions,
+    const std::vector<ZEntryTarget>&        entry_map,
+    const std::vector<ZEntryTarget>&        summand_map,
+    size_t                                  target_size)
+{
+    std::vector<size_t> z(target_size, static_cast<size_t>(-1));
+    auto bind = [&](const std::vector<size_t>& child_pos,
+                    const ZEntryTarget&         tgt) {
+        if (tgt.is_dropped) return;
+        const auto& parent_pos = tgt.is_summand
+            ? parent_summand_positions[tgt.parent_idx]
+            : parent_entry_positions[tgt.parent_idx];
+        for (size_t i = 0; i < child_pos.size(); ++i) {
+            z[child_pos[i]] = parent_pos[tgt.offset + i];
+        }
+    };
+    for (size_t k = 0; k < child_entry_positions.size(); ++k) {
+        bind(child_entry_positions[k], entry_map[k]);
+    }
+    for (size_t k = 0; k < child_summand_positions.size(); ++k) {
+        bind(child_summand_positions[k], summand_map[k]);
+    }
+    return z;
+}
+
+// Apply `z` to fibration and remap dualizer.
+void lift_source(
+    WalkResult&                child,
+    const std::vector<size_t>& z,
+    const comb::Fograph&       parent_target)
+{
+    auto var_remap = lift_fibration(child.fibration, z,
+                                    child.target, parent_target);
+    apply_var_remap_to_dualizer(child.source, var_remap);
+}
+
+// =====================================================================
+// Disjoint-union fusion of two sources (used by And and Cut).
+//
+// Both children's fibrations must already be lifted into parent_target
+// before calling. P_L / P_R are the witness portions (vertex indices in
+// each child's source). When add_cross_edges is true, an edge is added
+// for every (l ∈ P_L, r ∈ P_R) — Hughes Def. 10.4 fusion at portions.
+// =====================================================================
+
+void fuse_disjoint(
+    WalkResult&                fused_out,
+    WalkResult&&               left,
+    WalkResult&&               right,
+    const std::vector<size_t>& P_L,
+    const std::vector<size_t>& P_R,
+    bool                       add_cross_edges)
+{
+    const size_t n_L = left.source.num_vertex;
+    const size_t n_R = right.source.num_vertex;
+
+    auto& src = fused_out.source;
+    src.num_vertex = n_L + n_R;
+
+    src.cograph_edges = std::move(left.source.cograph_edges);
+    for (auto e : right.source.cograph_edges) {
+        src.cograph_edges.push_back({e.first + n_L, e.second + n_L});
+    }
+    if (add_cross_edges) {
+        for (size_t l : P_L) {
+            for (size_t r : P_R) {
+                src.cograph_edges.push_back({l, r + n_L});
             }
         }
-        out.source.binding_edges = src_L.binding_edges;
-        for (auto e : src_R.binding_edges) {
-            out.source.binding_edges.push_back({e.first + n_L, e.second + n_L});
-        }
-        out.source.links = src_L.links;
-        for (auto l : src_R.links) {
-            out.source.links.push_back({l.first + n_L, l.second + n_L});
-        }
-        out.source.dualizer = src_L.dualizer;
-        for (const auto& [k, v] : src_R.dualizer) {
-            out.source.dualizer.emplace(k, v);
-        }
-        out.fibration = fib_L;
-        out.fibration.insert(out.fibration.end(), fib_R.begin(), fib_R.end());
-    };
-
-    if (left_strong && right_strong) {
-        fuse_disjoint(left_cp.source.num_vertex, left_cp.source,
-                       left_cp.fibration,
-                       right_cp.source.num_vertex, right_cp.source,
-                       right_cp.fibration, /*add_cross=*/true);
-    } else if (left_strong && !right_strong) {
-        out.source    = std::move(right_cp.source);
-        out.fibration = std::move(right_cp.fibration);
-    } else if (!left_strong && right_strong) {
-        out.source    = std::move(left_cp.source);
-        out.fibration = std::move(left_cp.fibration);
-    } else {
-        fuse_disjoint(left_cp.source.num_vertex, left_cp.source,
-                       left_cp.fibration,
-                       right_cp.source.num_vertex, right_cp.source,
-                       right_cp.fibration, /*add_cross=*/false);
     }
 
-    return out;
+    src.binding_edges = std::move(left.source.binding_edges);
+    for (auto e : right.source.binding_edges) {
+        src.binding_edges.push_back({e.first + n_L, e.second + n_L});
+    }
+
+    src.links = std::move(left.source.links);
+    for (auto l : right.source.links) {
+        src.links.push_back({l.first + n_L, l.second + n_L});
+    }
+
+    src.dualizer = std::move(left.source.dualizer);
+    for (auto& [k, t] : right.source.dualizer) {
+        // Conflict means the same existential binder var appears in
+        // both subtrees with different witnesses — that's a translator
+        // bug. Keep the LEFT entry; verifier will catch any divergence.
+        src.dualizer.emplace(k, std::move(t));
+    }
+
+    fused_out.fibration = std::move(left.fibration);
+    fused_out.fibration.insert(fused_out.fibration.end(),
+                               right.fibration.begin(),
+                               right.fibration.end());
 }
 
 // =====================================================================
-// Rule: Forall  (Hughes §11.1 ∀-case; LKR_TO_COMB_DESIGN.md §4.7 + §7.5)
+// Source binding-edge derivation (Hughes Def. 3.1, post-pass).
 //
-// Premise: CombProof(Γ, φ)   side condition: x not free in Γ
-// Conclusion: CombProof(Γ, ∀x.φ)
+// In a fograph — and hence in a fonet — binding edges are NOT free
+// parameters: they are DERIVED from labels. For each binder vertex b
+// with var v and each atom vertex a whose args contain Fixed(v),
+// (b, a) is a binding edge. Fograph builds the target's binding edges
+// this way; the source must too, or the unique-lift fibration check
+// rejects.
 //
-// Operation: G(C) = G(Γ) + (•x + G(φ)) — note the + (universal is
-//   `+`-attached to its body, i.e., no cograph edges between the
-//   binder and the body in the cograph).
-//
-//   Witness portion: P = f^{-1}(V_{G(φ)})
-//   - Case A (P = ∅): G(φ) was weakened in; •x stays uncovered, return
-//     child unchanged.
-//   - Case B (P ≠ ∅): add a new vertex b_x to N, no new cograph edges;
-//     map b_x ↦ •x (the canonical binder position).
-//
-// Binding edges in source: NOT constructed here. They are derived
-//   from labels in derive_binding_edges() at the end of walk, per
-//   Hughes Def. 3.1. The previous per-rule construction (edges to
-//   P only) missed atoms in carried-over sequent entries that share
-//   the bound var (see §7.5 for the failure mode and resolution).
-//
-// Var alignment: requires the alpha-rename pre-pass (see
-//   alpha_rename.{h,cpp}) so that op.eigen equals the canonical
-//   binder var Fograph allocates at this principal's binder position.
-//
-// Soundness: Hughes §11.1 ∀-case lemma. The skew bifibration extends
-//   to the join; the post-pass guarantees source binding edges mirror
-//   the target's (which Fograph derives identically from labels).
-util::Result<comb::CombProof> rule_forall(
-    WalkContext&                                 cc,
-    const lkr::Forall& /*op*/,
-    comb::CombProof                              child,
-    const std::vector<std::vector<size_t>>&      entry_positions,
-    size_t                                       principal)
-{
-    if (principal >= entry_positions.size()) {
-        return MAKE_ERROR << "rule_forall: principal OOR";
-    }
-    const auto& princ_pos = entry_positions[principal];
-    if (princ_pos.empty()) {
-        return MAKE_ERROR
-            << "rule_forall: principal entry has no canonical positions "
-            << "(binder stripped without preserving body)";
-    }
-    size_t binder_pos = princ_pos[0];
-    std::unordered_set<size_t> body_canonical(
-        princ_pos.begin() + 1, princ_pos.end());
-
-    std::vector<size_t> P;
-    for (size_t v = 0; v < child.fibration.size(); ++v) {
-        if (body_canonical.count(child.fibration[v])) P.push_back(v);
-    }
-
-    if (P.empty()) {
-        // Case A: preimage empty → •x stays uncovered in target.
-        return child;
-    }
-
-    // Case B: add binder vertex; no cograph edges (universal is +-attached).
-    // Binding edges are NOT added here — they're derived from labels in a
-    // single post-pass at the end of walk(), matching Fograph's spec for
-    // the target. See comment in derive_binding_edges() below.
-    comb::CombProof out = std::move(child);
-    size_t new_v = out.source.num_vertex;
-    out.source.num_vertex = new_v + 1;
-    out.fibration.push_back(binder_pos);
-    (void)P;
-    return out;
-}
-
+// Implementation: source labels are looked up via fibration. Any
+// binding edges accumulated by per-rule code are discarded; this
+// post-pass is the single source of truth.
 // =====================================================================
-// Rule: Exists  (Hughes §11.1 ∃-case; LKR_TO_COMB_DESIGN.md §4.8 + §7.5)
-//
-// Premise: CombProof(Γ, φ{x ↦ t})   for some witness term t
-// Conclusion: CombProof(Γ, ∃x.φ)
-//
-// Operation: G(C) = G(Γ) + (•x × G(φ)) — note the × (existential is
-//   `×`-attached to its body, i.e., the binder gets cograph edges to
-//   every vertex of G(φ)).
-//
-//   Witness portion: P = f^{-1}(V_{G(φ{x↦t})})
-//   - Case A (P = ∅): φ was weakened in; return child unchanged.
-//   - Case B (P ≠ ∅): add a new vertex b_x to N with cograph edges
-//     {b_x, p} for every p ∈ P (mirroring the × in target); map
-//     b_x ↦ •x. Extend dualizer with δ(x) = t (the witness term, looked
-//     up through cc.replay.term_env via op.witness's TermRef).
-//
-// Binding edges in source: NOT constructed here (same as Forall;
-//   derived in derive_binding_edges).
-//
-// Dualizer conflict check: if the same eigen has been bound by an
-//   earlier Exists with a different witness, that's a translator bug
-//   (the LKR program would be inconsistent). Conflicting bindings
-//   surface here as MAKE_ERROR rather than via verifier failure.
-//
-// Soundness: Hughes §11.1 ∃-case lemma. δ(x) records the witness so
-//   the linked atoms unify under δ; the cograph cross-edges encode
-//   the × join in the target.
-util::Result<comb::CombProof> rule_exists(
-    WalkContext&                                 cc,
-    const lkr::Exists&                           op,
-    comb::CombProof                              child,
-    const std::vector<std::vector<size_t>>&      entry_positions,
-    size_t                                       principal)
-{
-    if (principal >= entry_positions.size()) {
-        return MAKE_ERROR << "rule_exists: principal OOR";
-    }
-    const auto& princ_pos = entry_positions[principal];
-    if (princ_pos.empty()) {
-        return MAKE_ERROR << "rule_exists: principal entry has no positions";
-    }
-    size_t binder_pos = princ_pos[0];
-    std::unordered_set<size_t> body_canonical(
-        princ_pos.begin() + 1, princ_pos.end());
 
-    std::vector<size_t> P;
-    for (size_t v = 0; v < child.fibration.size(); ++v) {
-        if (body_canonical.count(child.fibration[v])) P.push_back(v);
-    }
-
-    if (P.empty()) {
-        // Case A: preimage empty.
-        return child;
-    }
-
-    comb::CombProof out = std::move(child);
-    size_t new_v = out.source.num_vertex;
-    out.source.num_vertex = new_v + 1;
-    out.fibration.push_back(binder_pos);
-
-    // Cograph edges: existential binder is ×-attached to its body
-    // literals in target; mirror in source for the witness portion.
-    // Binding edges are derived from labels in a single post-pass at the
-    // end of walk().
-    for (size_t p : P) {
-        out.source.cograph_edges.push_back({new_v, p});
-    }
-
-    // Dualizer: δ(eigen_x) = witness. eigen_x is the canonical binder's
-    // var (= target.labels[binder_pos].var). Witness resolved via
-    // replay's term_env using op.witness's TermRef.
-    if (op.witness.idx >= cc.replay.term_env.size() ||
-        !cc.replay.term_env[op.witness.idx].has_value()) {
-        return MAKE_ERROR
-            << "rule_exists: witness TermRef #" << op.witness.idx
-            << " unresolved";
-    }
-    Term witness = *cc.replay.term_env[op.witness.idx];
-    var_index eigen_x = cc.canonical_target.labels[binder_pos].var;
-    // Conflicting binding for the same eigen across subgoals is OK if
-    // identical; otherwise the verifier rejects.
-    auto it = out.source.dualizer.find(eigen_x);
-    if (it == out.source.dualizer.end()) {
-        out.source.dualizer.emplace(eigen_x, witness);
-    } else if (!(it->second == witness)) {
-        return MAKE_ERROR
-            << "rule_exists: dualizer conflict for eigen f_" << eigen_x;
-    }
-    return out;
-}
-
-// =====================================================================
-// Post-pass: source binding-edge derivation
-//   (Hughes Def. 3.1, applied to fonet; LKR_TO_COMB_DESIGN.md §7.5)
-//
-// In a fograph — and hence in a fonet, which is a linked fograph — the
-// binding edges are not free parameters: they are DERIVED from labels.
-// For each binder vertex b with var v and each atom vertex a whose
-// args contain Fixed(v), the pair (b, a) is a binding edge.
-//
-// Fograph builds the target's binding edges this way in
-// fograph.cpp::add_binding_edges. The source must follow the same
-// recipe — anything else risks producing fonets whose binding edges
-// fail the verifier's unique-lift fibration check against the target.
-//
-// Implementation: source labels via fibration (source_label(v) =
-//   target.labels[fibration[v]]), then run the same per-vertex scan.
-//   Any binding edges accumulated by per-rule code earlier in walk are
-//   discarded — this post-pass is the single source of truth.
-//
-// History: the previous code constructed source binding edges per-rule
-//   (rule_forall: edges to atoms in principal's body only). This was a
-//   completeness bug, invisible until quantified end-to-end tests
-//   exercised it (the §7.5 cut-shared-var case). The math-grounded fix
-//   is this post-pass — matching Hughes' definition verbatim — rather
-//   than patching per-rule constructions.
-void derive_binding_edges(comb::CombProof& cp,
+void derive_binding_edges(comb::Fonet& source,
+                          const std::vector<size_t>& fibration,
                           const comb::Fograph& target) {
-    cp.source.binding_edges.clear();
-    const size_t n = cp.source.num_vertex;
+    source.binding_edges.clear();
+    const size_t n = source.num_vertex;
     for (size_t b = 0; b < n; ++b) {
-        const comb::VertexLabel& b_lbl = target.labels[cp.fibration[b]];
+        const comb::VertexLabel& b_lbl = target.labels[fibration[b]];
         if (b_lbl.kind != comb::VertexKind::Binder) continue;
         var_index v = b_lbl.var;
         for (size_t a = 0; a < n; ++a) {
             if (a == b) continue;
-            const comb::VertexLabel& a_lbl = target.labels[cp.fibration[a]];
+            const comb::VertexLabel& a_lbl = target.labels[fibration[a]];
             if (a_lbl.kind != comb::VertexKind::Atom) continue;
             for (const Term& arg : a_lbl.args) {
                 if (arg.is_fixed() && arg.as_variable() == v) {
-                    cp.source.binding_edges.push_back({b, a});
+                    source.binding_edges.push_back({b, a});
                     break;
                 }
             }
@@ -619,167 +301,923 @@ void derive_binding_edges(comb::CombProof& cp,
     }
 }
 
-util::Result<comb::CombProof> walk_recursive(
+// =====================================================================
+// Per-rule operations.
+// =====================================================================
+
+util::Result<WalkResult> rule_axiom_lit(
+    WalkContext&                            cc,
+    const lkr::AxiomLit&                    op,
+    const std::vector<FormulaHandle>&       sequent)
+{
+    if (op.lit_a == op.lit_b) {
+        return MAKE_ERROR
+            << "walk(AxiomLit): lit_a == lit_b (" << op.lit_a << ")";
+    }
+    if (op.lit_a >= sequent.size() || op.lit_b >= sequent.size()) {
+        return MAKE_ERROR << "walk(AxiomLit): lit OOR";
+    }
+
+    TRY_ASSIGN(st, build_target(cc, sequent));
+    if (st.entry_positions[op.lit_a].size() != 1 ||
+        st.entry_positions[op.lit_b].size() != 1) {
+        return MAKE_ERROR
+            << "walk(AxiomLit): entries are not atomic (lit_a has "
+            << st.entry_positions[op.lit_a].size() << " positions, lit_b has "
+            << st.entry_positions[op.lit_b].size() << ")";
+    }
+
+    WalkResult res;
+    res.target          = std::move(st.target);
+    res.entry_positions = std::move(st.entry_positions);
+    res.source.num_vertex = 2;
+    res.source.links.push_back({0, 1});
+    res.fibration = { res.entry_positions[op.lit_a][0],
+                      res.entry_positions[op.lit_b][0] };
+    return res;
+}
+
+util::Result<WalkResult> rule_one(
+    WalkContext&                            cc,
+    const lkr::One&                         op,
+    const std::vector<FormulaHandle>&       sequent)
+{
+    if (op.idx >= sequent.size()) {
+        return MAKE_ERROR << "walk(One): idx OOR";
+    }
+    TRY_ASSIGN(st, build_target(cc, sequent));
+    if (st.entry_positions[op.idx].size() != 1) {
+        return MAKE_ERROR
+            << "walk(One): entry at idx=" << op.idx << " has "
+            << st.entry_positions[op.idx].size()
+            << " canonical positions (expected 1 for ¬⊥)";
+    }
+    WalkResult res;
+    res.target          = std::move(st.target);
+    res.entry_positions = std::move(st.entry_positions);
+    res.source.num_vertex = 1;
+    res.fibration = { res.entry_positions[op.idx][0] };
+    return res;
+}
+
+util::Result<WalkResult> rule_close_by_lemma(
+    WalkContext&,
+    const lkr::CloseByLemma& op)
+{
+    return MAKE_ERROR
+        << "walk(CloseByLemma): op for lemma '" << op.axiom.name
+        << "' reached the walk; lemma_inliner pre-pass should have "
+        << "spliced it (Strategy A, §4.12). Likely cause: lemma not "
+        << "in the registry, or pipeline ordering bug.";
+}
+
+// Build the parent target for a linear rule and the trivial entry/summand
+// maps assuming the child's main entries and cut_summands map 1:1 (modulo
+// principal-entry rewriting that the caller handles separately).
+//
+// `entry_map` and `summand_map` are populated by the caller for the
+// non-trivial cases; this helper just assembles parent's effective
+// entries (= parent_main_entries ∪ child.cut_summands).
+util::Result<SequentTarget> build_parent_target_with_summands(
+    WalkContext& cc,
+    const std::vector<FormulaHandle>& parent_main_entries,
+    const std::vector<FormulaHandle>& cut_summands)
+{
+    std::vector<FormulaHandle> all = parent_main_entries;
+    all.insert(all.end(), cut_summands.begin(), cut_summands.end());
+    return build_target(cc, all);
+}
+
+// Split a SequentTarget that was built with main_entries followed by
+// cut_summands back into the two halves.
+void split_target_positions(
+    SequentTarget&                           st,
+    size_t                                   main_count,
+    std::vector<std::vector<size_t>>&        out_main_pos,
+    std::vector<std::vector<size_t>>&        out_summand_pos)
+{
+    out_main_pos.assign(st.entry_positions.begin(),
+                        st.entry_positions.begin() + main_count);
+    out_summand_pos.assign(st.entry_positions.begin() + main_count,
+                           st.entry_positions.end());
+}
+
+// Trivial entry map for "child entry k → parent entry k, no offset".
+ZEntryTarget identity_map(size_t k) {
+    return ZEntryTarget{ /*is_dropped=*/false, /*is_summand=*/false,
+                         /*parent_idx=*/k, /*offset=*/0 };
+}
+ZEntryTarget summand_map(size_t k) {
+    return ZEntryTarget{ /*is_dropped=*/false, /*is_summand=*/true,
+                         /*parent_idx=*/k, /*offset=*/0 };
+}
+ZEntryTarget dropped_map() {
+    return ZEntryTarget{ /*is_dropped=*/true, /*is_summand=*/false,
+                         /*parent_idx=*/0, /*offset=*/0 };
+}
+
+// Helper: build cut_summand maps as identity (child summand k → parent
+// summand k). Used by all rules that don't introduce new cuts.
+std::vector<ZEntryTarget> summands_identity(size_t n) {
+    std::vector<ZEntryTarget> r;
+    r.reserve(n);
+    for (size_t i = 0; i < n; ++i) r.push_back(summand_map(i));
+    return r;
+}
+
+util::Result<WalkResult> rule_or(
+    WalkContext&                            cc,
+    const lkr::Or&                          op,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Hypothesis H = Γ, ϕ, θ (LKR's Or replaces principal with ϕ and
+    // appends θ). Conclusion C = Γ, (ϕ ∨ θ).
+    if (op.principal >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_or: principal OOR";
+    }
+    const Formula& cf = parent_seq[op.principal].get();
+    if (!cf.is_compound() || cf.as_compound().op != Op::Or) {
+        return MAKE_ERROR << "rule_or: principal entry is not ∨";
+    }
+    FormulaHandle phi = cf.as_compound().left;
+    size_t phi_count = count_fograph_vertices(phi);
+
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // Child main entries: parent_seq with op.principal → phi, plus
+    // theta appended at the end. So child index k:
+    //   if k < parent_seq.size and k != op.principal: maps to parent k.
+    //   if k == op.principal: maps to parent op.principal, offset 0
+    //     (taking first phi_count positions).
+    //   if k == parent_seq.size (= theta entry): maps to parent
+    //     op.principal, offset phi_count.
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size() + 1);
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        if (k == op.principal) {
+            entry_map.push_back(ZEntryTarget{ false, false, op.principal, 0 });
+        } else {
+            entry_map.push_back(identity_map(k));
+        }
+    }
+    entry_map.push_back(ZEntryTarget{ false, false, op.principal, phi_count });
+
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+
+    lift_source(child, z, st.target);
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+    return res;
+}
+
+util::Result<WalkResult> rule_exchange(
+    WalkContext&                            cc,
+    const lkr::Exchange&                    op,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Conclusion C = Γ with entries[i] and entries[j] swapped relative
+    // to child's H. Build parent target with parent_seq (= child's
+    // entries with i, j swapped, viewed bottom-up).
+    if (op.i >= parent_seq.size() || op.j >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_exchange: index OOR";
+    }
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // Child's entries are parent_seq with op.i, op.j swapped.
+    // Child entry k → parent entry: if k==i then j, if k==j then i, else k.
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size());
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        size_t pk = k;
+        if (k == op.i) pk = op.j;
+        else if (k == op.j) pk = op.i;
+        entry_map.push_back(identity_map(pk));
+    }
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+    lift_source(child, z, st.target);
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+    return res;
+}
+
+util::Result<WalkResult> rule_weakening(
+    WalkContext&                            cc,
+    const lkr::Weakening& /*op*/,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // LKR Weakening (going top-down): top-of-stack Γ → Γ ∪ {ϕ}.
+    // Going bottom-up, child has parent_seq + [ϕ] entries; the
+    // ϕ entry is "scaffolding" and per I-2 InputGate invariant has
+    // no source vertices mapped to it, so we drop it.
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size() + 1);
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        entry_map.push_back(identity_map(k));
+    }
+    entry_map.push_back(dropped_map());
+
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+    // I-2 invariant: no source vertex maps to the weakened-in entry.
+    // If any did, z[fib[v]] would still be the sentinel (size_t)-1.
+    for (size_t v = 0; v < child.fibration.size(); ++v) {
+        if (z[child.fibration[v]] == static_cast<size_t>(-1)) {
+            return MAKE_ERROR
+                << "rule_weakening: source vertex " << v
+                << " maps to weakened-in entry (I-2 violation slipped past gate)";
+        }
+    }
+    lift_source(child, z, st.target);
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+    return res;
+}
+
+util::Result<WalkResult> rule_contraction(
+    WalkContext&                            cc,
+    const lkr::Contraction&                 op,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Hypothesis: child's entries are parent_seq with entries[op.i]
+    // duplicated at op.j. Conclusion: parent_seq (drops the dup).
+    if (op.i >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_contraction: i OOR";
+    }
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // Child has parent_seq + one duplicate of entries[i] inserted at
+    // position j. The duplicate maps to parent entry op.i too.
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size() + 1);
+    // The LKR Contraction op records (i, j) where j is the index of the
+    // duplicate-to-remove. Going bottom-up: child entry at position k
+    // maps to parent entry at:
+    //   if k < op.j: k (unchanged)
+    //   if k == op.j: op.i (the dup mapped to the kept entry)
+    //   if k > op.j: k - 1 (shift)
+    for (size_t k = 0; k < parent_seq.size() + 1; ++k) {
+        size_t pk;
+        if (k < op.j) pk = k;
+        else if (k == op.j) pk = op.i;
+        else pk = k - 1;
+        entry_map.push_back(identity_map(pk));
+    }
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+    lift_source(child, z, st.target);
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+    return res;
+}
+
+util::Result<WalkResult> rule_forall(
+    WalkContext&                            cc,
+    const lkr::Forall&                      op,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Hypothesis H = Γ, ϕ[x↦Fixed(eigen)]. Conclusion C = Γ, ∀x.ϕ.
+    // G(C)'s principal entry has a Binder vertex first, then body
+    // vertices. Child's principal entry has just the body (no binder).
+    if (op.principal >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_forall: principal OOR";
+    }
+    const Formula& cf = parent_seq[op.principal].get();
+    if (!cf.is_quantified() || cf.as_quantified().op != Op::Forall) {
+        return MAKE_ERROR << "rule_forall: principal entry is not ∀";
+    }
+
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // Child entry k → parent entry k. For k == principal: child's
+    // principal occupies the parent principal's body (offset 1 — skip
+    // the binder vertex).
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size());
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        if (k == op.principal) {
+            entry_map.push_back(ZEntryTarget{ false, false, op.principal, 1 });
+        } else {
+            entry_map.push_back(identity_map(k));
+        }
+    }
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+
+    // After alpha_rename, op.eigen equals the canonical-target binder
+    // var for this Forall's binder position. The walk's per-hypothesis
+    // targets allocate binder vars in a higher range that doesn't
+    // collide with eigens, so dualizer values (Fixed(eigen)) stay in
+    // canonical-var space throughout the walk — no per-rule eigen
+    // rename needed; only the source-binder var changes captured by
+    // lift_fibration matter.
+    lift_source(child, z, st.target);
+    size_t binder_pos = parent_main_pos[op.principal][0];
+
+    // Determine whether the principal body is "covered" by the child —
+    // i.e., the preimage f^{-1}(V_{G(ϕ)}) is non-empty. If empty,
+    // skip adding the binder vertex (Hughes Case A).
+    std::unordered_set<size_t> body_pos(
+        parent_main_pos[op.principal].begin() + 1,
+        parent_main_pos[op.principal].end());
+    bool covered = false;
+    for (size_t v : child.fibration) {
+        if (body_pos.count(v)) { covered = true; break; }
+    }
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+
+    if (covered) {
+        size_t new_v = res.source.num_vertex;
+        res.source.num_vertex = new_v + 1;
+        res.fibration.push_back(binder_pos);
+    }
+    return res;
+}
+
+util::Result<WalkResult> rule_exists(
+    WalkContext&                            cc,
+    const lkr::Exists&                      op,
+    WalkResult                              child,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    if (op.principal >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_exists: principal OOR";
+    }
+    const Formula& cf = parent_seq[op.principal].get();
+    if (!cf.is_quantified() || cf.as_quantified().op != Op::Exists) {
+        return MAKE_ERROR << "rule_exists: principal entry is not ∃";
+    }
+
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, child.cut_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    std::vector<ZEntryTarget> entry_map;
+    entry_map.reserve(parent_seq.size());
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        if (k == op.principal) {
+            entry_map.push_back(ZEntryTarget{ false, false, op.principal, 1 });
+        } else {
+            entry_map.push_back(identity_map(k));
+        }
+    }
+    auto sum_map = summands_identity(child.cut_summands.size());
+    auto z = build_z(child.entry_positions, child.cut_summand_positions,
+                     parent_main_pos, parent_sum_pos,
+                     entry_map, sum_map, child.target.labels.size());
+
+    lift_source(child, z, st.target);
+
+    size_t binder_pos = parent_main_pos[op.principal][0];
+    std::unordered_set<size_t> body_pos(
+        parent_main_pos[op.principal].begin() + 1,
+        parent_main_pos[op.principal].end());
+    std::vector<size_t> P;
+    for (size_t v = 0; v < child.fibration.size(); ++v) {
+        if (body_pos.count(child.fibration[v])) P.push_back(v);
+    }
+
+    WalkResult res;
+    res.source                = std::move(child.source);
+    res.fibration             = std::move(child.fibration);
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(child.cut_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+
+    if (P.empty()) {
+        // Case A: preimage empty.
+        return res;
+    }
+
+    // Case B: add binder vertex with ×-edges to every vertex in P.
+    size_t new_v = res.source.num_vertex;
+    res.source.num_vertex = new_v + 1;
+    res.fibration.push_back(binder_pos);
+    for (size_t p : P) {
+        res.source.cograph_edges.push_back({new_v, p});
+    }
+
+    // Add δ(parent_v) = witness. Witness comes from replay's term_env
+    // by op.witness's TermRef. If the witness references an LKR eigen
+    // (e.g., from a Forall above us in the tree), it will be remapped
+    // when that Forall's rule_forall lift fires.
+    if (op.witness.idx >= cc.replay.term_env.size() ||
+        !cc.replay.term_env[op.witness.idx].has_value()) {
+        return MAKE_ERROR
+            << "rule_exists: witness TermRef #" << op.witness.idx
+            << " unresolved";
+    }
+    Term witness = *cc.replay.term_env[op.witness.idx];
+    var_index parent_v = res.target.labels[binder_pos].var;
+    auto it = res.source.dualizer.find(parent_v);
+    if (it == res.source.dualizer.end()) {
+        res.source.dualizer.emplace(parent_v, witness);
+    } else if (!(it->second == witness)) {
+        return MAKE_ERROR
+            << "rule_exists: dualizer conflict for var " << parent_v;
+    }
+    return res;
+}
+
+util::Result<WalkResult> rule_and(
+    WalkContext&                            cc,
+    const lkr::And&                         op,
+    WalkResult                              left,
+    WalkResult                              right,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Conclusion C = Γ_L ∪ Γ_R ∪ {ϕ_L ∧ ϕ_R}, where
+    // Γ_L = parent_seq[k] for k ∈ sorted(op.left_partition),
+    // Γ_R = parent_seq[k] for k ∉ left_partition ∪ {op.principal},
+    // and the principal entry is parent_seq[op.principal] = ϕ_L ∧ ϕ_R.
+    //
+    // LEFT child's entries (per sequent_replay): sorted Γ_L entries
+    //   followed by ϕ_L at the end.
+    // RIGHT child's entries: Γ_R entries (in original order)
+    //   followed by ϕ_R at the end.
+
+    if (op.principal >= parent_seq.size()) {
+        return MAKE_ERROR << "rule_and: principal OOR";
+    }
+    const Formula& cf = parent_seq[op.principal].get();
+    if (!cf.is_compound() || cf.as_compound().op != Op::And) {
+        return MAKE_ERROR << "rule_and: principal entry is not ∧";
+    }
+    FormulaHandle phi_L = cf.as_compound().left;
+    size_t phi_L_count = count_fograph_vertices(phi_L);
+
+    std::unordered_set<size_t> left_set(
+        op.left_partition.begin(), op.left_partition.end());
+    if (left_set.count(op.principal)) {
+        return MAKE_ERROR << "rule_and: partition includes principal";
+    }
+    for (size_t k : op.left_partition) {
+        if (k >= parent_seq.size()) {
+            return MAKE_ERROR << "rule_and: partition OOR";
+        }
+    }
+    std::vector<size_t> sorted_left(op.left_partition.begin(),
+                                    op.left_partition.end());
+    std::sort(sorted_left.begin(), sorted_left.end());
+    std::vector<size_t> right_indices;
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        if (k == op.principal) continue;
+        if (left_set.count(k)) continue;
+        right_indices.push_back(k);
+    }
+
+    // Combined cut summands (LEFT's then RIGHT's in op-stream order).
+    std::vector<FormulaHandle> combined_summands = left.cut_summands;
+    combined_summands.insert(combined_summands.end(),
+                             right.cut_summands.begin(),
+                             right.cut_summands.end());
+
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, combined_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // LEFT child entry map: for k = 0..sorted_left.size()-1, maps to
+    // parent entry sorted_left[k]. For k = sorted_left.size() (the ϕ_L
+    // entry), maps to parent op.principal, offset 0 (first phi_L_count
+    // positions).
+    std::vector<ZEntryTarget> left_entry_map;
+    left_entry_map.reserve(sorted_left.size() + 1);
+    for (size_t k = 0; k < sorted_left.size(); ++k) {
+        left_entry_map.push_back(identity_map(sorted_left[k]));
+    }
+    left_entry_map.push_back(ZEntryTarget{ false, false, op.principal, 0 });
+
+    // RIGHT child entry map: for k = 0..right_indices.size()-1, maps
+    // to parent entry right_indices[k]. For k = right_indices.size()
+    // (the ϕ_R entry), maps to parent op.principal, offset phi_L_count.
+    std::vector<ZEntryTarget> right_entry_map;
+    right_entry_map.reserve(right_indices.size() + 1);
+    for (size_t k = 0; k < right_indices.size(); ++k) {
+        right_entry_map.push_back(identity_map(right_indices[k]));
+    }
+    right_entry_map.push_back(ZEntryTarget{ false, false, op.principal, phi_L_count });
+
+    // Summand maps: LEFT keeps its own summand indices; RIGHT shifts.
+    std::vector<ZEntryTarget> left_sum_map  =
+        summands_identity(left.cut_summands.size());
+    std::vector<ZEntryTarget> right_sum_map;
+    right_sum_map.reserve(right.cut_summands.size());
+    for (size_t k = 0; k < right.cut_summands.size(); ++k) {
+        right_sum_map.push_back(summand_map(k + left.cut_summands.size()));
+    }
+
+    auto z_L = build_z(left.entry_positions, left.cut_summand_positions,
+                       parent_main_pos, parent_sum_pos,
+                       left_entry_map, left_sum_map,
+                       left.target.labels.size());
+    auto z_R = build_z(right.entry_positions, right.cut_summand_positions,
+                       parent_main_pos, parent_sum_pos,
+                       right_entry_map, right_sum_map,
+                       right.target.labels.size());
+
+    lift_source(left, z_L, st.target);
+    lift_source(right, z_R, st.target);
+
+    // Witness portions: P_L = f_L^{-1}(V_{G(ϕ_L)});
+    //                   P_R = f_R^{-1}(V_{G(ϕ_R)}).
+    std::unordered_set<size_t> phi_L_canonical(
+        parent_main_pos[op.principal].begin(),
+        parent_main_pos[op.principal].begin() + phi_L_count);
+    std::unordered_set<size_t> phi_R_canonical(
+        parent_main_pos[op.principal].begin() + phi_L_count,
+        parent_main_pos[op.principal].end());
+
+    std::vector<size_t> P_L, P_R;
+    for (size_t v = 0; v < left.fibration.size(); ++v) {
+        if (phi_L_canonical.count(left.fibration[v])) P_L.push_back(v);
+    }
+    for (size_t v = 0; v < right.fibration.size(); ++v) {
+        if (phi_R_canonical.count(right.fibration[v])) P_R.push_back(v);
+    }
+
+    bool left_strong  = !P_L.empty();
+    bool right_strong = !P_R.empty();
+
+    WalkResult res;
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(combined_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+
+    if (left_strong && right_strong) {
+        fuse_disjoint(res, std::move(left), std::move(right),
+                       P_L, P_R, /*add_cross=*/true);
+    } else if (left_strong && !right_strong) {
+        // RIGHT is weak — keep RIGHT alone.
+        res.source    = std::move(right.source);
+        res.fibration = std::move(right.fibration);
+    } else if (!left_strong && right_strong) {
+        res.source    = std::move(left.source);
+        res.fibration = std::move(left.fibration);
+    } else {
+        // Both weak — fuse without cross-edges.
+        fuse_disjoint(res, std::move(left), std::move(right),
+                       P_L, P_R, /*add_cross=*/false);
+    }
+    return res;
+}
+
+util::Result<WalkResult> rule_cut(
+    WalkContext&                            cc,
+    const lkr::Cut&                         op,
+    WalkResult                              left,
+    WalkResult                              right,
+    const std::vector<FormulaHandle>&       parent_seq)
+{
+    // Cut(θ): LEFT premise's entries = parent_seq + [θ_nnf]
+    //         RIGHT premise's entries = parent_seq + [¬θ_nnf]
+    // Conclusion target adds the (θ ∧ ¬θ) augmentation as a new cut
+    // summand on top of the merged LEFT+RIGHT cut summands.
+
+    auto* h = std::get_if<FormulaHandle>(&op.cut_formula);
+    if (!h || !h->valid()) {
+        return MAKE_ERROR
+            << "rule_cut: cut_formula is deferred AST (unsupported)";
+    }
+    FormulaHandle theta_nnf     = cc.builder.to_nnf(*h);
+    FormulaHandle neg_theta_nnf = cc.builder.to_nnf_neg(*h);
+    FormulaHandle theta_block   = cc.builder.make_and(theta_nnf, neg_theta_nnf);
+    size_t theta_count     = count_fograph_vertices(theta_nnf);
+    size_t neg_theta_count = count_fograph_vertices(neg_theta_nnf);
+
+    // Combined summands in op-stream order: this (outer) cut's block
+    // comes FIRST, then deeper LEFT-subtree summands, then deeper
+    // RIGHT-subtree summands. This matches build_cut_augmentation's
+    // linear op-order scan, which the root renormalization assumes.
+    std::vector<FormulaHandle> combined_summands;
+    combined_summands.reserve(1 + left.cut_summands.size() +
+                              right.cut_summands.size());
+    combined_summands.push_back(theta_block);
+    combined_summands.insert(combined_summands.end(),
+                             left.cut_summands.begin(),
+                             left.cut_summands.end());
+    combined_summands.insert(combined_summands.end(),
+                             right.cut_summands.begin(),
+                             right.cut_summands.end());
+
+    TRY_ASSIGN(st, build_parent_target_with_summands(
+        cc, parent_seq, combined_summands));
+    std::vector<std::vector<size_t>> parent_main_pos, parent_sum_pos;
+    split_target_positions(st, parent_seq.size(),
+                           parent_main_pos, parent_sum_pos);
+
+    // The new (θ ∧ ¬θ) summand is now at index 0 of parent_sum_pos.
+    // Its vertex positions are split: first theta_count for θ, rest
+    // for ¬θ.
+    size_t new_summand_idx = 0;
+    const auto& new_summand_pos = parent_sum_pos[new_summand_idx];
+    if (new_summand_pos.size() != theta_count + neg_theta_count) {
+        return MAKE_ERROR
+            << "rule_cut: new summand position count mismatch";
+    }
+
+    // LEFT child entry map: parent_seq entries identity; child's last
+    // entry (θ) maps to the new summand's first theta_count positions.
+    std::vector<ZEntryTarget> left_entry_map;
+    left_entry_map.reserve(parent_seq.size() + 1);
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        left_entry_map.push_back(identity_map(k));
+    }
+    left_entry_map.push_back(ZEntryTarget{
+        /*is_dropped=*/false,
+        /*is_summand=*/true,
+        /*parent_idx=*/new_summand_idx,
+        /*offset=*/0 });
+
+    std::vector<ZEntryTarget> right_entry_map;
+    right_entry_map.reserve(parent_seq.size() + 1);
+    for (size_t k = 0; k < parent_seq.size(); ++k) {
+        right_entry_map.push_back(identity_map(k));
+    }
+    right_entry_map.push_back(ZEntryTarget{
+        /*is_dropped=*/false,
+        /*is_summand=*/true,
+        /*parent_idx=*/new_summand_idx,
+        /*offset=*/theta_count });
+
+    // Summand maps: LEFT's summands shift by 1 (this cut's block
+    // is at index 0); RIGHT's shift by 1 + left.cut_summands.size().
+    std::vector<ZEntryTarget> left_sum_map;
+    left_sum_map.reserve(left.cut_summands.size());
+    for (size_t k = 0; k < left.cut_summands.size(); ++k) {
+        left_sum_map.push_back(summand_map(k + 1));
+    }
+    std::vector<ZEntryTarget> right_sum_map;
+    right_sum_map.reserve(right.cut_summands.size());
+    for (size_t k = 0; k < right.cut_summands.size(); ++k) {
+        right_sum_map.push_back(summand_map(k + 1 + left.cut_summands.size()));
+    }
+
+    auto z_L = build_z(left.entry_positions, left.cut_summand_positions,
+                       parent_main_pos, parent_sum_pos,
+                       left_entry_map, left_sum_map,
+                       left.target.labels.size());
+    auto z_R = build_z(right.entry_positions, right.cut_summand_positions,
+                       parent_main_pos, parent_sum_pos,
+                       right_entry_map, right_sum_map,
+                       right.target.labels.size());
+
+    lift_source(left, z_L, st.target);
+    lift_source(right, z_R, st.target);
+
+    // Witness portions over the new summand's θ / ¬θ halves.
+    std::unordered_set<size_t> theta_canonical(
+        new_summand_pos.begin(), new_summand_pos.begin() + theta_count);
+    std::unordered_set<size_t> neg_theta_canonical(
+        new_summand_pos.begin() + theta_count, new_summand_pos.end());
+
+    std::vector<size_t> P_L, P_R;
+    for (size_t v = 0; v < left.fibration.size(); ++v) {
+        if (theta_canonical.count(left.fibration[v])) P_L.push_back(v);
+    }
+    for (size_t v = 0; v < right.fibration.size(); ++v) {
+        if (neg_theta_canonical.count(right.fibration[v])) P_R.push_back(v);
+    }
+
+    bool left_strong  = !P_L.empty();
+    bool right_strong = !P_R.empty();
+
+    WalkResult res;
+    res.target                = std::move(st.target);
+    res.entry_positions       = std::move(parent_main_pos);
+    res.cut_summands          = std::move(combined_summands);
+    res.cut_summand_positions = std::move(parent_sum_pos);
+
+    if (left_strong && right_strong) {
+        fuse_disjoint(res, std::move(left), std::move(right),
+                       P_L, P_R, /*add_cross=*/true);
+    } else if (left_strong && !right_strong) {
+        res.source    = std::move(right.source);
+        res.fibration = std::move(right.fibration);
+    } else if (!left_strong && right_strong) {
+        res.source    = std::move(left.source);
+        res.fibration = std::move(left.fibration);
+    } else {
+        fuse_disjoint(res, std::move(left), std::move(right),
+                       P_L, P_R, /*add_cross=*/false);
+    }
+    return res;
+}
+
+// =====================================================================
+// Walk dispatch.
+// =====================================================================
+
+util::Result<WalkResult> walk_recursive(
     WalkContext&           cc,
     const DerivationTree&  tree);
+
+util::Result<WalkResult> walk_leaf(
+    WalkContext&     cc,
+    const LeafNode&  leaf)
+{
+    const auto& seq   = cc.replay.sequent_before[leaf.op_idx];
+    const auto& instr = cc.prog.instrs[leaf.op_idx];
+    if (auto* ax = std::get_if<lkr::AxiomLit>(&instr)) {
+        return rule_axiom_lit(cc, *ax, seq);
+    }
+    if (auto* one = std::get_if<lkr::One>(&instr)) {
+        return rule_one(cc, *one, seq);
+    }
+    if (auto* cbl = std::get_if<lkr::CloseByLemma>(&instr)) {
+        return rule_close_by_lemma(cc, *cbl);
+    }
+    return MAKE_ERROR
+        << "walk(Leaf): op variant " << instr.index() << " unsupported";
+}
+
+util::Result<WalkResult> walk_linear(
+    WalkContext&       cc,
+    const LinearNode&  lin)
+{
+    TRY_ASSIGN(child, walk_recursive(cc, *lin.child));
+    const auto& parent_seq = cc.replay.sequent_before[lin.op_idx];
+    const auto& instr      = cc.prog.instrs[lin.op_idx];
+
+    if (auto* op = std::get_if<lkr::Or>(&instr)) {
+        return rule_or(cc, *op, std::move(child), parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Exchange>(&instr)) {
+        return rule_exchange(cc, *op, std::move(child), parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Weakening>(&instr)) {
+        return rule_weakening(cc, *op, std::move(child), parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Contraction>(&instr)) {
+        return rule_contraction(cc, *op, std::move(child), parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Forall>(&instr)) {
+        return rule_forall(cc, *op, std::move(child), parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Exists>(&instr)) {
+        return rule_exists(cc, *op, std::move(child), parent_seq);
+    }
+    return MAKE_ERROR
+        << "walk(Linear): op variant " << instr.index() << " unsupported";
+}
+
+util::Result<WalkResult> walk_branching(
+    WalkContext&          cc,
+    const BranchingNode&  br)
+{
+    TRY_ASSIGN(left,  walk_recursive(cc, *br.left));
+    TRY_ASSIGN(right, walk_recursive(cc, *br.right));
+    const auto& parent_seq = cc.replay.sequent_before[br.op_idx];
+    const auto& instr      = cc.prog.instrs[br.op_idx];
+    if (auto* op = std::get_if<lkr::And>(&instr)) {
+        return rule_and(cc, *op, std::move(left), std::move(right),
+                         parent_seq);
+    }
+    if (auto* op = std::get_if<lkr::Cut>(&instr)) {
+        return rule_cut(cc, *op, std::move(left), std::move(right),
+                         parent_seq);
+    }
+    return MAKE_ERROR
+        << "walk(Branching): op variant " << instr.index() << " unsupported";
+}
+
+util::Result<WalkResult> walk_recursive(
+    WalkContext&           cc,
+    const DerivationTree&  tree)
+{
+    if (auto* leaf = std::get_if<LeafNode>(&tree.node)) {
+        return walk_leaf(cc, *leaf);
+    }
+    if (auto* lin = std::get_if<LinearNode>(&tree.node)) {
+        return walk_linear(cc, *lin);
+    }
+    if (auto* br = std::get_if<BranchingNode>(&tree.node)) {
+        return walk_branching(cc, *br);
+    }
+    return MAKE_ERROR << "walk: unreachable tree node variant";
+}
 
 }  // namespace
 
 util::Result<comb::CombProof> walk(
     WalkContext&           cc,
-    const DerivationTree&  tree)
+    const DerivationTree&  tree,
+    FormulaHandle          augmented_goal_formula)
 {
-    TRY_ASSIGN(cp, walk_recursive(cc, tree));
-    derive_binding_edges(cp, cc.canonical_target);
+    TRY_ASSIGN(wr, walk_recursive(cc, tree));
+
+    // Replace the root target with the canonical Fograph(NNF(augmented
+    // goal)) so its binder vars start from 0 (matching what
+    // CombVerifier rebuilds for structural comparison). The walk's
+    // per-hypothesis targets use a fresh higher range to avoid
+    // collisions with LKR eigens; we renormalize at the root boundary.
+    //
+    // The two fographs are structurally identical (same vertex count,
+    // kinds, edges, positions) by construction — only binder var
+    // labels and atom args differ. We rebuild a var_remap from the
+    // walk's target vars to the canonical vars and apply it to the
+    // source's dualizer.
+    FormulaHandle augmented_nnf = cc.builder.to_nnf(augmented_goal_formula);
+    comb::Fograph canonical_target(augmented_nnf);
+    if (canonical_target.labels.size() != wr.target.labels.size()) {
+        return MAKE_ERROR
+            << "walk root: canonical target has " << canonical_target.labels.size()
+            << " vertices, walk target has " << wr.target.labels.size();
+    }
+    std::unordered_map<var_index, var_index> root_remap;
+    for (size_t i = 0; i < canonical_target.labels.size(); ++i) {
+        const auto& w_lbl = wr.target.labels[i];
+        const auto& c_lbl = canonical_target.labels[i];
+        if (w_lbl.kind == comb::VertexKind::Binder &&
+            c_lbl.kind == comb::VertexKind::Binder)
+        {
+            root_remap[w_lbl.var] = c_lbl.var;
+        }
+    }
+    apply_var_remap_to_dualizer(wr.source, root_remap);
+    wr.target = std::move(canonical_target);
+
+    derive_binding_edges(wr.source, wr.fibration, wr.target);
+
+    comb::CombProof cp;
+    cp.source    = std::move(wr.source);
+    cp.target    = std::move(wr.target);
+    cp.fibration = std::move(wr.fibration);
     return cp;
 }
-
-namespace {
-
-util::Result<comb::CombProof> walk_recursive(
-    WalkContext&           cc,
-    const DerivationTree&  tree)
-{
-    if (auto* leaf = std::get_if<LeafNode>(&tree.node)) {
-        const auto& seq    = cc.replay.sequent_before[leaf->op_idx];
-        const auto& posv   = cc.replay.entry_positions[leaf->op_idx];
-        const auto& instr  = cc.prog.instrs[leaf->op_idx];
-        if (auto* ax = std::get_if<lkr::AxiomLit>(&instr)) {
-            return build_leaf_axiom_lit(cc, *ax, seq, posv);
-        }
-        if (auto* one = std::get_if<lkr::One>(&instr)) {
-            return build_leaf_one(cc, *one, seq, posv);
-        }
-        if (auto* cbl = std::get_if<lkr::CloseByLemma>(&instr)) {
-            return build_leaf_close_by_lemma(cc, *cbl, posv);
-        }
-        return MAKE_ERROR
-            << "walk(Leaf): op variant " << instr.index()
-            << " not yet supported";
-    }
-
-    if (auto* lin = std::get_if<LinearNode>(&tree.node)) {
-        TRY_ASSIGN(child, walk_recursive(cc, *lin->child));
-        const auto& posv  = cc.replay.entry_positions[lin->op_idx];
-        const auto& instr = cc.prog.instrs[lin->op_idx];
-        if (auto* op = std::get_if<lkr::Forall>(&instr)) {
-            return rule_forall(cc, *op, std::move(child), posv, op->principal);
-        }
-        if (auto* op = std::get_if<lkr::Exists>(&instr)) {
-            return rule_exists(cc, *op, std::move(child), posv, op->principal);
-        }
-        if (std::holds_alternative<lkr::Or>(instr) ||
-            std::holds_alternative<lkr::Exchange>(instr) ||
-            std::holds_alternative<lkr::Weakening>(instr) ||
-            std::holds_alternative<lkr::Contraction>(instr)) {
-            // -------------------------------------------------------------
-            // Rule: Or  (Hughes §11.1 ∨-case; LKR_TO_COMB_DESIGN.md §4.6)
-            //   G(H) = G(C) identically (cograph associativity). f, N
-            //   unchanged — the cheapest rule.
-            //
-            // Rule: Exchange  (Hughes §11.1 X-case; §4.3)
-            //   Cograph commutativity. Vertices identified by occurrence
-            //   (canonical position), so the canonical bijection is the
-            //   identity at the structural level. f, N unchanged.
-            //
-            // Rule: Weakening  (Hughes §11.1 W-case; §4.4)
-            //   Scaffolding case (entry never referenced by later ops):
-            //   no-op. The walk's input gate (`I-2 check`) rejects
-            //   load-bearing Weakening — see §4.4 Case B.
-            //
-            // Rule: Contraction  (Hughes §11.1 C-case + footnote 24; §4.5)
-            //   No-op in our §15 framework. The canonical target is built
-            //   up-front from the augmented goal and doesn't shrink under
-            //   Contraction. Source vertices are added by subsequent
-            //   closing/per-rule ops referencing the post-Contraction
-            //   sequent; no source-level changes are needed here.
-            //   Hughes' duplicator-collapse case from footnote 24 arises
-            //   only when the target shrinks; in our framework it doesn't.
-            //
-            // Soundness (all four): trivial; child is already a valid
-            //   CombProof against the shared canonical target.
-            // -------------------------------------------------------------
-            return child;
-        }
-        return MAKE_ERROR
-            << "walk(Linear): op variant " << instr.index()
-            << " not yet supported (only Or/Exchange/Weakening handled "
-            << "in phase 4)";
-    }
-
-    if (auto* br = std::get_if<BranchingNode>(&tree.node)) {
-        const auto& seq   = cc.replay.sequent_before[br->op_idx];
-        const auto& posv  = cc.replay.entry_positions[br->op_idx];
-        const auto& instr = cc.prog.instrs[br->op_idx];
-        if (auto* op = std::get_if<lkr::And>(&instr)) {
-            TRY_ASSIGN(left_cp,  walk_recursive(cc, *br->left));
-            TRY_ASSIGN(right_cp, walk_recursive(cc, *br->right));
-            return rule_and(cc, *op, std::move(left_cp),
-                             std::move(right_cp), seq, posv);
-        }
-        if (std::holds_alternative<lkr::Cut>(instr)) {
-            TRY_ASSIGN(left_cp,  walk_recursive(cc, *br->left));
-            TRY_ASSIGN(right_cp, walk_recursive(cc, *br->right));
-            // The Cut's LEFT subgoal has θ as its last entry. Use the
-            // FIRST op-position inside the LEFT subtree to read the
-            // post-Cut sequent's positions for the cut entry.
-            // Simpler: look at the LEFT child's first op's positions[last_entry].
-            // We need theta_positions and neg_theta_positions. The Cut
-            // appended them to the child subgoals' positions vectors.
-            // Recover them from the LEFT child's first op snapshot.
-            uint32_t left_first_op = static_cast<uint32_t>(-1);
-            if (auto* l = std::get_if<LeafNode>(&br->left->node))
-                left_first_op = l->op_idx;
-            else if (auto* l = std::get_if<LinearNode>(&br->left->node))
-                left_first_op = l->op_idx;
-            else if (auto* l = std::get_if<BranchingNode>(&br->left->node))
-                left_first_op = l->op_idx;
-            if (left_first_op == static_cast<uint32_t>(-1)) {
-                return MAKE_ERROR
-                    << "walk(Cut): LEFT subtree first op not located";
-            }
-            const auto& left_first_posv =
-                cc.replay.entry_positions[left_first_op];
-            if (left_first_posv.empty()) {
-                return MAKE_ERROR
-                    << "walk(Cut): LEFT subgoal has no entries";
-            }
-            const std::vector<size_t>& theta_positions =
-                left_first_posv.back();
-
-            uint32_t right_first_op = static_cast<uint32_t>(-1);
-            if (auto* r = std::get_if<LeafNode>(&br->right->node))
-                right_first_op = r->op_idx;
-            else if (auto* r = std::get_if<LinearNode>(&br->right->node))
-                right_first_op = r->op_idx;
-            else if (auto* r = std::get_if<BranchingNode>(&br->right->node))
-                right_first_op = r->op_idx;
-            if (right_first_op == static_cast<uint32_t>(-1)) {
-                return MAKE_ERROR
-                    << "walk(Cut): RIGHT subtree first op not located";
-            }
-            const auto& right_first_posv =
-                cc.replay.entry_positions[right_first_op];
-            if (right_first_posv.empty()) {
-                return MAKE_ERROR
-                    << "walk(Cut): RIGHT subgoal has no entries";
-            }
-            const std::vector<size_t>& neg_theta_positions =
-                right_first_posv.back();
-
-            (void)seq;
-            (void)posv;
-            return rule_cut(cc, std::move(left_cp), std::move(right_cp),
-                             theta_positions, neg_theta_positions);
-        }
-        return MAKE_ERROR
-            << "walk(Branching): op variant " << instr.index()
-            << " not yet supported";
-    }
-
-    return MAKE_ERROR << "walk: unreachable tree node variant";
-}
-
-}  // namespace
 
 }  // namespace logic::proof::translate::lkr_to_comb

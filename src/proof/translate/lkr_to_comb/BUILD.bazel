@@ -43,6 +43,22 @@ cc_library(
     ],
 )
 
+# build_target — per-hypothesis target construction. Builds
+# G(ψ_1) + … + G(ψ_n) for a sequent of NNF entries plus per-entry vertex
+# position vectors. Used by the F2 walk to construct G(H_i) at child
+# nodes and G(C) at parent nodes per Hughes §11.1.
+cc_library(
+    name = "build_target",
+    srcs = ["build_target.cpp"],
+    hdrs = ["build_target.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/util:error",
+    ],
+)
+
 # SequentReplay — non-checking simulation of LKR's open-goals stack.
 # Computes the per-op conclusion sequent (the goal entries the op
 # operates on) needed by the §11.1 leaf and per-rule operations.
@@ -98,13 +114,15 @@ cc_library(
     ],
 )
 
-# §11.1 walk — recursive translation of DerivationTree → CombProof.
+# §11.1 walk — recursive translation of DerivationTree → CombProof
+# against the §15-augmented goal, per-hypothesis targets (F2).
 cc_library(
     name = "walk",
     srcs = ["walk.cpp"],
     hdrs = ["walk.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":build_target",
         ":lemma_inliner",
         ":sequent_replay",
         ":tree",
@@ -131,9 +149,8 @@ cc_library(
     ],
 )
 
-# LKRtoComb — top-level pass. Phase 4 partial (AxiomLit leaf + Or /
-# Exchange / Weakening linear ops). And/Cut/Forall/Exists/Contraction/
-# CloseByLemma pending (phases 5-8).
+# LKRtoComb — top-level pass. F2 per-hypothesis target architecture
+# (LKR_TO_COMB_F2_DESIGN.md).
 cc_library(
     name = "lkr_to_comb",
     srcs = ["lkr_to_comb.cpp"],

@@ -1327,6 +1327,15 @@ void test_integration_two_axioms_to_comb() {
 //   "is_fonet: C.2 expected a singleton binder, got part of size 2"
 // (leap.cpp:575). The fix is in LKRtoComb's binder handling
 // (LKR_TO_COMB_DESIGN.md §8 "Modular decomposition during translation").
+//
+// 2026-05-18 update: the F2 per-hypothesis-target rewrite landed
+// (LKR_TO_COMB_F2_DESIGN.md). The simpler walk tests all pass, but
+// this test STILL fails with the same C.2 error. F2 fixes the
+// portion-closure / fusion issue (rule_and, rule_cut) but does not
+// automatically prevent the binder-cluster C.2 violation that arises
+// when nested existentials (from NNF-ing ∀ negations in the
+// axiom_rewrap wrap) create dense cograph structure. The spec's
+// claim "F2 handles this by construction" was too optimistic.
 #if 0
 void test_integration_nested_forall_axiom() {
     Runtime rt;
@@ -1393,6 +1402,10 @@ void test_integration_nested_forall_axiom() {
 // The fix belongs in the LKRtoComb walk's binder-vertex handling
 // (separate obligation). Leaving this test commented-out for now;
 // re-enable once that limitation is addressed.
+//
+// 2026-05-18 update: F2 rewrite (LKR_TO_COMB_F2_DESIGN.md) landed but
+// did NOT clear this test — same C.2 symptom as before. See sibling
+// test_integration_nested_forall_axiom comment for details.
 #if 0
 void test_integration_zfc_eq_refl() {
     Runtime rt;
@@ -1548,12 +1561,10 @@ int main() {
     test_integration_simple_axiom_to_comb();
     test_integration_two_axioms_to_comb();
     test_integration_zfc_style_quantified_axiom();
-    // Tests 4 (nested_forall_axiom) + 5 (zfc_eq_refl) disabled — see
-    // their #if 0 comments. Both block on a downstream LKRtoComb cotree
-    // limitation that triggers for 2-level nested quantifiers in the
-    // wrapped goal; axiom_rewrap itself works on these inputs (its
-    // NDVerifier output gate accepts), so the obligation is in
-    // LKR_TO_COMB_DESIGN.md §8, not here.
+    // Tests 4 (nested_forall_axiom) + 5 (zfc_eq_refl) still disabled.
+    // The F2 rewrite (LKR_TO_COMB_F2_DESIGN.md) landed but did not
+    // resolve the C.2 binder-cluster issue these tests surface. See
+    // their #if 0 comments for the updated assessment.
 
     std::cerr << "axiom_rewrap_test: passed " << g_passed
               << ", failed " << g_failed << "\n";

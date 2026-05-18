@@ -1,6 +1,12 @@
 # LKR → Comb F2: Paper-Faithful Per-Hypothesis Target Architecture
 
-Status: spec draft. Implementation not started.
+Status: implemented 2026-05-18. Validation gate: **partial** —
+8/8 test targets green and 18/18 lkr_to_comb_test pass, but the
+two Phase 6 axiom_rewrap tests (`test_integration_nested_forall_axiom`,
+`test_integration_zfc_eq_refl`) STILL hit the original C.2
+binder-cluster error. The §6 "Coverage gained" claim below was
+overoptimistic — see §12 Findings for the post-implementation
+assessment.
 
 This doc specifies the migration of `LKRtoComb` from the current shared
 canonical target (`G(augmented_goal)` for every subproof) to Hughes
@@ -366,6 +372,70 @@ the full pipeline.
   C could potentially be interleaved per-rule (refactor one rule
   end-to-end, then the next). Decide once we see how invasive Phase C
   is for the first rule.
+
+## 12. Post-implementation findings (2026-05-18)
+
+The F2 rewrite landed and the architecture is in place per §7:
+per-hypothesis targets, per-rule operations against G(H_i), no
+shared canonical target during the walk, `cut_augment` reduced to
+augmented-goal computation, alpha-rename retained for witness-term
+canonicalization (open question §10 closed: keeping it is cleaner).
+
+**What works.** All 18 lkr_to_comb_test cases pass, including
+nested existentials, mixed forall/exists, lemma inlining with
+cuts, classical absurd, peirce. All 74 enabled axiom_rewrap tests
+pass. No regressions in any of the 8 test targets.
+
+**What still fails.** The two `#if 0`'d Phase 6 tests
+(`test_integration_nested_forall_axiom`,
+`test_integration_zfc_eq_refl`) still hit the same
+`leap.cpp:575: C.2 expected a singleton binder, got part of size 2`
+error that motivated F2 in the first place.
+
+**Diagnostic.** The §6 "Coverage gained" paragraph mis-identified
+the failing C.2: there are two C.2s in Hughes 2019. F2 fixes
+Def 3.2 C.2 (every binder's scope is its smallest proper strong
+module) — this property is preserved locally by the per-rule
+operations against per-hypothesis targets. The `leap.cpp:575`
+check is Lemma 10.20 C.2 (the bimatching cotree decomposition's
+sub-case for existential quantification), a different and
+stronger requirement: when the cotree splits at a bridge into
+parts where one side has no literal, that side must be a
+*singleton existential binder*.
+
+Hughes's `rule_exists` (which our implementation follows verbatim:
+"K^+ extends K with vertex v and edges from v to every vertex in
+P") naturally produces dense source structure for nested
+existentials and for axiom_rewrap's NNF-wrapped goals — the
+preimage P can include other source binders (introduced by
+deeper rule_forall / rule_exists), so the new existential
+binder gets cograph edges to other binders, not just atoms.
+After enough nesting, the cotree of source has multi-binder
+parts at bridges, which Lemma 10.20 C.2 rejects.
+
+The portion-closure / fusion fix (rule_and, rule_cut) was the
+right architectural cleanup independently — the per-hypothesis
+targets are mathematically correct per §11.1 — but they are not
+sufficient to clear this Lemma 10.20 C.2 obstruction.
+
+**Path forward (separate obligation).** The fix likely lies in
+one of:
+
+- Reading §10.1.1 / §14.2 more carefully for whether Hughes
+  imposes additional structural constraints on source K beyond
+  the per-rule construction (which I believe is what's missing).
+- Investigating whether the NDtoLKR-emitted LKR program is
+  inefficient (e.g., choosing witnesses that force unnecessary
+  cross-edges) and could be normalized to produce a sparser
+  source. Probably not — Hughes's framework is supposed to be
+  complete for any valid LKR derivation.
+- Investigating the leap.cpp C.2 check itself for whether the
+  decomposition strategy admits more flexibility (e.g., picking
+  different bridges) than currently implemented.
+
+This is a research question, not a routine bug. Worth pausing
+F2 obligation as "architecturally landed, pre-existing C.2
+obstruction not cleared" and tracking the C.2 issue separately.
 
 ## 11. References
 

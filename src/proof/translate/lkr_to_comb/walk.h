@@ -1,20 +1,15 @@
 #pragma once
 
-// §11.1 walk — recursive translation of a DerivationTree into a CombProof.
+// F2 walk — recursive translation of a DerivationTree into a CombProof
+// against the §15-augmented goal.
 //
-// Per LKR_TO_COMB_DESIGN.md §3.3, the walk visits each tree node and
-// constructs the (N, G, f) state for that node's subgoal. All subgoals
-// share the canonical target G(initial_goal_nnf); fibrations are built
-// in those canonical coordinates throughout, using the per-entry
-// canonical positions tracked by SequentReplay.
-//
-// **First-phase coverage** (this implementation):
-//   - Leaves: AxiomLit only. One and CloseByLemma deferred.
-//   - Linear: Or, Exchange (no fibration change), Weakening (target
-//     unchanged at this phase; provenance limits Weakening to goals
-//     whose new entries weren't subsequently referenced).
-//   - Branching: And (multiplicative, both-strong + degenerate cases).
-//   - Cut, Contraction, Forall, Exists, CloseByLemma deferred.
+// Per LKR_TO_COMB_F2_DESIGN.md, each per-rule operation is defined
+// against per-hypothesis targets G(H_i) = G(Γ_i) + G(ϕ_i) (Hughes
+// §11.1, Lemma 11.2). Each walk_recursive call returns a
+// CombProof-like triple (source, target, fibration) against the
+// node's conclusion sequent's target. The root's target is the
+// §15-augmented goal — built compositionally as Cut nodes accumulate
+// (θ ∧ ¬θ) summands bottom-up.
 
 #include "lemma_inliner.h"
 #include "sequent_replay.h"
@@ -31,31 +26,33 @@
 
 namespace logic::proof::translate::lkr_to_comb {
 
-// Mirror of LemmaCombProofs in lkr_to_comb.h. We can't include
-// lkr_to_comb.h here (it transitively depends on us); instead we keep
-// the typedef in both places — they're identical.
-//
-// After Strategy A (§4.12): the registry holds LKR programs, not
-// CombProofs. CloseByLemma is spliced out by the lemma_inliner
-// pre-pass before walk runs, so this map is consulted only by
-// build_leaf_close_by_lemma as a safety-net (which should never fire
-// for spliced programs).
+// Mirror of LemmaCombProofs in lkr_to_comb.h. After Strategy A (§4.12),
+// the registry holds LKR programs, not CombProofs. CloseByLemma is
+// spliced out by the lemma_inliner pre-pass before walk runs, so this
+// map is only consulted as a safety-net fallback (which should never
+// fire for spliced programs).
 using LemmaCombProofs_ = LemmaPrograms;
 
 struct WalkContext {
     FormulaBuilder&             builder;
     const Program<lkr::Instr>&  prog;
     const SequentReplay&        replay;
-    // Canonical target: G(augmented_goal_nnf). All subgoal CombProofs
-    // share this target; only their fonet + fibration differ.
-    const comb::Fograph&        canonical_target;
-    // Lemma registry for CloseByLemma (Strategy B).
     const LemmaCombProofs_&     lemmas;
+    // Allocator for per-hypothesis target binder vars. Walk starts this
+    // above the max LKR eigen so target binder vars never collide with
+    // LKR's Forall eigens (which appear as witness terms in dualizer
+    // values from rule_exists).
+    var_index                   next_target_var{0};
 };
 
-// Translate the tree into a combinatorial proof of the canonical target.
+// Translate the tree into a combinatorial proof of the §15-augmented
+// goal. The output's target is set to a fograph that compares equal
+// (structurally) to Fograph(NNF(augmented_goal)); its source_formula
+// is set to `augmented_goal_formula` so the OutputGate's
+// well-formedness check passes.
 util::Result<comb::CombProof> walk(
     WalkContext&           cc,
-    const DerivationTree&  tree);
+    const DerivationTree&  tree,
+    FormulaHandle          augmented_goal_formula);
 
 }  // namespace logic::proof::translate::lkr_to_comb
