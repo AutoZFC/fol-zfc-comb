@@ -670,7 +670,8 @@ util::Result<comb::CombProof> walk_recursive(
         }
         if (std::holds_alternative<lkr::Or>(instr) ||
             std::holds_alternative<lkr::Exchange>(instr) ||
-            std::holds_alternative<lkr::Weakening>(instr)) {
+            std::holds_alternative<lkr::Weakening>(instr) ||
+            std::holds_alternative<lkr::Contraction>(instr)) {
             // -------------------------------------------------------------
             // Rule: Or  (Hughes §11.1 ∨-case; LKR_TO_COMB_DESIGN.md §4.6)
             //   G(H) = G(C) identically (cograph associativity). f, N
@@ -682,15 +683,20 @@ util::Result<comb::CombProof> walk_recursive(
             //   identity at the structural level. f, N unchanged.
             //
             // Rule: Weakening  (Hughes §11.1 W-case; §4.4)
-            //   PARTIAL: G(C) = G(H) + G(φ) with new G(φ) vertices
-            //   uncovered. When the weakened entry's positions fall
-            //   inside the canonical target's range (built from the
-            //   §15-augmented goal), this is a no-op on N and f.
-            //   When the weakened entry lands outside that range, the
-            //   canonical target must be augmented — see open obligation
-            //   row "Weakening" in COMPLETENESS.md.
+            //   Scaffolding case (entry never referenced by later ops):
+            //   no-op. The walk's input gate (`I-2 check`) rejects
+            //   load-bearing Weakening — see §4.4 Case B.
             //
-            // Soundness (all three): trivial; child is already a valid
+            // Rule: Contraction  (Hughes §11.1 C-case + footnote 24; §4.5)
+            //   No-op in our §15 framework. The canonical target is built
+            //   up-front from the augmented goal and doesn't shrink under
+            //   Contraction. Source vertices are added by subsequent
+            //   closing/per-rule ops referencing the post-Contraction
+            //   sequent; no source-level changes are needed here.
+            //   Hughes' duplicator-collapse case from footnote 24 arises
+            //   only when the target shrinks; in our framework it doesn't.
+            //
+            // Soundness (all four): trivial; child is already a valid
             //   CombProof against the shared canonical target.
             // -------------------------------------------------------------
             return child;

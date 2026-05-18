@@ -552,15 +552,105 @@ different soundness contract.
 4. Update the obligation table row for Weakening from "partial" to
    "✓ done (scaffolding)" with a footnote pointing here.
 
-### 4.5 `Contraction(i, j)` (φ' ≡_α φ)
+### 4.5 `Contraction(i, j)`
 
-`G(C) = G(H) - G(φ')` (one copy of `G(φ)` removed). `f` composed with
-the surjection `c : G(H) ↠ G(C)` folding `G(φ')` onto `G(φ)`. Then:
+#### Rule semantics
 
-**Duplicator collapse.** Any outer universal binder `b ∈ V_{G(C)}` with
-`|f⁻¹(b)| = 2` becomes a *duplicator*. Delete one of its two preimages
-from `N`. Paper footnote 24 explains why this preserves fonet
-well-formedness.
+`Contraction(i, j)`: from a sequent `Γ, φ, φ'` derive `Γ, φ` —
+remove the `j`-th entry, which must equal the `i`-th. LKRVerifier
+requires `entries[i] == entries[j]` (FormulaHandle equality,
+stronger than Hughes' α-equivalence).
+
+Hughes §11.1 C-case:
+- `G(C) = G(H) - G(φ')` — target shrinks (one copy of `G(φ)` removed).
+- `f` composed with the surjection `c : G(H) ↠ G(C)` folding `G(φ')`
+  onto `G(φ)`.
+- **Duplicator collapse** (footnote 24): any outer universal binder
+  `b ∈ V_{G(C)}` with `|f⁻¹(b)| = 2` becomes a duplicator — delete
+  one of its two preimages from `N`. Preserves fonet well-formedness.
+
+#### Why this is a no-op in our §15 framework
+
+The Hughes operation assumes the target evolves alongside the
+sequent. Our pipeline uses §15 with a **fixed canonical target**
+built up-front from the augmented goal. The augmented goal is
+`goal_nnf ∨ ⋁(θ_i ∧ ¬θ_i)`; Contraction doesn't add or remove cut
+formulas, so it doesn't change `cut_aug.augmented_goal` and doesn't
+change `Fograph(augmented_goal)`. The target stays the same.
+
+For the source: source vertices are added by leaf ops (AxiomLit,
+One, CloseByLemma) and by the per-rule operations of Forall/Exists
+Case B. These all reference the *current* LKR sequent. Contraction
+runs before the closing ops of its goal (Contraction is linear, so
+it modifies the top open goal; closing ops on that goal come later).
+Subsequent ops reference the *post*-Contraction sequent (the `j`
+entry is gone), so no source vertices are ever added that fibrate
+to the "removed" entry's positions through Contraction itself.
+
+The duplicator-collapse case from footnote 24 arises when shrinking
+the target merges two binder vertices and the source has two binders
+fibrating to the now-merged one. In our framework, the target
+doesn't shrink — there's no merge — so there's no duplicator to
+collapse.
+
+#### State construction
+
+The walk treats `Contraction(i, j)` as a **no-op**:
+- `N` (source fonet) unchanged.
+- `f` (fibration) unchanged.
+- `cp.target` unchanged.
+
+`sequent_replay` already does the right thing: erase the `j`-th
+entry and its (unused) positions vector. Subsequent ops see the
+shorter sequent.
+
+#### Soundness lemma
+
+**Claim.** Treating `Contraction(i, j)` as a no-op in `walk` produces
+a CombProof that verifies against `cut_aug.augmented_goal` whenever
+the surrounding ops produce a valid CombProof.
+
+**Proof.** `Contraction` doesn't change the canonical target (the
+augmented goal is independent of Contraction). It doesn't add or
+remove source vertices. It doesn't change the fibration. Therefore
+the fonet conditions (Def. 5.3) and skew-bifibration conditions
+(Def. 4.1) hold *if and only if* they held before Contraction —
+they're properties of `(N, T, f)`, none of which change. ∎
+
+#### Interaction with the I-2 Weakening gate
+
+`Contraction(i, j)` has two position references: both `i` and `j`.
+The I-2 check (LKR_TO_COMB_DESIGN.md §4.4) rejects if either is a
+weakening-derived entry. That's correct discipline: contracting away
+a weakening-marked entry would effectively "use" the weakening
+(the proof's structural choice to merge depends on the weakening's
+existence), which violates the scaffolding constraint.
+
+#### Completeness scope
+
+Covers every LKR-accepted program that uses Contraction on
+non-weakening-derived entries. The fact that LKRVerifier requires
+handle equality (not α-equivalence) limits applicability somewhat —
+two formulas built from different `FormulaBuilder` calls won't be
+contractable even if structurally equivalent — but this is the LKR
+verifier's contract, not the translator's.
+
+#### Test plan
+
+1. **`contraction_after_cut`** — goal `p ∨ ¬p`. Or splits.
+   Cut(p) duplicates `p`. Contraction merges. AxiomLit closes.
+   Exercises the canonical Contraction usage pattern.
+2. (Optional) **`contraction_load_bearing_weakening_rejected`** —
+   confirms that Contraction on a weakening-derived entry is
+   rejected by the I-2 gate.
+
+#### Implementation order
+
+1. Add `lkr::Contraction` to `walk_recursive`'s no-op linear branch
+   alongside `Or`/`Exchange`/`Weakening`.
+2. Add the test.
+3. No `sequent_replay` changes (already correct).
+4. Flip the obligation table row.
 
 ### 4.6 `Or(p)`
 

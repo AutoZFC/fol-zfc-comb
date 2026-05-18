@@ -135,7 +135,7 @@ and a test exercises the rule under the relevant verifier gate.
 | One          | LKR_TO_COMB_DESIGN.md §4.2         | walk.cpp::build_leaf_one + fograph.cpp | lkr_to_comb_test::one_minimal/with_sibling, comb_test::builder_one_* | ✓ done   |
 | Exchange     | LKR_TO_COMB_DESIGN.md §4.3         | walk.cpp (no-op linear)              | covered by and_commute                | ✓ done   |
 | Weakening    | LKR_TO_COMB_DESIGN.md §4.4         | walk.cpp + input_gate.cpp::check_no_load_bearing_weakening | weakening_scaffolding + weakening_load_bearing_rejected | ✓ done   |
-| Contraction  | LKR_TO_COMB_DESIGN.md §4.5 (stub)  | pending                              | pending                               | open     |
+| Contraction  | LKR_TO_COMB_DESIGN.md §4.5         | walk.cpp (no-op linear)              | contraction_after_cut                 | ✓ done   |
 | Or           | LKR_TO_COMB_DESIGN.md §4.6         | walk.cpp (no-op linear)              | covered by self_implication           | ✓ done   |
 | Forall       | LKR_TO_COMB_DESIGN.md §4.7 + §7.5  | walk.cpp::rule_forall                | forall_em + nd_to_comb_forall_self    | ✓ done   |
 | Exists       | LKR_TO_COMB_DESIGN.md §4.8 + §7.5  | walk.cpp::rule_exists                | nd_to_comb_forall_self                | ✓ done   |
@@ -233,7 +233,8 @@ which completeness is **not** claimed):
 
 - ND proofs containing iota terms (iota-elim is a separate translator;
   apply it first).
-- LKR programs using `Contraction` or `One` until those rows are done.
+- (Contraction and One are both supported now; the prior version of
+  this list excluded them.)
 - LKR programs with `CloseByLemma` referencing a lemma whose CombProof
   has a non-empty dualizer (until row CloseByLemma is "done").
 - Hand-crafted LKR programs whose `FormulaSource`s are deferred AST

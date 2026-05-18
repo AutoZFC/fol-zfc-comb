@@ -424,6 +424,47 @@ void test_lkr_to_comb_cut_with_exists_lemma() {
     EXPECT_OK(outer_lc.apply(outer));
 }
 
+// Phase 1.4: Contraction (LKR_TO_COMB_DESIGN.md §4.5).
+// Goal: p ∨ ¬p. LKR uses Cut(p) to introduce a duplicate `p` entry,
+// then Contraction to merge, then AxiomLit to close.
+//
+// Walk handles Contraction as a no-op: the augmented goal (and so
+// the canonical target) is built up-front by cut_augment from the
+// program's Cut formulas. Contraction shrinks the LKR sequent only;
+// neither target nor source changes structurally. The "duplicator
+// collapse" from Hughes footnote 24 doesn't arise because our
+// canonical target doesn't shrink.
+void test_lkr_to_comb_contraction_after_cut() {
+    Runtime rt;
+    rt.load("axiom dummy: p");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal  = parse_root(ctx, "p | ~p");
+    FormulaHandle cut_p = parse_root(ctx, "p");
+
+    LKRProgram prog;
+    prog.claim_name = "contraction_after_cut";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    // After Or: [p, ~p].
+    {
+        lkr::Cut c{};
+        c.cut_formula = cut_p;
+        prog.instrs.emplace_back(std::move(c));
+    }
+    // After Cut: LEFT = [p, ~p, p]; RIGHT = [p, ~p, ~p].
+    // On LEFT (top): contract the two p entries.
+    prog.instrs.push_back(lkr::Contraction{{}, 0, 2});
+    // After Contraction: [p, ~p].
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+    // On RIGHT: similar.
+    prog.instrs.push_back(lkr::Contraction{{}, 1, 2});
+    // After: [p, ~p].
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    translate::lkr_to_comb::LemmaCombProofs no_lemmas;
+    translate::lkr_to_comb::LKRtoComb pass(ctx, goal, no_lemmas);
+    EXPECT_OK(pass.apply(prog));
+}
+
 // Phase 1.3: Weakening scaffolding (LKR_TO_COMB_DESIGN.md §4.4 Case A).
 // Goal: p | ¬p. Weakens in q (unused), then closes via AxiomLit on the
 // goal's atoms. The weakening entry has empty positions in
@@ -779,6 +820,7 @@ int main() {
     test_lkr_to_comb_cut_with_lemma();
     test_lkr_to_comb_cut_with_forall_lemma();
     test_lkr_to_comb_cut_with_exists_lemma();
+    test_lkr_to_comb_contraction_after_cut();
     test_lkr_to_comb_weakening_scaffolding();
     test_lkr_to_comb_weakening_load_bearing_rejected();
     test_lkr_to_comb_inline_hand_crafted_cut_lemma();
