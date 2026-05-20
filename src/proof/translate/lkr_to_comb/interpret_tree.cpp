@@ -12,9 +12,14 @@ namespace {
 
 // Conclusion sequent of the op at `op_idx` = the top open goal just
 // before that op runs (replay.sequent_before). Used from P1 onward.
-[[maybe_unused]] const std::vector<FormulaHandle>& conclusion_of(
+const std::vector<FormulaHandle>& conclusion_of(
     const SequentReplay& r, uint32_t op_idx) {
     return r.sequent_before[op_idx];
+}
+
+// op_idx pinned at a derivation-tree node (all three node kinds carry it).
+uint32_t tree_op_idx(const DerivationTree& t) {
+    return std::visit([](const auto& n) { return n.op_idx; }, t.node);
 }
 
 struct Interp {
@@ -95,10 +100,80 @@ struct Interp {
         if (child.is_error()) return child.error();
         const lkr::Instr& op = prog.instrs[n.op_idx];
 
-        if (std::holds_alternative<lkr::Or>(op))
-            return MAKE_ERROR << "interpret_tree: Or not yet implemented (P2)";
-        if (std::holds_alternative<lkr::Exchange>(op))
-            return MAKE_ERROR << "interpret_tree: Exchange not yet implemented (P2)";
+        const std::vector<FormulaHandle>& C = conclusion_of(replay, n.op_idx);
+        const std::vector<FormulaHandle>& H =
+            conclusion_of(replay, tree_op_idx(*n.child));
+
+        if (const auto* orr = std::get_if<lkr::Or>(&op)) {
+            // §11.1 ∨ rule. Hughes' G(H)=G(C) gives g=f, but THIS LKR's
+            // Or moves θ to the end of H (H = Γ split: φ@principal, θ
+            // appended), so G(H) and G(C) differ in vertex ORDER. We
+            // realize Hughes' canonical iso as a vertex remap π and set
+            // f_C = π ∘ f_H. Source is unchanged.
+            //
+            //   C = [c_0 … c_{p-1}, φ∨θ, c_{p+1} … c_{m-1}]   (m entries)
+            //   H = [c_0 … c_{p-1}, φ,   c_{p+1} … c_{m-1}, θ] (m+1 entries)
+            size_t p = orr->principal;
+            if (p >= C.size() || !C[p].get().is_compound() ||
+                C[p].get().as_compound().op != Op::Or) {
+                return MAKE_ERROR << "interpret_tree: Or principal is not a "
+                                     "disjunction";
+            }
+            const size_t m = C.size();
+            if (H.size() != m + 1) {
+                return MAKE_ERROR << "interpret_tree: Or hypothesis arity "
+                                     "mismatch (expected " << (m + 1)
+                                  << ", got " << H.size() << ")";
+            }
+            std::vector<size_t> Coff = entry_vertex_offsets(fb, C);
+            std::vector<size_t> Hoff = entry_vertex_offsets(fb, H);
+            size_t phi_len = fograph_vertex_count(fb, C[p].get().as_compound().left);
+
+            std::vector<size_t> remap(Hoff.back());
+            for (size_t h = 0; h < H.size(); ++h) {
+                size_t c_start;
+                if (h < p)            c_start = Coff[h];        // prefix
+                else if (h == p)      c_start = Coff[p];        // φ part of φ∨θ
+                else if (h < m)       c_start = Coff[h];        // middle c_{>p}
+                else                  c_start = Coff[p] + phi_len; // θ part
+                size_t len = Hoff[h + 1] - Hoff[h];
+                for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
+            }
+
+            NodeProof np;
+            np.target    = build_sequent_fograph(fb, C);
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(child.value().fibration);
+            for (auto& fv : np.fibration) fv = remap[fv];
+            return np;
+        }
+        if (const auto* ex = std::get_if<lkr::Exchange>(&op)) {
+            // §11.1 X rule: g = x ∘ f, x the canonical iso reordering the
+            // swapped entries. H = C with entries i,j swapped, so H
+            // entry i = C entry j (and vice versa); all others identity.
+            size_t i = ex->i, j = ex->j;
+            if (i >= C.size() || j >= C.size()) {
+                return MAKE_ERROR << "interpret_tree: Exchange index out of range";
+            }
+            if (H.size() != C.size()) {
+                return MAKE_ERROR << "interpret_tree: Exchange arity mismatch";
+            }
+            std::vector<size_t> Coff = entry_vertex_offsets(fb, C);
+            std::vector<size_t> Hoff = entry_vertex_offsets(fb, H);
+            std::vector<size_t> remap(Hoff.back());
+            for (size_t h = 0; h < H.size(); ++h) {
+                size_t c_entry = (h == i) ? j : (h == j) ? i : h;
+                size_t len = Hoff[h + 1] - Hoff[h];
+                for (size_t k = 0; k < len; ++k)
+                    remap[Hoff[h] + k] = Coff[c_entry] + k;
+            }
+            NodeProof np;
+            np.target    = build_sequent_fograph(fb, C);
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(child.value().fibration);
+            for (auto& fv : np.fibration) fv = remap[fv];
+            return np;
+        }
         if (std::holds_alternative<lkr::Weakening>(op))
             return MAKE_ERROR << "interpret_tree: Weakening not yet implemented (P3)";
         if (std::holds_alternative<lkr::Forall>(op))

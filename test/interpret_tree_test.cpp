@@ -80,10 +80,68 @@ void test_p1_one_minimal() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// P2: Or + AxiomLit. goal = p → p (NNF: ¬p ∨ p). LKR = [Or(0),
+// AxiomLit(0,1)]. Or splits the goal into [¬p, p]; AxiomLit closes the
+// dual pair. Exercises both the Or remap and the (P1) AxiomLit leaf
+// end-to-end.
+void test_p2_self_implication() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "p -> p");
+
+    LKRProgram prog;
+    prog.claim_name = "self_impl";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// P2: Or with a middle entry, exercising the non-identity Or remap
+// (θ moves to the end of H, jumping over a middle entry). goal =
+// (p → p) ∨ q  =  (¬p ∨ p) ∨ q. NNF flattens to ¬p ∨ p ∨ q.
+// LKR: Or(0) on the outer ∨ → [¬p ∨ p, q]; Or(0) on ¬p∨p →
+// [¬p, q, p] (p appended past the middle entry q); AxiomLit(0, 2).
+void test_p2_or_with_middle_entry() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "(p -> p) | q");
+
+    LKRProgram prog;
+    prog.claim_name = "or_middle";
+    prog.instrs.push_back(lkr::Or{{}, 0});   // [¬p ∨ p, q]
+    prog.instrs.push_back(lkr::Or{{}, 0});   // [¬p, q, p]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// P2: Exchange. goal = p → p (¬p ∨ p). LKR: Or(0) → [¬p, p];
+// Exchange(0,1) → [p, ¬p]; AxiomLit(0,1) closes the swapped pair.
+void test_p2_exchange() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "p -> p");
+
+    LKRProgram prog;
+    prog.claim_name = "exchange";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Exchange{{}, 0, 1});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
     test_p1_one_minimal();
+    test_p2_self_implication();
+    test_p2_or_with_middle_entry();
+    test_p2_exchange();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
