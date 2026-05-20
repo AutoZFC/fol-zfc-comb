@@ -369,8 +369,34 @@ util::ResultStatus CombVerifier::verify_fonet(
         }
     }
 
+    // 2A.0 — rectification (Hughes Def. §3 / Def. 5.2 precondition).
+    //
+    // Def. 5.2: "Without loss of generality, assume K is rectified."
+    // The dualizer and the dependency characterization (Lemma 10.13)
+    // are only well-defined on rectified fographs. Rectification (Def.
+    // §3) requires each variable to label EXACTLY ONE binder. 2A.3 only
+    // checks "no same-var binder in scope"; two binders sharing a var
+    // across disjoint scopes would pass 2A.3 yet break build_leap_graph
+    // (binder_vertex[var] keeps only the last; the existential/universal
+    // sets collapse them). We enforce global var-uniqueness here.
+    {
+        std::unordered_set<var_index> seen_binder_vars;
+        for (size_t v = 0; v < proof.source.num_vertex; v++) {
+            const VertexLabel& lbl = proof.source_label(v);
+            if (lbl.kind != VertexKind::Binder) continue;
+            if (!seen_binder_vars.insert(lbl.var).second) {
+                return MAKE_ERROR
+                    << "source fonet is not rectified: variable " << lbl.var
+                    << " labels more than one binder (Hughes Def. §3 / Def. 5.2 "
+                       "precondition; build_leap_graph keys by var and would "
+                       "conflate them)";
+            }
+        }
+    }
+
     // Collect existential and universal *variable indices* (from each
-    // binder's label) for use by the dualizer checks.
+    // binder's label) for use by the dualizer checks. After 2A.0 each
+    // var labels exactly one binder, so these sets are unambiguous.
     std::unordered_set<var_index> universal;
     std::unordered_set<var_index> existential;
     for (size_t v = 0; v < proof.source.num_vertex; v++) {

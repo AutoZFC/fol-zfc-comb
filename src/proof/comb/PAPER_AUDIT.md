@@ -43,6 +43,59 @@ The verifier is now paper-faithful within its documented scope.
 
 ---
 
+## Soundness & completeness verdict (2026-05-20)
+
+The verifier checks Def. 6.1: a combinatorial proof of G is a skew
+bifibration f : N → G from a fonet N. Three conditions, three phases.
+
+### RECT-1 (found in the final review, fixed)
+
+Def. 5.2 says "assume K is rectified." The dualizer and the dependency
+characterization (Lemma 10.13) are only well-defined on rectified
+fographs; Def. §3 rectification requires each variable to label exactly
+one binder. 2A.3 only checked "no same-var binder *in scope*", so two
+binders sharing a var across disjoint scopes passed, then corrupted
+`build_leap_graph` (which keys `binder_vertex` by var, last-wins) and
+the existential/universal sets. Closed by 2A.0: global var-uniqueness
+check (`verifier.cpp`).
+
+### Soundness — YES, within scope
+
+Accept ⟹ (N, G, f) is a genuine combinatorial proof ⟹ φ valid (Thm 6.2):
+- Phase 1: target = G(NNF(φ)), builder matches Def. 3.1, NNF preserves validity.
+- Phase 2: N is a fonet — linked fograph (2A.1/2A.2), legal+consistent binders
+  (2A.3 + C3 + C4), rectified (2A.0), dualizer exists (2B + leap-graph MGU),
+  no induced bimatching (2C decomposition + 2C.0 disjointness).
+- Phase 3: f is a skew bifibration — fibration + skew-fibration loops match
+  Def. 4.1; label/existential preservation by the inheritance design (made
+  consistent with structure by 2A.3 C3).
+
+**Scope caveat (CRIT-1):** sound only for variable-only atom args. Hughes
+supports function symbols; the project's `Term` cannot construct them, and
+the verifier rejects anything non-`Fixed` at entry. So: sound for the
+function-symbol-free fragment of FOL.
+
+### Completeness — YES, modulo two WLOG presentation conventions
+
+Genuine combinatorial proof ⟹ accept, provided the proof is presented in
+canonical form:
+- **Vertex order** (P1-1/P1-2): Phase 1 compares positionally. A target with
+  a different vertex order is rejected. Hughes' G is order-free; emitters must
+  match the builder's pre-order. WLOG by Lemma 10.1.
+- **Rectified source** (RECT-1): a non-rectified source is rejected rather than
+  rectified in place. Def. 5.2 rectifies "as needed", so this is WLOG; emitters
+  must present a rectified fonet.
+
+The 2C decomposition itself is complete (MOD-2 backtracking); 2A/2B are exact.
+
+### Net
+
+Sound and complete as a verifier of Def. 6.1 combinatorial proofs, over the
+function-symbol-free fragment, for proofs presented in canonical (rectified,
+pre-ordered) form. No remaining unjustified gaps.
+
+---
+
 
 
 Audit of `src/proof/comb/` against Hughes (2019), "First-order proofs without syntax." The verifier is the only soundness gate; everything below is a deviation from the paper that may affect correctness, completeness, or strictness of acceptance.
