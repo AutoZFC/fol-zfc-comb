@@ -3,6 +3,7 @@
 #include "src/proof/translate/lkr_to_comb/comb_build.h"
 #include "src/util/error.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <set>
@@ -330,10 +331,105 @@ struct Interp {
         if (std::holds_alternative<lkr::Cut>(op)) {
             return MAKE_ERROR << "interpret_tree: Cut is out of scope (cut-free only)";
         }
-        if (std::holds_alternative<lkr::And>(op)) {
-            return MAKE_ERROR << "interpret_tree: And not yet implemented (P6)";
+        const auto* andop = std::get_if<lkr::And>(&op);
+        if (!andop) return MAKE_ERROR << "interpret_tree: unexpected branching op";
+
+        // §11.1 ∧ rule (multiplicative). C = [Γ1,Γ2, φ∧θ @principal];
+        // the LEFT premise H1 = [Γ1, φ] and RIGHT premise H2 = [Γ2, θ],
+        // where Γ is split by left_partition. G(C) puts the φ∧θ block as
+        // G(φ)×G(θ) at `principal`. Each premise injects: z_i : G(H_i) →
+        // G(C). P_i = source vertices landing in φ_i (the conjunct). f_i
+        // is "weak" if P_i empty.
+        //   both strong / both weak → fuse K1,K2 at P1,P2 (Def. 10.4:
+        //     union + cograph edges between every P1 and every P2 vertex);
+        //   one weak → take the weak side alone (its Γ_i already closes C).
+        auto left  = node(*n.left);
+        if (left.is_error())  return left.error();
+        auto right = node(*n.right);
+        if (right.is_error()) return right.error();
+
+        const std::vector<FormulaHandle>& C  = conclusion_of(replay, n.op_idx);
+        const std::vector<FormulaHandle>& H1 = conclusion_of(replay, tree_op_idx(*n.left));
+        const std::vector<FormulaHandle>& H2 = conclusion_of(replay, tree_op_idx(*n.right));
+
+        size_t p = andop->principal;
+        if (p >= C.size() || !C[p].get().is_compound() ||
+            C[p].get().as_compound().op != Op::And) {
+            return MAKE_ERROR << "interpret_tree: And principal is not ∧";
         }
-        return MAKE_ERROR << "interpret_tree: unexpected branching op";
+        std::vector<size_t> Lpart = andop->left_partition;
+        std::sort(Lpart.begin(), Lpart.end());
+        std::vector<size_t> Rpart;
+        {
+            std::unordered_set<size_t> inL(Lpart.begin(), Lpart.end());
+            for (size_t i = 0; i < C.size(); ++i)
+                if (i != p && !inL.count(i)) Rpart.push_back(i);
+        }
+        if (H1.size() != Lpart.size() + 1 || H2.size() != Rpart.size() + 1) {
+            return MAKE_ERROR << "interpret_tree: And premise arity mismatch";
+        }
+
+        comb::Fograph       target = build_sequent_fograph(fb, C);
+        std::vector<size_t> Coff   = entry_vertex_offsets(fb, C);
+        std::vector<size_t> H1off  = entry_vertex_offsets(fb, H1);
+        std::vector<size_t> H2off  = entry_vertex_offsets(fb, H2);
+        size_t phi_len = fograph_vertex_count(fb, C[p].get().as_compound().left);
+
+        // z1 : G(H1) → G(C). H1 = [Γ1 entries (sorted Lpart), φ].
+        std::vector<size_t> z1(H1off.back());
+        for (size_t k = 0; k < Lpart.size(); ++k)
+            for (size_t j = 0, len = H1off[k + 1] - H1off[k]; j < len; ++j)
+                z1[H1off[k] + j] = Coff[Lpart[k]] + j;
+        for (size_t k = Lpart.size(), j = 0, len = H1off[k + 1] - H1off[k]; j < len; ++j)
+            z1[H1off[k] + j] = Coff[p] + j;                 // φ part of φ∧θ
+        // z2 : G(H2) → G(C). H2 = [Γ2 entries (sorted Rpart), θ].
+        std::vector<size_t> z2(H2off.back());
+        for (size_t k = 0; k < Rpart.size(); ++k)
+            for (size_t j = 0, len = H2off[k + 1] - H2off[k]; j < len; ++j)
+                z2[H2off[k] + j] = Coff[Rpart[k]] + j;
+        for (size_t k = Rpart.size(), j = 0, len = H2off[k + 1] - H2off[k]; j < len; ++j)
+            z2[H2off[k] + j] = Coff[p] + phi_len + j;        // θ part of φ∧θ
+
+        std::vector<size_t> f1 = std::move(left.value().fibration);
+        for (auto& v : f1) v = z1[v];
+        std::vector<size_t> f2 = std::move(right.value().fibration);
+        for (auto& v : f2) v = z2[v];
+
+        const size_t phi_lo = Coff[p],          phi_hi = Coff[p] + phi_len;
+        const size_t the_lo = Coff[p] + phi_len, the_hi = Coff[p + 1];
+        std::vector<size_t> P1, P2;
+        for (size_t v = 0; v < f1.size(); ++v)
+            if (f1[v] >= phi_lo && f1[v] < phi_hi) P1.push_back(v);
+        for (size_t v = 0; v < f2.size(); ++v)
+            if (f2[v] >= the_lo && f2[v] < the_hi) P2.push_back(v);
+        const bool w1 = P1.empty(), w2 = P2.empty();
+
+        NodeProof np;
+        np.target = std::move(target);
+
+        if (w1 != w2) {
+            // Mixed: the weak side's Γ_i already closes C (its conjunct
+            // is uncovered); take it alone, drop the other premise.
+            if (w1) { np.source = std::move(left.value().source);  np.fibration = std::move(f1); }
+            else    { np.source = std::move(right.value().source); np.fibration = std::move(f2); }
+            return np;
+        }
+
+        // Both strong or both weak: fusion of K1 and K2 at P1, P2.
+        comb::Fonet& L = left.value().source;
+        comb::Fonet& R = right.value().source;
+        const size_t off = L.num_vertex;
+        np.source.num_vertex = L.num_vertex + R.num_vertex;
+        np.source.links = L.links;
+        for (auto e : R.links)         np.source.links.push_back({e.first + off, e.second + off});
+        np.source.cograph_edges = L.cograph_edges;
+        for (auto e : R.cograph_edges) np.source.cograph_edges.push_back({e.first + off, e.second + off});
+        // Fusion edges: every P1 (left) ×-joined to every P2 (right).
+        for (size_t a : P1) for (size_t b : P2)
+            np.source.cograph_edges.push_back({a, b + off});
+        np.fibration = std::move(f1);
+        for (size_t v : f2) np.fibration.push_back(v);
+        return np;
     }
 };
 

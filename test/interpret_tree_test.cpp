@@ -262,6 +262,54 @@ void test_p5_exists_forall_witness() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// P6: And (fusion). goal = (p ∧ q) → (q ∧ p), NNF (¬p ∨ ¬q) ∨ (q ∧ p).
+// LKR:
+//   Or(0)        → [(¬p∨¬q), (q∧p)]
+//   Or(0)        → [¬p, (q∧p), ¬q]
+//   And(1, [2])  → LEFT=[¬q, q], RIGHT=[¬p, p]
+//   AxiomLit(0,1)   close LEFT
+//   AxiomLit(0,1)   close RIGHT
+// Fusion: 4 atoms, 2 links, one cross-edge between the q and p source
+// vertices (the × of the q∧p block).
+void test_p6_and_commute() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "(p & q) -> (q & p)");
+
+    LKRProgram prog;
+    prog.claim_name = "and_commute";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::And{{}, 1, {2}});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// P6: And under a Forall (first-order ∧). goal = ∀x. (p(x) ∧ p(x)) ⇐
+// from p(x): actually prove ∀x.((p(x)∧q(x)) → (q(x)∧p(x))).
+// NNF: ∀x. ((¬p(x)∨¬q(x)) ∨ (q(x)∧p(x))).
+void test_p6_and_under_forall() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal =
+        parse_root(ctx, "forall x. ((p(x) & q(x)) -> (q(x) & p(x)))");
+
+    LKRProgram prog;
+    prog.claim_name = "and_under_forall";
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::And{{}, 1, {2}});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
@@ -274,6 +322,8 @@ int main() {
     test_p4_forall_em();
     test_p4_nested_forall();
     test_p5_exists_forall_witness();
+    test_p6_and_commute();
+    test_p6_and_under_forall();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
