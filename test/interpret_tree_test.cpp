@@ -135,6 +135,65 @@ void test_p2_exchange() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// P3: scaffolding Weakening. goal = p | ¬p; weaken in q (never used),
+// then Or + AxiomLit close on p,¬p. q's vertex is uncovered, so the
+// Weakening operation drops it cleanly. LKR:
+//   Weakening(q) → [(p|¬p), q]; Or(0) → [p, q, ¬p]; AxiomLit(0,2).
+void test_p3_weakening_scaffolding() {
+    Runtime rt;
+    rt.load("axiom dummy: q");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal   = parse_root(ctx, "p | ~p");
+    FormulaHandle  q_form = parse_root(ctx, "q");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening_scaffolding";
+    lkr::Weakening w{};
+    w.formula = q_form;
+    prog.instrs.emplace_back(std::move(w));
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// P3: load-bearing Weakening must be REJECTED. goal = p | ¬p; weaken in
+// p and ¬p, then close AxiomLit on the two weakened entries directly.
+// LKR-valid but proves (p|¬p)∨p∨¬p with content in the weakening —
+// the §11.1 W operation requires φ uncovered, so the fold rejects.
+//   W(p) → [(p|¬p), p]; W(¬p) → [(p|¬p), p, ¬p]; AxiomLit(1,2).
+void test_p3_weakening_load_bearing_rejected() {
+    Runtime rt;
+    rt.load("axiom dummy: q");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal  = parse_root(ctx, "p | ~p");
+    FormulaHandle  p_f   = parse_root(ctx, "p");
+    FormulaHandle  np_f  = parse_root(ctx, "~p");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening_load_bearing";
+    { lkr::Weakening w{}; w.formula = p_f;  prog.instrs.emplace_back(std::move(w)); }
+    { lkr::Weakening w{}; w.formula = np_f; prog.instrs.emplace_back(std::move(w)); }
+    prog.instrs.push_back(lkr::AxiomLit{{}, 1, 2});
+
+    // Expect the fold (or verifier) to REJECT — load-bearing weakening.
+    FormulaBuilder fb(ctx);
+    FormulaHandle  goal_nnf = fb.to_nnf(goal);
+    auto tree = l2c::rebuild_tree(prog);
+    if (tree.is_error()) { ++g_failed; std::cerr << "rebuild_tree failed\n"; return; }
+    l2c::CutAugmentation cut_aug;
+    auto replay = l2c::replay_sequents(fb, goal_nnf, prog, cut_aug);
+    if (replay.is_error()) { ++g_failed; std::cerr << "replay failed\n"; return; }
+    auto cp = l2c::interpret_tree(ctx, goal_nnf, prog, *tree.value(), replay.value());
+    if (cp.is_error()) {
+        ++g_passed;  // correctly rejected
+    } else {
+        std::cerr << "FAIL: load-bearing Weakening was accepted at "
+                  << __FILE__ << ":" << __LINE__ << "\n";
+        ++g_failed;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -142,6 +201,8 @@ int main() {
     test_p2_self_implication();
     test_p2_or_with_middle_entry();
     test_p2_exchange();
+    test_p3_weakening_scaffolding();
+    test_p3_weakening_load_bearing_rejected();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

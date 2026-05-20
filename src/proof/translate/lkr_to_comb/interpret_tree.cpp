@@ -174,8 +174,36 @@ struct Interp {
             for (auto& fv : np.fibration) fv = remap[fv];
             return np;
         }
-        if (std::holds_alternative<lkr::Weakening>(op))
-            return MAKE_ERROR << "interpret_tree: Weakening not yet implemented (P3)";
+        if (std::holds_alternative<lkr::Weakening>(op)) {
+            // §11.1 W rule. This LKR appends φ to the hypothesis
+            // (H = Γ,φ); the conclusion C = Γ is H with the last entry
+            // dropped. Hughes' canonical injection w : G(Γ) → G(Γ,φ)
+            // here runs the other way: G(C) = G(Γ) is the PREFIX of the
+            // child's G(H) = G(Γ)+G(φ), with φ's vertices the suffix.
+            //
+            // Soundness: φ must be UNCOVERED in the child (no source
+            // vertex maps into φ's block). Otherwise the weakening is
+            // load-bearing — the proof's content lives in φ, so dropping
+            // it is unsound. Reject (matches the I-2 input-gate intent).
+            //
+            // Since φ is the suffix, the fibration is unchanged: every
+            // covered position is < |G(Γ)|.
+            NodeProof np;
+            np.target = build_sequent_fograph(fb, C);  // G(Γ)
+            const size_t phi_start = np.target.num_vertex();
+            for (size_t fv : child.value().fibration) {
+                if (fv >= phi_start) {
+                    return MAKE_ERROR << "interpret_tree: load-bearing Weakening — "
+                                         "a source vertex maps into the weakened "
+                                         "formula's block (covered position " << fv
+                                      << " ≥ |G(Γ)|=" << phi_start << "); "
+                                         "Hughes §11.1 W introduces an UNCOVERED φ";
+                }
+            }
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(child.value().fibration);
+            return np;
+        }
         if (std::holds_alternative<lkr::Forall>(op))
             return MAKE_ERROR << "interpret_tree: Forall not yet implemented (P4)";
         if (std::holds_alternative<lkr::Exists>(op))
