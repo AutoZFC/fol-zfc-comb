@@ -33,6 +33,21 @@ namespace logic::proof::comb {
 namespace {
 
 // Translate a single Term: Gen → Fixed via binder stack; Fixed unchanged.
+//
+// Rectification (Hughes Lemma 10.1 / Lemma 3.3) requires every
+// binder's var to be unique and every literal-reference to bind to
+// exactly the intended binder. Bound vars enter via Gen (de-Bruijn)
+// and are resolved here. Fixed terms in atom args are *passed
+// through* — they are assumed to come from upstream substitutions
+// (forall_elim, etc.) and to reference variables in a namespace
+// disjoint from this builder's fresh next_binder_var++ allocations.
+//
+// CAVEAT: this disjointness is an upstream invariant. If a Fixed
+// atom-arg's var_index happened to collide with a binder var that
+// next_binder_var++ assigns, add_binding_edges would attach a
+// phantom binding edge. A defensive scope-aware check would close
+// this, but it requires the cotree (not yet built at this point).
+// See PAPER_AUDIT.md P1-3.
 Term rewrite_term(const Term& t, const std::vector<var_index>& stack) {
     if (t.is_generalized()) {
         var_index k = t.as_variable();

@@ -43,33 +43,58 @@ bool formula_has_description(FormulaHandle h) {
     return false;
 }
 
-// Boundary check: the comb proof system is description-free. The
-// translator (see translate/ELIMINATE_DESCRIPTIONS.md) is responsible
-// for running `eliminate_descriptions` before handing a formula to the
-// comb verifier. This check enforces the invariant: scan the goal, any
-// atom-label args, and any dualizer image terms for descriptions.
-util::ResultStatus check_description_free(FormulaHandle goal_formula,
-                                          const CombProof& cp) {
+// Boundary check: enforce the term-system scope of the comb verifier.
+//
+// Hughes (2019) allows compound terms in atom args and in dualizer
+// images (e.g., δ(x) = f(y, z)). The project's Term type has no
+// compound variant — only Fixed (a variable), Gen (de-Bruijn), and
+// Description (iota). The downstream unification in build_leap_graph
+// and the substitution in apply_dualizer_to_term both assume every
+// atom arg and dualizer image is a single Fixed variable.
+//
+// This precondition is enforced here so the assumption is explicit:
+//   * Descriptions are upstream-eliminated and rejected here.
+//   * Gen is supposed to be rewritten to Fixed by the Fograph builder
+//     before reaching the verifier; we reject any residue.
+//   * Anything else (a future compound variant) is rejected too.
+//
+// Without this check, a future Term variant would be silently treated
+// as rigid-opaque by apply_dualizer_to_term (which falls through to
+// `return t;`), producing under-counted dependencies and a verifier
+// that can accept non-proofs (Hughes Lemma 10.13).
+util::ResultStatus check_term_system_scope(FormulaHandle goal_formula,
+                                           const CombProof& cp) {
     if (formula_has_description(goal_formula)) {
         return MAKE_ERROR << "CombVerifier: goal formula contains a description "
                              "term; comb proof system is description-free, run "
                              "eliminate_descriptions in the translator first";
     }
+    auto check_arg = [](const Term& arg, const char* where, size_t idx) -> util::ResultStatus {
+        if (arg.is_fixed()) return util::Ok();
+        if (arg.is_description()) {
+            return MAKE_ERROR << "CombVerifier: " << where << " " << idx
+                              << " contains a description term";
+        }
+        if (arg.is_generalized()) {
+            return MAKE_ERROR << "CombVerifier: " << where << " " << idx
+                              << " contains a Gen (de-Bruijn) term; "
+                                 "Fograph builder must rewrite Gen→Fixed "
+                                 "before reaching the verifier";
+        }
+        return MAKE_ERROR << "CombVerifier: " << where << " " << idx
+                          << " contains an unknown Term variant; "
+                             "verifier scope is Fixed-only (see Hughes "
+                             "Lemma 10.13 for the compound-term case)";
+    };
     for (size_t i = 0; i < cp.target.labels.size(); ++i) {
         const auto& lbl = cp.target.labels[i];
         if (lbl.kind != VertexKind::Atom) continue;
         for (const auto& arg : lbl.args) {
-            if (arg.is_description()) {
-                return MAKE_ERROR << "CombVerifier: target label " << i
-                                  << " contains a description term in its args";
-            }
+            TRY(check_arg(arg, "target atom-label", i));
         }
     }
     for (const auto& [x, term] : cp.source.dualizer) {
-        if (term.is_description()) {
-            return MAKE_ERROR << "CombVerifier: dualizer(" << x
-                              << ") image is a description";
-        }
+        TRY(check_arg(term, "dualizer image for var", x));
     }
     return util::Ok();
 }
@@ -89,7 +114,7 @@ util::ResultStatus CombVerifier::verify(
     }
     const CombProof& cp = std::get<CombProof>(proof.body);
 
-    TRY(check_description_free(goal_formula, cp));
+    TRY(check_term_system_scope(goal_formula, cp));
     TRY(verify_well_formed(cp));
     TRY(verify_target_is_formula_graph(ctx, goal_formula, cp));
     TRY(verify_fonet(cp));
@@ -111,38 +136,104 @@ util::ResultStatus CombVerifier::verify_well_formed(
             return MAKE_ERROR << "Fibration range mismatch";
         }
     }
-    for (const auto& edge : proof.source.cograph_edges) {
-        if (!(edge.first < fonet_vertex_size && edge.second < fonet_vertex_size)) {
-            return MAKE_ERROR << "Fonet cograph edge ill-formed: " << edge.first << ", " << edge.second;
+    // WF-2: cograph edges are simple (no self-loops, no duplicates) per
+    // Hughes §2: "(V, E) is a set V of vertices and a set E ⊆ {{v,w} :
+    // v,w ∈ V, v ≠ w} of edges." We normalize {u,v} as (min, max) for
+    // duplicate detection. Self-loops would corrupt the cotree builder
+    // and Ω construction; duplicates inflate iteration in Case C.
+    auto check_simple_undirected = [&](const Edges& es, const char* where,
+                                       size_t bound) -> util::ResultStatus {
+        std::set<std::pair<size_t, size_t>> seen;
+        for (const auto& e : es) {
+            if (!(e.first < bound && e.second < bound)) {
+                return MAKE_ERROR << where << " edge ill-formed: "
+                                  << e.first << ", " << e.second;
+            }
+            if (e.first == e.second) {
+                return MAKE_ERROR << where << " has self-loop at vertex "
+                                  << e.first;
+            }
+            auto norm = std::minmax(e.first, e.second);
+            auto [it, inserted] = seen.insert({norm.first, norm.second});
+            if (!inserted) {
+                return MAKE_ERROR << where << " has duplicate edge {"
+                                  << norm.first << ", " << norm.second << "}";
+            }
         }
-    }
-    for (const auto& edge : proof.source.binding_edges) {
-        if (!(edge.first < fonet_vertex_size && edge.second < fonet_vertex_size)) {
-            return MAKE_ERROR << "Fonet bind edge ill-formed: " << edge.first << ", " << edge.second;
+        return util::Ok();
+    };
+    TRY(check_simple_undirected(proof.source.cograph_edges,
+                                "fonet cograph", fonet_vertex_size));
+
+    // WF-3: binding edges are directed binder → atom (Hughes §3). Source
+    // must be a Binder vertex, target must be an Atom (the literal it
+    // binds). Without this, Phase 3's is_fibration_dir is given garbage.
+    auto check_binding = [&](const Edges& es, const Fograph* labels_src,
+                             const CombProof* cp_for_source,
+                             const char* where, size_t bound) -> util::ResultStatus {
+        std::set<std::pair<size_t, size_t>> seen;
+        for (const auto& e : es) {
+            if (!(e.first < bound && e.second < bound)) {
+                return MAKE_ERROR << where << " edge ill-formed: "
+                                  << e.first << ", " << e.second;
+            }
+            if (e.first == e.second) {
+                return MAKE_ERROR << where << " has self-loop at vertex "
+                                  << e.first;
+            }
+            auto [it, inserted] = seen.insert({e.first, e.second});
+            if (!inserted) {
+                return MAKE_ERROR << where << " has duplicate directed edge ("
+                                  << e.first << ", " << e.second << ")";
+            }
+            // Endpoint kind check. labels_src is non-null for the target
+            // fograph; for the source we look up via cp_for_source->source_label.
+            const VertexLabel& src_lbl = labels_src
+                ? labels_src->labels[e.first]
+                : cp_for_source->source_label(e.first);
+            const VertexLabel& dst_lbl = labels_src
+                ? labels_src->labels[e.second]
+                : cp_for_source->source_label(e.second);
+            if (src_lbl.kind != VertexKind::Binder) {
+                return MAKE_ERROR << where << " binding edge source "
+                                  << e.first << " is not a Binder";
+            }
+            if (dst_lbl.kind != VertexKind::Atom) {
+                return MAKE_ERROR << where << " binding edge target "
+                                  << e.second << " is not an Atom";
+            }
         }
-    }
+        return util::Ok();
+    };
+    TRY(check_binding(proof.source.binding_edges, nullptr, &proof,
+                      "fonet binding", fonet_vertex_size));
+
     // Links are 2-element colour classes (paper Def. 5.1) — endpoints
-    // must be in range and distinct.
-    for (const auto& link : proof.source.links) {
-        if (!(link.first < fonet_vertex_size && link.second < fonet_vertex_size)) {
-            return MAKE_ERROR << "Fonet link ill-formed: " << link.first << ", " << link.second;
-        }
-        if (link.first == link.second) {
-            return MAKE_ERROR << "Fonet link is a self-pair: " << link.first;
+    // must be in range and distinct. 2A.1 enforces every-literal-in-link
+    // counts; here we add explicit duplicate-link rejection.
+    {
+        std::set<std::pair<size_t, size_t>> seen_links;
+        for (const auto& link : proof.source.links) {
+            if (!(link.first < fonet_vertex_size && link.second < fonet_vertex_size)) {
+                return MAKE_ERROR << "Fonet link ill-formed: " << link.first << ", " << link.second;
+            }
+            if (link.first == link.second) {
+                return MAKE_ERROR << "Fonet link is a self-pair: " << link.first;
+            }
+            auto norm = std::minmax(link.first, link.second);
+            auto [it, inserted] = seen_links.insert({norm.first, norm.second});
+            if (!inserted) {
+                return MAKE_ERROR << "Fonet has duplicate link {"
+                                  << norm.first << ", " << norm.second << "}";
+            }
         }
     }
 
     const size_t fograph_vertex_size = proof.target.labels.size();
-    for (const auto& edge : proof.target.cograph_edges) {
-        if (!(edge.first < fograph_vertex_size && edge.second < fograph_vertex_size)) {
-            return MAKE_ERROR << "Fograph cograph edge ill-formed: " << edge.first << ", " << edge.second;
-        }
-    }
-    for (const auto& edge : proof.target.binding_edges) {
-        if (!(edge.first < fograph_vertex_size && edge.second < fograph_vertex_size)) {
-            return MAKE_ERROR << "Fograph bind edge ill-formed: " << edge.first << ", " << edge.second;
-        }
-    }
+    TRY(check_simple_undirected(proof.target.cograph_edges,
+                                "fograph cograph", fograph_vertex_size));
+    TRY(check_binding(proof.target.binding_edges, &proof.target, nullptr,
+                      "fograph binding", fograph_vertex_size));
 
     if (!proof.target.source_formula.valid()) {
         return MAKE_ERROR << "Fograph source_formula is invalid";
@@ -289,19 +380,38 @@ util::ResultStatus CombVerifier::verify_fonet(
         }
     }
 
-    // 2B.1 / 2B.2 — dualizer keys are existential vars, image terms
-    // reference only universal vars (no existentials). With no
-    // descriptions, a dualizer image is either Fixed (a universal var)
-    // or Gen (not a fonet binder ref — ignore).
+    // 2B.1 / 2B.2 — dualizer keys are existential vars; image terms
+    // reference only known universal-binder vars.
+    //
+    // Hughes Def. 5.2: δ images may contain universal binder variables
+    // (and stems for the most-general-dualizer construction, Lemma
+    // 10.12). The project's term system does not separately track
+    // stems, so within this verifier's scope, the image variable must
+    // be a known universal binder.
+    //
+    // check_term_system_scope already verified the image is Fixed.
     for (auto const & [x, term] : proof.source.dualizer) {
         if (!existential.count(x)) {
             return MAKE_ERROR
                 << "dualizer(" << x << ") is not an existential-binder variable";
         }
-        if (term.is_fixed() && existential.count(term.as_variable())) {
+        if (!term.is_fixed()) {
+            return MAKE_ERROR
+                << "dualizer(" << x << ") image is not a Fixed term "
+                   "(check_term_system_scope should have caught this)";
+        }
+        var_index image_var = term.as_variable();
+        if (existential.count(image_var)) {
             return MAKE_ERROR
                 << "dualizer(" << x << ") references existential variable "
-                << term.as_variable();
+                << image_var;
+        }
+        if (!universal.count(image_var)) {
+            return MAKE_ERROR
+                << "dualizer(" << x << ") image variable " << image_var
+                << " is not a known universal binder of the fonet "
+                   "(Hughes Def. 5.2 requires image vars to be universal "
+                   "binders; this term system does not track stems)";
         }
     }
 
@@ -333,11 +443,29 @@ util::ResultStatus CombVerifier::verify_fonet(
     
     // 2A.3 — binder legality (paper Def. 3.2).
     //   (C1) every binder's scope contains ≥1 atom-labelled vertex;
-    //   (C2) every binder's scope contains no other binder with the same var.
+    //   (C2) every binder's scope contains no other binder with the same var;
+    //   (C3) the stored is_existential agrees with the cograph structure:
+    //        existential ⇔ b is ×-adjacent to every other vertex in its scope,
+    //        universal   ⇔ b is ×-adjacent to no other vertex in its scope.
+    //        Paper Def. 3.2's footnote 4: every binder is either existential
+    //        or universal (and not both) because the scope is a proper strong
+    //        module. Without this check, Case B in leap.cpp (which reads edges
+    //        only) and Case C.2 (which trusts the stored label) can disagree.
     // Scope of binder b = leaves under parent(leaf_of(b)) in the cotree.
     Cotree cotree(proof.source.num_vertex, proof.source.cograph_edges);
     if (!cotree.ok()) {
         return MAKE_ERROR << "source cograph_edges do not form a cograph (induced P_4)";
+    }
+    // Adjacency set for the cograph, for the existential/universal check (C3).
+    std::vector<std::unordered_set<size_t>> source_adj(proof.source.num_vertex);
+    for (const Edge& e : proof.source.cograph_edges) {
+        source_adj[e.first].insert(e.second);
+        source_adj[e.second].insert(e.first);
+    }
+    // Index source binding_edges by binder for the scope check (C4 below).
+    std::vector<std::vector<size_t>> bind_targets(proof.source.num_vertex);
+    for (const Edge& e : proof.source.binding_edges) {
+        bind_targets[e.first].push_back(e.second);
     }
     for (size_t v = 0; v < proof.source.num_vertex; v++) {
         const VertexLabel& label = proof.source_label(v);
@@ -349,14 +477,20 @@ util::ResultStatus CombVerifier::verify_fonet(
             return MAKE_ERROR << "binder " << v << " has no proper scope module";
         }
 
-        bool has_atom   = false;
-        bool dup_binder = false;
+        bool has_atom        = false;
+        bool dup_binder      = false;
+        size_t scope_others  = 0;          // # of other vertices in scope
+        size_t adj_others    = 0;          // # of those ×-adjacent to v
+        std::unordered_set<size_t> scope_members;  // V(scope) for C4
         cotree.for_each_leaf_in_subtree(v_subtree, [&](size_t u) {
+            scope_members.insert(u);
             if (u == v) return;
             const VertexLabel& u_label = proof.source_label(u);
             if (u_label.kind == VertexKind::Atom) has_atom = true;
             if (u_label.kind == VertexKind::Binder && u_label.var == label.var)
                 dup_binder = true;
+            ++scope_others;
+            if (source_adj[v].count(u)) ++adj_others;
         });
         if (!has_atom) {
             return MAKE_ERROR << "binder " << v << " (var " << label.var
@@ -366,6 +500,43 @@ util::ResultStatus CombVerifier::verify_fonet(
             return MAKE_ERROR << "binder " << v << " (var " << label.var
                               << ") shares variable with another binder in scope (Def. 3.2)";
         }
+        // (C3) Existential ⇔ ×-adjacent to *every* other scope vertex.
+        //       Universal   ⇔ ×-adjacent to *no*    other scope vertex.
+        // Anything in between is not a valid logical-cograph binder per
+        // Def. 3.2 (footnote 4): the scope is a proper strong module, so
+        // adjacency to the binder is all-or-nothing.
+        const bool structurally_existential = (adj_others == scope_others);
+        const bool structurally_universal   = (adj_others == 0);
+        if (!structurally_existential && !structurally_universal) {
+            return MAKE_ERROR << "binder " << v << " (var " << label.var
+                              << ") is adjacent to " << adj_others << " of "
+                              << scope_others << " scope vertices — neither "
+                              "existential (all) nor universal (none) "
+                              "(Def. 3.2 footnote 4)";
+        }
+        if (label.is_existential != structurally_existential) {
+            return MAKE_ERROR << "binder " << v << " (var " << label.var
+                              << ") stored is_existential=" << label.is_existential
+                              << " disagrees with cograph structure (× adj to "
+                              << adj_others << "/" << scope_others
+                              << " scope vertices)";
+        }
+        // (C4) Every binding edge from b must target a vertex IN b's scope.
+        // Hughes Def. 3.2: "An x-binder binds every x-literal in its scope."
+        // A binding edge to a literal outside the scope is a phantom edge —
+        // possible if a Fixed atom-arg's var_index accidentally collides
+        // with the binder's fresh next_binder_var++ index. See PAPER_AUDIT
+        // P1-3.
+        for (size_t bound_v : bind_targets[v]) {
+            if (!scope_members.count(bound_v)) {
+                return MAKE_ERROR << "binder " << v << " (var " << label.var
+                                  << ") has a binding edge to vertex "
+                                  << bound_v << " outside its cograph scope "
+                                  "module (Def. 3.2 — phantom binding edge; "
+                                  "likely a var_index collision between a "
+                                  "Fixed atom-arg and a binder's fresh var)";
+            }
+        }
     }
     // 2C — no induced bimatching in the leap graph. Per paper §14.2
     // we use the cotree-driven decomposition of Lemmas 10.21/10.22
@@ -374,6 +545,45 @@ util::ResultStatus CombVerifier::verify_fonet(
     if (leap.is_error()) {
         return leap.error();
     }
+
+    // 2C.0 — leap/cograph disjointness (Def. 5.3 consequence).
+    //
+    // In a fonet, no leap connects two cograph-adjacent vertices: if
+    // {u,v} is both a cograph edge AND a leap (link or dependency),
+    // then W = {u,v} induces a matching in K (the cograph edge) AND in
+    // L_K (the leap), which is exactly an induced bimatching. By
+    // Def. 5.3 this rules out fonet-hood.
+    //
+    // This is the structural fact that closes the apparent gap in
+    // Hughes' Lemma 10.21 → 10.18 step: the bridge condition in Ω only
+    // forbids leaps between *different* ×-pairs, but 10.18's
+    // precondition also requires no leap *within* the bridge ×-pair
+    // (G_m × G_{m+1}). The disjointness above ensures the within-pair
+    // case is vacuous.
+    //
+    // The decomposition algorithm in leap.cpp assumes this fact
+    // without checking it directly. We enforce it explicitly here so
+    // that an adversarial input with overlapping leap/cograph edges
+    // is rejected at the 2C boundary rather than producing an
+    // unsound decomposition downstream.
+    {
+        std::set<std::pair<size_t, size_t>> cograph_pairs;
+        for (const Edge& e : proof.source.cograph_edges) {
+            auto norm = std::minmax(e.first, e.second);
+            cograph_pairs.insert({norm.first, norm.second});
+        }
+        for (const Edge& l : leap.value()) {
+            auto norm = std::minmax(l.first, l.second);
+            if (cograph_pairs.count({norm.first, norm.second})) {
+                return MAKE_ERROR
+                    << "Fonet has a leap {" << norm.first << ", "
+                    << norm.second << "} that is also a cograph edge — "
+                    "this induces a bimatching on W = {u,v}, violating "
+                    "Def. 5.3 (closes Hughes' Lemma 10.21 → 10.18 gap)";
+            }
+        }
+    }
+
     return verify_no_bimatching(proof, cotree, leap.value());
 }
 

@@ -393,12 +393,26 @@ util::ResultStatus verify_no_bimatching(const CombProof& proof,
             // N[W \ {*x}]; strip it and recurse.
             for (size_t i = 0; i < W.size(); ++i) {
                 if (!W[i]) continue;
-                if (proof.source_label(i).kind != VertexKind::Binder) continue;
+                const VertexLabel& lbl = proof.source_label(i);
+                if (lbl.kind != VertexKind::Binder) continue;
                 bool has_edge = false;
                 for (const Edge& e : E_W) {
                     if (e.first == i || e.second == i) { has_edge = true; break; }
                 }
                 if (!has_edge) {
+                    // Defensive: Lemma 10.16's "necessarily universal".
+                    // 2A.3-1 already enforces the stored label matches
+                    // the cograph structure, but we check here too so
+                    // an out-of-band call to verify_no_bimatching does
+                    // not bypass the constraint.
+                    if (lbl.is_existential) {
+                        return MAKE_ERROR << "is_fonet: Case B found binder "
+                                          << i << " with no incident edge but "
+                                          "is_existential=true (Hughes Lemma "
+                                          "10.16 requires a universal binder; "
+                                          "existentials must have ×-edges to "
+                                          "their non-empty scope)";
+                    }
                     Mask W2 = W;
                     W2[i] = false;
                     return is_fonet(W2);
@@ -409,29 +423,39 @@ util::ResultStatus verify_no_bimatching(const CombProof& proof,
             // binder has an incident edge in G[W]; so if E_W is empty,
             // no binders remain, and W is a union of literals (Atom or
             // One -- the truth literal *1). Recursion bottoms out OK.
-            if (E_W.empty()) return util::Ok();
+            if (E_W.empty()) {
+                // Defensive: Lemma 10.17's "no edge AND no binder".
+                for (size_t i = 0; i < W.size(); ++i) {
+                    if (!W[i]) continue;
+                    auto k = proof.source_label(i).kind;
+                    if (k == VertexKind::Atom || k == VertexKind::One) continue;
+                    return MAKE_ERROR << "is_fonet: Case A reached empty-edge "
+                                         "subgraph with non-literal vertex "
+                                      << i << " still in W (Hughes Lemma "
+                                      "10.17 requires no binder); Case B "
+                                      "should have stripped it";
+                }
+                return util::Ok();
+            }
 
             // Case C (Lemma 10.21): Omega-bridge decomposition.
+            //
+            // We perform DFS over binarization choices. Each multi-child
+            // × cotree-node is a choice point: which one of its in-W
+            // children becomes parts[2k] (rest becomes parts[2k+1]).
+            // The combination of all choices fully determines parts/L
+            // and hence Ω. We test the bridge / recurse on each
+            // combination; success on any combination decomposes the
+            // sub-fonet.
+            //
+            // Hughes Lemma 10.21 only proves existence of SOME valid
+            // representation, so a greedy choice can reject paper-valid
+            // fonets. Backtracking closes that completeness gap.
             Cotree C = restrict_cotree(W, proof.source.cograph_edges);
             if (!C.ok()) {
                 return MAKE_ERROR << "is_fonet: source restricted to W is not "
                                      "a cograph (induced P_4)";
             }
-
-            // --- Cotree -> parts + L ------------------------------------
-            //
-            // Read off  G[W] = (G_1 x G_2) + ... + (G_{n-1} x G_n) + L
-            // from the cotree root. Out-of-W vertices appear as leaf
-            // children of the root JOIN (no edges in restricted graph
-            // => always isolated => always at root); we filter them.
-            //
-            // Each UNION (x) sub-tree contributes one (G_{2i-1}, G_{2i})
-            // pair by binary-splitting its children: first non-empty
-            // cotree-child's leaves vs union of the rest. A UNION with
-            // only one non-empty cotree-child's leaves contributes those
-            // leaves to L (no x-partner survived the W filter).
-            std::vector<std::vector<size_t>> parts;
-            std::vector<size_t>              L;
 
             auto collect_in_W_leaves = [&](size_t node_id) {
                 std::vector<size_t> out;
@@ -441,209 +465,286 @@ util::ResultStatus verify_no_bimatching(const CombProof& proof,
                 return out;
             };
 
-            auto process_union = [&](size_t union_node_id) {
+            auto child_has_literal = [&](const std::vector<size_t>& vs) {
+                for (size_t v : vs) {
+                    auto k = proof.source_label(v).kind;
+                    if (k == VertexKind::Atom || k == VertexKind::One) return true;
+                }
+                return false;
+            };
+
+            // --- Gather direct-L vertices + per-×-node children -----
+            std::vector<size_t> direct_L;
+            // Per × cotree-node: list of in-W child leaf-sets (each is
+            // one G_i candidate). If size==1 we fold into L (literal
+            // check). If size>=2 it's a choice point with that many
+            // candidates.
+            std::vector<std::vector<std::vector<size_t>>> union_children;
+
+            const Cotree::Node& root = C.node(C.root());
+            auto gather_one_union = [&](size_t union_node_id) -> util::ResultStatus {
                 const Cotree::Node& un = C.node(union_node_id);
                 std::vector<std::vector<size_t>> child_leaves;
                 for (size_t cid : un.children) {
                     auto cl = collect_in_W_leaves(cid);
                     if (!cl.empty()) child_leaves.push_back(std::move(cl));
                 }
-                if (child_leaves.empty()) return;
+                if (child_leaves.empty()) return util::Ok();
                 if (child_leaves.size() == 1) {
-                    for (size_t v : child_leaves[0]) L.push_back(v);
-                    return;
-                }
-                // Binary split: H_a vs (everything else). ×-associativity
-                // means any binary partition is mathematically valid (Lemma
-                // 10.21's Z is a 1-factor of Omega, but its existence proof
-                // doesn't fix WHICH 1-factor — implementation chooses).
-                //
-                // Strategy: PREFER to peel off a singleton existential
-                // binder as H_a. Lemma 10.20's C.2 sub-case requires the
-                // binder-only side to be a singleton; if we instead peel
-                // off an atom-side and leave multi-binder rest, C.2
-                // rejects even though a fonet decomposition exists. By
-                // peeling binders one at a time we guarantee the recursion
-                // terminates on the C.1 / C.2 dichotomy correctly.
-                //
-                // If no singleton-binder child exists, fall back to the
-                // first-child rule (C.1 fusion case applies provided both
-                // sides have a literal — which they do for a well-formed
-                // fonet whose source comes from per-rule operations).
-                size_t pick = 0;
-                for (size_t i = 0; i < child_leaves.size(); ++i) {
-                    if (child_leaves[i].size() != 1) continue;
-                    size_t v = child_leaves[i][0];
-                    const VertexLabel& lbl = proof.source_label(v);
-                    if (lbl.kind == VertexKind::Binder && lbl.is_existential) {
-                        pick = i;
-                        break;
+                    // Degenerate × node: fold to L iff all literals.
+                    for (size_t v : child_leaves[0]) {
+                        VertexKind k = proof.source_label(v).kind;
+                        if (k != VertexKind::Atom && k != VertexKind::One) {
+                            return MAKE_ERROR << "is_fonet: degenerate × cotree-node "
+                                                 "with a single in-W child contains a "
+                                                 "non-literal (vertex " << v << "); "
+                                                 "Hughes Lemma 10.21 requires L to be "
+                                                 "a union of literals only";
+                        }
                     }
+                    for (size_t v : child_leaves[0]) direct_L.push_back(v);
+                    return util::Ok();
                 }
-                parts.push_back(std::move(child_leaves[pick]));
-                std::vector<size_t> rest;
-                for (size_t k = 0; k < child_leaves.size(); ++k) {
-                    if (k == pick) continue;
-                    for (size_t v : child_leaves[k]) rest.push_back(v);
-                }
-                parts.push_back(std::move(rest));
+                union_children.push_back(std::move(child_leaves));
+                return util::Ok();
             };
 
-            const Cotree::Node& root = C.node(C.root());
             if (root.kind == Cotree::NodeKind::JOIN) {
                 for (size_t cid : root.children) {
                     const Cotree::Node& child = C.node(cid);
                     if (child.kind == Cotree::NodeKind::LEAF) {
-                        if (W[child.vertex]) L.push_back(child.vertex);
+                        if (W[child.vertex]) direct_L.push_back(child.vertex);
                     } else if (child.kind == Cotree::NodeKind::UNION) {
-                        process_union(cid);
+                        TRY(gather_one_union(cid));
                     }
                 }
             } else if (root.kind == Cotree::NodeKind::UNION) {
-                process_union(C.root());
+                TRY(gather_one_union(C.root()));
             } else {
                 return MAKE_ERROR << "is_fonet: unexpected leaf root in Case C";
             }
 
-            const size_t n = parts.size();
-            if (n == 0 || n % 2 != 0) {
-                return MAKE_ERROR << "is_fonet: malformed parts decomposition "
-                                     "(n = " << n << ")";
+            // No multi-child × nodes? Then n==0; nothing to decompose.
+            // (E_W non-empty was asserted earlier; with no pairs there
+            // must be an inconsistency upstream.)
+            if (union_children.empty()) {
+                return MAKE_ERROR << "is_fonet: Case C reached with E_W non-empty "
+                                     "but no multi-child × cotree-node found "
+                                     "(malformed cotree decomposition)";
             }
 
-            // --- Build Omega -------------------------------------------
-            std::vector<int> part_of(proof.source.num_vertex, -1);
-            for (size_t p = 0; p < n; ++p) {
-                for (size_t v : parts[p]) part_of[v] = static_cast<int>(p);
-            }
-            std::vector<std::unordered_set<int>> omega_adj(n);
-            auto add_omega_edge = [&](size_t u, size_t v) {
-                if (!W[u] || !W[v]) return;
-                int pu = part_of[u];
-                int pv = part_of[v];
-                if (pu == -1 || pv == -1 || pu == pv) return;
-                omega_adj[pu].insert(pv);
-                omega_adj[pv].insert(pu);
-            };
-            for (const Edge& e : E_W)        add_omega_edge(e.first, e.second);
-            for (const Edge& e : leap_edges) add_omega_edge(e.first, e.second);
-
-            // --- Find a bridge in Z ------------------------------------
-            // Z = {(0,1), (2,3), ..., (n-2, n-1)}. Bridge test: DFS from
-            // one endpoint with the edge masked; the other endpoint
-            // should be unreachable.
-            auto is_bridge = [&](int a, int b) {
-                std::vector<bool> visited(n, false);
-                std::vector<int>  stack{a};
-                visited[a] = true;
-                while (!stack.empty()) {
-                    int u = stack.back(); stack.pop_back();
-                    for (int v : omega_adj[u]) {
-                        if ((u == a && v == b) || (u == b && v == a)) continue;
-                        if (visited[v]) continue;
-                        visited[v] = true;
-                        stack.push_back(v);
+            // --- Compute per-×-node choice order (priority-sorted) ---
+            //
+            // For each × node, we try children in this priority order:
+            //   1. Singleton existential binder leaf (direct C.2).
+            //   2. A child with a literal where rest also has a literal
+            //      (C.1 fusion).
+            //   3. Anything else (residual fallback).
+            // The priority is just a search-order heuristic; backtracking
+            // ensures we'll try alternatives if the first choice fails.
+            std::vector<std::vector<size_t>> choice_order(union_children.size());
+            for (size_t un = 0; un < union_children.size(); ++un) {
+                const auto& cl = union_children[un];
+                std::vector<size_t> p1, p2, p3;
+                for (size_t i = 0; i < cl.size(); ++i) {
+                    bool is_singleton_existential =
+                        cl[i].size() == 1 &&
+                        proof.source_label(cl[i][0]).kind == VertexKind::Binder &&
+                        proof.source_label(cl[i][0]).is_existential;
+                    if (is_singleton_existential) { p1.push_back(i); continue; }
+                    bool this_has_lit = child_has_literal(cl[i]);
+                    bool rest_has_lit = false;
+                    for (size_t k = 0; k < cl.size(); ++k) {
+                        if (k == i) continue;
+                        if (child_has_literal(cl[k])) { rest_has_lit = true; break; }
+                    }
+                    if (this_has_lit && rest_has_lit) {
+                        p2.push_back(i);
+                    } else {
+                        p3.push_back(i);
                     }
                 }
-                return !visited[b];
+                auto& ord = choice_order[un];
+                ord.insert(ord.end(), p1.begin(), p1.end());
+                ord.insert(ord.end(), p2.begin(), p2.end());
+                ord.insert(ord.end(), p3.begin(), p3.end());
+            }
+
+            // --- DFS over choice tuples -----------------------------
+            //
+            // try_with_choices builds parts/L from a complete choice
+            // tuple and runs the bridge test + recursion. Returns Ok
+            // on first success; aggregates last error otherwise.
+            std::vector<size_t>              parts_n;  // accumulated parts.size()
+            std::vector<std::vector<size_t>> parts;
+            util::ResultStatus               last_err = MAKE_ERROR
+                << "is_fonet: no valid binarization found (Case C)";
+
+            std::function<util::ResultStatus()> try_decomposition;
+            std::function<util::ResultStatus(size_t)> dfs;
+
+            dfs = [&](size_t un_idx) -> util::ResultStatus {
+                if (un_idx == union_children.size()) {
+                    auto r = try_decomposition();
+                    if (!r.is_error()) return r;
+                    last_err = std::move(r);
+                    return last_err;  // signal failure; outer DFS keeps trying
+                }
+                const auto& cl  = union_children[un_idx];
+                const auto& ord = choice_order[un_idx];
+                for (size_t pick : ord) {
+                    // parts[2*un_idx]   = cl[pick]
+                    // parts[2*un_idx+1] = rest
+                    std::vector<size_t> rest;
+                    for (size_t k = 0; k < cl.size(); ++k) {
+                        if (k == pick) continue;
+                        for (size_t v : cl[k]) rest.push_back(v);
+                    }
+                    parts.push_back(cl[pick]);
+                    parts.push_back(std::move(rest));
+                    auto r = dfs(un_idx + 1);
+                    if (!r.is_error()) return r;
+                    parts.pop_back();
+                    parts.pop_back();
+                }
+                return last_err;
             };
 
-            int m = -1;
-            for (size_t i = 0; i + 1 < n; i += 2) {
-                if (is_bridge(static_cast<int>(i), static_cast<int>(i + 1))) {
-                    m = static_cast<int>(i);
-                    break;
+            // try_decomposition is the per-tuple bridge-test + split
+            // + recurse, factored out so dfs can call it once per leaf.
+            try_decomposition = [&]() -> util::ResultStatus {
+                const std::vector<size_t>& L = direct_L;
+                const size_t n = parts.size();
+                if (n == 0 || n % 2 != 0) {
+                    return MAKE_ERROR << "is_fonet: malformed parts decomposition "
+                                         "(n = " << n << ")";
                 }
-            }
-            if (m < 0) {
-                return MAKE_ERROR << "is_fonet: no bridge in Z -- induced "
-                                     "bimatching exists";
-            }
 
-            // --- Split at the bridge -----------------------------------
-            // X = component of G_m in Omega \ {(m, m+1)};
-            // Y = complement.
-            std::vector<bool> in_X(n, false);
-            {
-                std::vector<int> stack{m};
-                in_X[m] = true;
-                while (!stack.empty()) {
-                    int u = stack.back(); stack.pop_back();
-                    for (int v : omega_adj[u]) {
-                        if ((u == m && v == m + 1) || (u == m + 1 && v == m)) continue;
-                        if (in_X[v]) continue;
-                        in_X[v] = true;
-                        stack.push_back(v);
+                // --- Build Omega ------------------------------------
+                std::vector<int> part_of(proof.source.num_vertex, -1);
+                for (size_t p = 0; p < n; ++p) {
+                    for (size_t v : parts[p]) part_of[v] = static_cast<int>(p);
+                }
+                std::vector<std::unordered_set<int>> omega_adj(n);
+                auto add_omega_edge = [&](size_t u, size_t v) {
+                    if (!W[u] || !W[v]) return;
+                    int pu = part_of[u];
+                    int pv = part_of[v];
+                    if (pu == -1 || pv == -1 || pu == pv) return;
+                    omega_adj[pu].insert(pv);
+                    omega_adj[pv].insert(pu);
+                };
+                for (const Edge& e : E_W)        add_omega_edge(e.first, e.second);
+                for (const Edge& e : leap_edges) add_omega_edge(e.first, e.second);
+
+                // --- Find a bridge in Z -----------------------------
+                auto is_bridge = [&](int a, int b) {
+                    std::vector<bool> visited(n, false);
+                    std::vector<int>  stack{a};
+                    visited[a] = true;
+                    while (!stack.empty()) {
+                        int u = stack.back(); stack.pop_back();
+                        for (int v : omega_adj[u]) {
+                            if ((u == a && v == b) || (u == b && v == a)) continue;
+                            if (visited[v]) continue;
+                            visited[v] = true;
+                            stack.push_back(v);
+                        }
+                    }
+                    return !visited[b];
+                };
+
+                int m = -1;
+                for (size_t i = 0; i + 1 < n; i += 2) {
+                    if (is_bridge(static_cast<int>(i), static_cast<int>(i + 1))) {
+                        m = static_cast<int>(i);
+                        break;
                     }
                 }
-            }
-
-            auto contains_literal = [&](const std::vector<size_t>& part) {
-                for (size_t v : part) {
-                    auto k = proof.source_label(v).kind;
-                    if (k == VertexKind::Atom || k == VertexKind::One) return true;
+                if (m < 0) {
+                    return MAKE_ERROR << "is_fonet: no bridge in Z -- this "
+                                         "binarization fails (induced "
+                                         "bimatching, or wrong binarization "
+                                         "choice — DFS will try alternatives)";
                 }
-                return false;
-            };
-            const bool gm_lit   = contains_literal(parts[m]);
-            const bool gm1_lit  = contains_literal(parts[m + 1]);
 
-            // --- Sub-case C.2: existential quantification -------------
-            // One of G_m, G_{m+1} is a lone existential binder. By
-            // Lemma 10.20 (with Lemma 10.19 ensuring *x is in no leap),
-            // N[W] = *x + N[W \ {*x}]. Strip and recurse.
-            if (!gm_lit || !gm1_lit) {
-                size_t lone = (!gm_lit) ? static_cast<size_t>(m)
-                                        : static_cast<size_t>(m + 1);
-                if (parts[lone].size() != 1) {
-                    return MAKE_ERROR << "is_fonet: C.2 expected a singleton "
-                                         "binder, got part of size "
-                                      << parts[lone].size();
+                // --- Split at the bridge ---------------------------
+                std::vector<bool> in_X(n, false);
+                {
+                    std::vector<int> stack{m};
+                    in_X[m] = true;
+                    while (!stack.empty()) {
+                        int u = stack.back(); stack.pop_back();
+                        for (int v : omega_adj[u]) {
+                            if ((u == m && v == m + 1) || (u == m + 1 && v == m)) continue;
+                            if (in_X[v]) continue;
+                            in_X[v] = true;
+                            stack.push_back(v);
+                        }
+                    }
                 }
-                size_t binder_v = parts[lone][0];
-                if (proof.source_label(binder_v).kind != VertexKind::Binder) {
-                    return MAKE_ERROR << "is_fonet: C.2 expected a binder";
-                }
-                Mask W2 = W;
-                W2[binder_v] = false;
-                return is_fonet(W2);
-            }
 
-            // --- Sub-case C.1: fusion ----------------------------------
-            // Both G_m and G_{m+1} contain a literal. By Lemma 10.18,
-            // N[W] is a fusion of N[V(K_1) U V(G_m)] and N[V(G_{m+1}) U V(K_2)].
-            // K_1 = L_X U (parts entirely in X);
-            // K_2 = L_Y U (parts entirely in Y).
-            // Note: parts G_m and G_{m+1} themselves are also in X and Y
-            // respectively, so they're naturally included by the X/Y
-            // mask construction.
-            Mask W_left(W.size(), false);
-            Mask W_right(W.size(), false);
-            for (size_t p = 0; p < n; ++p) {
-                Mask& target = in_X[p] ? W_left : W_right;
-                for (size_t v : parts[p]) target[v] = true;
-            }
-            // Partition L by mate position:
-            //   mate in a part of X  -> L_X (W_left)
-            //   mate in a part of Y  -> L_Y (W_right)
-            //   mate also in L, or *1 unlinked -> arbitrarily W_left
-            // (For an L-to-L pair, both members hit the "mate in L"
-            // branch and both go to W_left, keeping them together.)
-            for (size_t v : L) {
-                bool to_left;
-                if (mate[v] == SIZE_MAX) {
-                    to_left = true;
-                } else {
-                    int mate_part = part_of[mate[v]];
-                    to_left = (mate_part == -1) ? true : in_X[mate_part];
-                }
-                (to_left ? W_left : W_right)[v] = true;
-            }
+                auto contains_literal = [&](const std::vector<size_t>& part) {
+                    for (size_t v : part) {
+                        auto k = proof.source_label(v).kind;
+                        if (k == VertexKind::Atom || k == VertexKind::One) return true;
+                    }
+                    return false;
+                };
+                const bool gm_lit   = contains_literal(parts[m]);
+                const bool gm1_lit  = contains_literal(parts[m + 1]);
 
-            auto r_left = is_fonet(W_left);
-            if (r_left.is_error()) return r_left;
-            return is_fonet(W_right);
-        };
+                // --- Sub-case C.2 ----------------------------------
+                if (!gm_lit || !gm1_lit) {
+                    size_t lone = (!gm_lit) ? static_cast<size_t>(m)
+                                            : static_cast<size_t>(m + 1);
+                    if (parts[lone].size() != 1) {
+                        return MAKE_ERROR << "is_fonet: C.2 expected a singleton "
+                                             "binder, got part of size "
+                                          << parts[lone].size();
+                    }
+                    size_t binder_v = parts[lone][0];
+                    const VertexLabel& binder_lbl = proof.source_label(binder_v);
+                    if (binder_lbl.kind != VertexKind::Binder) {
+                        return MAKE_ERROR << "is_fonet: C.2 expected a binder";
+                    }
+                    if (!binder_lbl.is_existential) {
+                        return MAKE_ERROR << "is_fonet: C.2 found a universal "
+                                             "binder on the no-literal side "
+                                             "(Hughes Lemma 10.20 requires an "
+                                             "existential); Case B should have "
+                                             "stripped it";
+                    }
+                    Mask W2 = W;
+                    W2[binder_v] = false;
+                    return is_fonet(W2);
+                }
+
+                // --- Sub-case C.1 ----------------------------------
+                Mask W_left(W.size(), false);
+                Mask W_right(W.size(), false);
+                for (size_t p = 0; p < n; ++p) {
+                    Mask& target = in_X[p] ? W_left : W_right;
+                    for (size_t v : parts[p]) target[v] = true;
+                }
+                for (size_t v : L) {
+                    bool to_left;
+                    if (mate[v] == SIZE_MAX) {
+                        to_left = true;
+                    } else {
+                        int mate_part = part_of[mate[v]];
+                        to_left = (mate_part == -1) ? true : in_X[mate_part];
+                    }
+                    (to_left ? W_left : W_right)[v] = true;
+                }
+
+                auto r_left = is_fonet(W_left);
+                if (r_left.is_error()) return r_left;
+                return is_fonet(W_right);
+            };  // end try_decomposition
+
+            return dfs(0);
+        };  // end is_fonet
 
     Mask seed(proof.source.num_vertex, true);
     return is_fonet(seed);
