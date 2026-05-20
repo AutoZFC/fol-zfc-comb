@@ -233,6 +233,35 @@ void test_p4_nested_forall() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// P5: Exists with a ∀-eigenvar witness. goal = ∀y. (p(y) → ∃x. p(x))
+// = ∀y. (¬p(y) ∨ ∃x. p(x)). LKR:
+//   Forall(0, eigen=Y) → [¬p(Y) ∨ ∃x.p(x)]
+//   Or(0)              → [¬p(Y), ∃x.p(x)]
+//   Exists(1, witness=TermRef{0}=Y) → [¬p(Y), p(Y)]
+//   AxiomLit(0,1)
+// The existential •x is ×-joined to its body atom p(x); the dualizer
+// (MGU of the link ¬p(Y)/p(X)) is δ(X)=Y, a dependency on the universal
+// ∀y — derived at the root, not threaded.
+void test_p5_exists_forall_witness() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal =
+        parse_root(ctx, "forall y. (p(y) -> exists x. p(x))");
+
+    LKRProgram prog;
+    prog.claim_name = "exists_forall_witness";
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    lkr::Exists ex{};
+    ex.principal = 1;
+    ex.witness   = TermRef{0};  // the ∀y eigen bound at op 0
+    prog.instrs.push_back(std::move(ex));
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +273,7 @@ int main() {
     test_p3_weakening_load_bearing_rejected();
     test_p4_forall_em();
     test_p4_nested_forall();
+    test_p5_exists_forall_witness();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

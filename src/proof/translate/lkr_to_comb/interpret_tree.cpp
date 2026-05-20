@@ -4,7 +4,11 @@
 #include "src/util/error.h"
 
 #include <cstdint>
+#include <functional>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 
 namespace logic::proof::translate::lkr_to_comb {
@@ -250,21 +254,71 @@ struct Interp {
             np.fibration = std::move(fib);
 
             if (covered) {
+                // Universal •x: +-disjoint (no cograph edges). Binding
+                // edges are computed at the root from G(goal) (per-node
+                // targets can alias a fresh binder var with a free eigen
+                // var and fabricate phantom binding edges).
+                np.fibration.push_back(bx);  // •x_src ↦ •x
+                np.source.num_vertex += 1;
+            }
+            return np;
+        }
+        if (const auto* ex = std::get_if<lkr::Exists>(&op)) {
+            // §11.1 ∃ rule. C = [Γ, ∃x.φ @principal]; H = [Γ, φ[x:=t]
+            // @principal] for the witness t. G(∃x.φ) = •x × G(φ): •x is
+            // ×-JOINED to the body (existential), unlike ∀ where it is
+            // +-disjoint. The canonical injection e : G(H) → G(C) is the
+            // same shape as ∀ (•x inserted first in the principal block).
+            //
+            // P = source vertices landing in the body. If empty, g = e∘f.
+            // Else add an existential •x source vertex with cograph edges
+            // to EVERY vertex in P (the ×-join → existential), mapped to
+            // G(C)'s •x, plus binding edges to its bound x-literals.
+            //
+            // The witness t is NOT used here: the dualizer is the MGU of
+            // the links (Lemma 10.12), computed once at the root.
+            size_t p = ex->principal;
+            if (p >= C.size() || !C[p].get().is_quantified() ||
+                C[p].get().as_quantified().op != Op::Exists) {
+                return MAKE_ERROR << "interpret_tree: Exists principal is not ∃";
+            }
+            if (H.size() != C.size()) {
+                return MAKE_ERROR << "interpret_tree: Exists arity mismatch";
+            }
+            comb::Fograph      target = build_sequent_fograph(fb, C);
+            std::vector<size_t> Coff  = entry_vertex_offsets(fb, C);
+            std::vector<size_t> Hoff  = entry_vertex_offsets(fb, H);
+            const size_t bx = Coff[p];
+
+            std::vector<size_t> remap(Hoff.back());
+            for (size_t h = 0; h < H.size(); ++h) {
+                size_t len = Hoff[h + 1] - Hoff[h];
+                size_t c_start = (h == p) ? Coff[p] + 1 : Coff[h];
+                for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
+            }
+            std::vector<size_t> fib = std::move(child.value().fibration);
+            for (auto& fv : fib) fv = remap[fv];
+
+            std::vector<size_t> P;
+            for (size_t v = 0; v < fib.size(); ++v)
+                if (fib[v] > bx && fib[v] < Coff[p + 1]) P.push_back(v);
+
+            NodeProof np;
+            np.target    = std::move(target);
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(fib);
+
+            if (!P.empty()) {
                 size_t xsrc = np.source.num_vertex;
                 np.source.num_vertex += 1;
-                // •x's bound atoms in G(C): binding edges out of bx.
-                std::unordered_set<size_t> bound;
-                for (const auto& e : np.target.binding_edges)
-                    if (e.first == bx) bound.insert(e.second);
-                for (size_t v = 0; v < xsrc; ++v)
-                    if (bound.count(np.fibration[v]))
-                        np.source.binding_edges.push_back({xsrc, v});
+                // ×-join: •x_src adjacent to every vertex in P (this is
+                // what makes it existential). Binding edges are computed
+                // at the root from G(goal) — see Forall note.
+                for (size_t v : P) np.source.cograph_edges.push_back({xsrc, v});
                 np.fibration.push_back(bx);  // •x_src ↦ •x
             }
             return np;
         }
-        if (std::holds_alternative<lkr::Exists>(op))
-            return MAKE_ERROR << "interpret_tree: Exists not yet implemented (P5)";
         if (std::holds_alternative<lkr::Contraction>(op))
             return MAKE_ERROR << "interpret_tree: Contraction not yet implemented (P7)";
         return MAKE_ERROR << "interpret_tree: unexpected linear op";
@@ -282,6 +336,86 @@ struct Interp {
         return MAKE_ERROR << "interpret_tree: unexpected branching op";
     }
 };
+
+// Most general dualizer of the source's links (Hughes Lemma 10.12):
+// the dualizer is the MGU of the unification problem ti ≈ ti' over each
+// link's args, solved for existential variables. We compute it once at
+// the root, where the source labels reference the final G(goal) vars —
+// so δ is automatically in the right namespace, regardless of the
+// per-node target rebuilds during the fold.
+//
+// (Variable-only scope: args are Fixed. Existential = ∃-binder var.
+// rigid = universal/eigen var.)
+util::Result<std::unordered_map<var_index, Term>> mgu_dualizer(
+    const comb::CombProof& cp)
+{
+    std::unordered_set<var_index> existential;
+    for (size_t v = 0; v < cp.source.num_vertex; ++v) {
+        const auto& lbl = cp.source_label(v);
+        if (lbl.kind == comb::VertexKind::Binder && lbl.is_existential)
+            existential.insert(lbl.var);
+    }
+    std::unordered_map<var_index, var_index> parent;
+    std::unordered_map<var_index, Term>      anchor;
+    for (var_index x : existential) parent[x] = x;
+    std::function<var_index(var_index)> find = [&](var_index x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto is_unknown = [&](const Term& t) {
+        return t.is_fixed() && existential.count(t.as_variable()) > 0;
+    };
+    auto set_anchor = [&](var_index x, const Term& t) -> bool {
+        var_index r = find(x);
+        auto it = anchor.find(r);
+        if (it != anchor.end() && !(it->second == t)) return false;
+        anchor[r] = t;
+        return true;
+    };
+    auto unite = [&](var_index a, var_index b) -> bool {
+        a = find(a); b = find(b);
+        if (a == b) return true;
+        auto ia = anchor.find(a), ib = anchor.find(b);
+        bool ha = ia != anchor.end(), hb = ib != anchor.end();
+        if (ha && hb && !(ia->second == ib->second)) return false;
+        Term saved;
+        if (ha) saved = ia->second;
+        parent[a] = b;
+        if (ha && !hb) anchor[b] = saved;
+        if (ha) anchor.erase(a);
+        return true;
+    };
+    auto unify = [&](const Term& t, const Term& u) -> bool {
+        int e = (is_unknown(t) << 1) | is_unknown(u);
+        switch (e) {
+            case 0b11: return unite(t.as_variable(), u.as_variable());
+            case 0b10: return set_anchor(t.as_variable(), u);
+            case 0b01: return set_anchor(u.as_variable(), t);
+            case 0b00: return t.as_variable() == u.as_variable();
+        }
+        return false;
+    };
+    for (const auto& link : cp.source.links) {
+        const auto& a1 = cp.source_label(link.first);
+        const auto& a2 = cp.source_label(link.second);
+        for (size_t i = 0; i < a1.args.size() && i < a2.args.size(); ++i)
+            if (!unify(a1.args[i], a2.args[i]))
+                return MAKE_ERROR << "mgu_dualizer: link {" << link.first << ","
+                                  << link.second << "} args do not unify — "
+                                     "no dualizer";
+    }
+    std::unordered_map<var_index, Term> delta;
+    for (var_index x : existential) {
+        auto it = anchor.find(find(x));
+        if (it == anchor.end()) {
+            return MAKE_ERROR << "mgu_dualizer: existential " << x
+                              << " is unconstrained by links (no witness); "
+                                 "stem witnesses are not yet supported";
+        }
+        delta[x] = it->second;
+    }
+    return delta;
+}
 
 }  // namespace
 
@@ -306,6 +440,30 @@ util::Result<comb::CombProof> interpret_tree(
     cp.target    = std::move(np.target);
     cp.source    = std::move(np.source);
     cp.fibration = std::move(np.fibration);
+
+    // Source binding edges = pullback of G(goal)'s binding graph along
+    // the fibration: (S,A) is a source binding edge iff (f(S),f(A)) is a
+    // target binding edge. Computed at the root because G(goal) is a
+    // sentence (no free eigenvars), so its binder var allocation cannot
+    // alias a free var — unlike the per-node intermediate targets.
+    {
+        std::set<std::pair<size_t, size_t>> tgt_bind;
+        for (const auto& e : cp.target.binding_edges) tgt_bind.insert(e);
+        // Identify source binder vertices.
+        for (size_t s = 0; s < cp.source.num_vertex; ++s) {
+            if (cp.source_label(s).kind != comb::VertexKind::Binder) continue;
+            for (size_t a = 0; a < cp.source.num_vertex; ++a) {
+                if (cp.source_label(a).kind != comb::VertexKind::Atom) continue;
+                if (tgt_bind.count({cp.fibration[s], cp.fibration[a]}))
+                    cp.source.binding_edges.push_back({s, a});
+            }
+        }
+    }
+
+    // Dualizer = MGU of the final links (Lemma 10.12), in G(goal) vars.
+    auto delta = mgu_dualizer(cp);
+    if (delta.is_error()) return delta.error();
+    cp.source.dualizer = std::move(delta.value());
     return cp;
 }
 
