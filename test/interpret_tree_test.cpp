@@ -310,6 +310,30 @@ void test_p6_and_under_forall() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// P7: Contraction. goal = (p ∨ ¬p) ∨ (p ∨ ¬p) — a tautology twice.
+// LKR:
+//   Or(0)            → [(p∨¬p), (p∨¬p)]   (two α-equal copies)
+//   Contraction(0,1) → [(p∨¬p)]           (merge: remove copy 1)
+//   Or(0)            → [p, ¬p]
+//   AxiomLit(0,1)
+// The fold builds the two-copy node from the one-copy child by adding
+// copy 1 back UNCOVERED (weakening at position 1).
+void test_p7_contraction() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "(p | ~p) | (p | ~p)");
+
+    LKRProgram prog;
+    prog.claim_name = "contraction";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Contraction{{}, 0, 1});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
@@ -324,6 +348,7 @@ int main() {
     test_p5_exists_forall_witness();
     test_p6_and_commute();
     test_p6_and_under_forall();
+    test_p7_contraction();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

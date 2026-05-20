@@ -320,8 +320,41 @@ struct Interp {
             }
             return np;
         }
-        if (std::holds_alternative<lkr::Contraction>(op))
-            return MAKE_ERROR << "interpret_tree: Contraction not yet implemented (P7)";
+        if (const auto* ct = std::get_if<lkr::Contraction>(&op)) {
+            // §11 C rule, in this LKR's direction. Contraction(i,j)
+            // removes entry j, so the node conclusion C = Γ,ϕᵢ,ϕⱼ has
+            // two α-equal copies at i,j and the child proves the subgoal
+            // H = C with entry j removed (one copy). Hughes §11.1
+            // collapses two→one going DOWN; the fold builds two from one
+            // going UP. Since H (one copy) is already a complete proof,
+            // C follows by reinstating the duplicate ϕⱼ UNCOVERED — i.e.
+            // Weakening at position j. (ϕᵢ ≡ ϕⱼ, so G(ϕⱼ) is identical
+            // structure; leaving it uncovered is sound.)
+            size_t jdx = ct->j;
+            if (jdx >= C.size()) {
+                return MAKE_ERROR << "interpret_tree: Contraction j out of range";
+            }
+            if (H.size() != C.size() - 1) {
+                return MAKE_ERROR << "interpret_tree: Contraction arity mismatch "
+                                     "(expected " << (C.size() - 1) << ", got "
+                                  << H.size() << ")";
+            }
+            std::vector<size_t> Coff = entry_vertex_offsets(fb, C);
+            std::vector<size_t> Hoff = entry_vertex_offsets(fb, H);
+            std::vector<size_t> remap(Hoff.back());
+            for (size_t k = 0; k < H.size(); ++k) {
+                size_t c_entry = (k < jdx) ? k : k + 1;  // skip inserted copy j
+                size_t len = Hoff[k + 1] - Hoff[k];
+                for (size_t m = 0; m < len; ++m)
+                    remap[Hoff[k] + m] = Coff[c_entry] + m;
+            }
+            NodeProof np;
+            np.target    = build_sequent_fograph(fb, C);
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(child.value().fibration);
+            for (auto& fv : np.fibration) fv = remap[fv];
+            return np;
+        }
         return MAKE_ERROR << "interpret_tree: unexpected linear op";
     }
 
