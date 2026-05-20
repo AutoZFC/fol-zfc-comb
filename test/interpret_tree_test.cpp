@@ -194,6 +194,45 @@ void test_p3_weakening_load_bearing_rejected() {
     }
 }
 
+// P4: Forall. goal = ∀x. (p(x) ∨ ¬p(x)). LKR:
+//   Forall(0, eigen) → [p(e) ∨ ¬p(e)]; Or(0) → [p(e), ¬p(e)];
+//   AxiomLit(0,1). The body is covered, so the fold adds a universal
+//   •x source vertex (mapped to G(C)'s ∀x binder) with binding edges
+//   to the source preimages of p(x), ¬p(x).
+void test_p4_forall_em() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "forall x. (p(x) | ~p(x))");
+
+    LKRProgram prog;
+    prog.claim_name = "forall_em";
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// P4: nested Forall. goal = ∀x. ∀y. (r(x,y) ∨ ¬r(x,y)). Two universal
+// binders added, each binding its scope's literals.
+void test_p4_nested_forall() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal =
+        parse_root(ctx, "forall x. forall y. (r(x,y) | ~r(x,y))");
+
+    LKRProgram prog;
+    prog.claim_name = "nested_forall";
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/0});  // ∀x → ∀y.(...)[x:=0]
+    prog.instrs.push_back(lkr::Forall{{}, 0, /*eigen=*/1});  // ∀y → (...)[y:=1]
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
@@ -203,6 +242,8 @@ int main() {
     test_p2_exchange();
     test_p3_weakening_scaffolding();
     test_p3_weakening_load_bearing_rejected();
+    test_p4_forall_em();
+    test_p4_nested_forall();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

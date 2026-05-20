@@ -4,6 +4,7 @@
 #include "src/util/error.h"
 
 #include <cstdint>
+#include <unordered_set>
 #include <variant>
 
 namespace logic::proof::translate::lkr_to_comb {
@@ -204,8 +205,64 @@ struct Interp {
             np.fibration = std::move(child.value().fibration);
             return np;
         }
-        if (std::holds_alternative<lkr::Forall>(op))
-            return MAKE_ERROR << "interpret_tree: Forall not yet implemented (P4)";
+        if (const auto* fa = std::get_if<lkr::Forall>(&op)) {
+            // §11.1 ∀ rule. C = [Γ, ∀x.φ @principal]; H = [Γ, φ[x:=eigen]
+            // @principal]. G(∀x.φ) = •x + G(φ): the Fograph builder puts
+            // •x first in the principal block, then the body. So:
+            //   canonical injection a : G(H) → G(C) is identity on Γ
+            //   before principal, +1-shift on the principal body (past
+            //   •x), and +1-shift on entries after principal.
+            // If the body is uncovered (no source vertex lands in it),
+            // g = a∘f. Otherwise add a universal •x source vertex (no
+            // cograph edges — Def. 10.7) mapped to G(C)'s •x, with
+            // binding edges to the source preimages of •x's bound atoms.
+            size_t p = fa->principal;
+            if (p >= C.size() || !C[p].get().is_quantified() ||
+                C[p].get().as_quantified().op != Op::Forall) {
+                return MAKE_ERROR << "interpret_tree: Forall principal is not ∀";
+            }
+            if (H.size() != C.size()) {
+                return MAKE_ERROR << "interpret_tree: Forall arity mismatch";
+            }
+            comb::Fograph      target = build_sequent_fograph(fb, C);
+            std::vector<size_t> Coff  = entry_vertex_offsets(fb, C);
+            std::vector<size_t> Hoff  = entry_vertex_offsets(fb, H);
+            const size_t bx = Coff[p];  // •x position in G(C)
+
+            std::vector<size_t> remap(Hoff.back());
+            for (size_t h = 0; h < H.size(); ++h) {
+                size_t len = Hoff[h + 1] - Hoff[h];
+                size_t c_start = (h == p) ? Coff[p] + 1   // body, past •x
+                                          : Coff[h];       // Γ entries
+                for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
+            }
+
+            std::vector<size_t> fib = std::move(child.value().fibration);
+            for (auto& fv : fib) fv = remap[fv];
+
+            bool covered = false;
+            for (size_t fv : fib)
+                if (fv > bx && fv < Coff[p + 1]) { covered = true; break; }
+
+            NodeProof np;
+            np.target    = std::move(target);
+            np.source    = std::move(child.value().source);
+            np.fibration = std::move(fib);
+
+            if (covered) {
+                size_t xsrc = np.source.num_vertex;
+                np.source.num_vertex += 1;
+                // •x's bound atoms in G(C): binding edges out of bx.
+                std::unordered_set<size_t> bound;
+                for (const auto& e : np.target.binding_edges)
+                    if (e.first == bx) bound.insert(e.second);
+                for (size_t v = 0; v < xsrc; ++v)
+                    if (bound.count(np.fibration[v]))
+                        np.source.binding_edges.push_back({xsrc, v});
+                np.fibration.push_back(bx);  // •x_src ↦ •x
+            }
+            return np;
+        }
         if (std::holds_alternative<lkr::Exists>(op))
             return MAKE_ERROR << "interpret_tree: Exists not yet implemented (P5)";
         if (std::holds_alternative<lkr::Contraction>(op))
