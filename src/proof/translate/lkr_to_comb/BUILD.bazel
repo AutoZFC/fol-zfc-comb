@@ -194,6 +194,7 @@ cc_library(
         ":alpha_rename",
         ":cut_augment",
         ":input_gate",
+        ":interpret_tree",
         ":lemma_inliner",
         ":output_gate",
         ":sequent_replay",
