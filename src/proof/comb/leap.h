@@ -56,6 +56,29 @@ namespace logic::proof::comb {
 //   Precondition: 2B has already confirmed a dualizer exists, so
 //   unification should not fail; an error here indicates an inconsistent
 //   link set.
+// most_general_dualizer — the MGU of the fonet's links over existential
+// variables (Hughes Lemma 10.12), returned as the map δ : existential
+// var ↦ its anchor term.
+//
+//   Each link {α₁,α₂} imposes argᵢ(α₁) ≈ argᵢ(α₂); we solve for the
+//   existential variables. In this Term language (variables + opaque
+//   descriptions, no function symbols) the MGU is a union-find over
+//   existential vars, each class anchored to at most one rigid term
+//   (a universal var or a description).
+//
+//   Existentials left UNCONSTRAINED by the links are ABSENT from the
+//   returned map (their MGU image is a fresh stem). Callers decide what
+//   absence means: build_leap_graph emits no dependency for them; a
+//   translator emitting source.dualizer may treat absence as an error
+//   (stem witnesses unsupported) or assign a stem.
+//
+//   Errors only if the links do not unify (no dualizer exists).
+//
+//   This is the single source of truth for the Lemma 10.12 MGU, shared
+//   by the verifier (build_leap_graph) and the LKR→Comb translator.
+util::Result<std::unordered_map<var_index, Term>>
+most_general_dualizer(const CombProof& proof);
+
 util::Result<Edges> build_leap_graph(const CombProof& proof);
 
 // verify_no_bimatching — confirm N has no induced bimatching, by the

@@ -334,6 +334,83 @@ void test_p7_contraction() {
     EXPECT_OK(run(ctx, goal, prog));
 }
 
+// Paper-branch coverage: cases the per-rule tests above don't hit but
+// §11.1 explicitly defines. Each must verify (or these are faithfulness
+// gaps, not just untested code).
+
+// And, MIXED case (one premise weak). goal = (p∨¬p) ∨ (a ∧ (b∨¬b)).
+// Or, Or, And(1,{0,2}): LEFT=[p,¬p,a] closes on p,¬p (a=φ uncovered →
+// weak); RIGHT=[(b∨¬b)] closes (θ covered → strong). §11.1 takes the
+// weak side alone (its Γ already closes C); the strong premise is
+// dropped. Exercises the w1!=w2 branch.
+void test_p6_and_mixed_weak() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    PredicateHandle a0 = ctx.add_predicate("a", 0);
+    PredicateHandle b0 = ctx.add_predicate("b", 0);
+    (void)a0; (void)b0;
+    FormulaHandle goal = parse_root(ctx, "(p | ~p) | (a & (b | ~b))");
+
+    LKRProgram prog;
+    prog.claim_name = "and_mixed_weak";
+    prog.instrs.push_back(lkr::Or{{}, 0});            // [(p∨¬p), a∧(b∨¬b)]
+    prog.instrs.push_back(lkr::Or{{}, 0});            // [p, a∧(b∨¬b), ¬p]
+    prog.instrs.push_back(lkr::And{{}, 1, {0, 2}});   // LEFT=[p,¬p,a] RIGHT=[(b∨¬b)]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});   // LEFT: p,¬p (a weak)
+    prog.instrs.push_back(lkr::Or{{}, 0});            // RIGHT: (b∨¬b)→[b,¬b]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});   // RIGHT: b,¬b
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// And, BOTH-WEAK case. goal = (p∨¬p) ∨ (q∨¬q) ∨ (a ∧ b). The a∧b
+// context splits p,¬p left and q,¬q right; both premises close on
+// their context, both conjuncts uncovered → fusion at empty portions
+// (disjoint union of the two fonets).
+void test_p6_and_both_weak() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    PredicateHandle q0 = ctx.add_predicate("q", 0);
+    PredicateHandle a0 = ctx.add_predicate("a", 0);
+    PredicateHandle b0 = ctx.add_predicate("b", 0);
+    (void)q0; (void)a0; (void)b0;
+    FormulaHandle goal = parse_root(ctx, "((p | ~p) | (q | ~q)) | (a & b)");
+
+    LKRProgram prog;
+    prog.claim_name = "and_both_weak";
+    prog.instrs.push_back(lkr::Or{{}, 0});  // [((p∨¬p)∨(q∨¬q)), a∧b]
+    prog.instrs.push_back(lkr::Or{{}, 0});  // [(p∨¬p), a∧b, (q∨¬q)]
+    prog.instrs.push_back(lkr::Or{{}, 0});  // [p, a∧b, (q∨¬q), ¬p]
+    prog.instrs.push_back(lkr::Or{{}, 2});  // [p, a∧b, q, ¬p, ¬q]
+    // And on principal=1 (a∧b); left_partition={0,3}={p,¬p}, complement={2,4}={q,¬q}
+    prog.instrs.push_back(lkr::And{{}, 1, {0, 3}});  // LEFT=[p,¬p,a] RIGHT=[q,¬q,b]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});  // LEFT: p,¬p (a weak)
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});  // RIGHT: q,¬q (b weak)
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
+// Forall, UNCOVERED-BODY case (P empty). goal = (p∨¬p) ∨ ∀x. q(x).
+// The proof closes on p,¬p and weakens ∀x.q(x); the ∀-body q(eigen) is
+// uncovered, so §11.1 adds no source •x (g = a∘f).
+void test_p4_forall_uncovered_body() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. p(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle  goal = parse_root(ctx, "(p | ~p) | (forall x. q(x))");
+
+    LKRProgram prog;
+    prog.claim_name = "forall_uncovered";
+    prog.instrs.push_back(lkr::Or{{}, 0});               // [(p∨¬p), ∀x.q(x)]
+    prog.instrs.push_back(lkr::Or{{}, 0});               // [p, ∀x.q(x), ¬p]
+    prog.instrs.push_back(lkr::Forall{{}, 1, /*eigen=*/0}); // [p, q(0), ¬p]
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 2});      // p,¬p; q(0) uncovered
+
+    EXPECT_OK(run(ctx, goal, prog));
+}
+
 }  // namespace
 
 int main() {
@@ -349,6 +426,9 @@ int main() {
     test_p6_and_commute();
     test_p6_and_under_forall();
     test_p7_contraction();
+    test_p6_and_mixed_weak();
+    test_p6_and_both_weak();
+    test_p4_forall_uncovered_body();
 
     std::cerr << "interpret_tree_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

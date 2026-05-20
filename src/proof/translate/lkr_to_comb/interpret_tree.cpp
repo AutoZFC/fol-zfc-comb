@@ -1,11 +1,11 @@
 #include "src/proof/translate/lkr_to_comb/interpret_tree.h"
 
+#include "src/proof/comb/leap.h"
 #include "src/proof/translate/lkr_to_comb/comb_build.h"
 #include "src/util/error.h"
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,6 +40,31 @@ struct Interp {
 
     util::Result<NodeProof> node(const DerivationTree& t) {
         return std::visit([&](const auto& n) { return dispatch(n); }, t.node);
+    }
+
+    // Canonical injection G(H) → G(C) shared by the binder-introducing
+    // rules ∀ and ∃: C inserts •x first in the principal block, so the
+    // map is identity on Γ entries, +1-shift on the principal body (past
+    // •x), and +1-shift on entries after principal (•x added one vertex).
+    // Returns remap[H-vertex] = C-vertex, plus C's entry offsets (which
+    // the callers need for the •x position and the body range).
+    struct BinderRemap {
+        std::vector<size_t> remap;  // G(H) vertex → G(C) vertex
+        std::vector<size_t> Coff;   // C entry offsets
+    };
+    BinderRemap binder_insert_remap(const std::vector<FormulaHandle>& C,
+                                    const std::vector<FormulaHandle>& H,
+                                    size_t p) {
+        std::vector<size_t> Coff = entry_vertex_offsets(fb, C);
+        std::vector<size_t> Hoff = entry_vertex_offsets(fb, H);
+        std::vector<size_t> remap(Hoff.back());
+        for (size_t h = 0; h < H.size(); ++h) {
+            size_t len     = Hoff[h + 1] - Hoff[h];
+            size_t c_start = (h == p) ? Coff[p] + 1   // body, past •x
+                                      : Coff[h];        // Γ entries
+            for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
+        }
+        return {std::move(remap), std::move(Coff)};
     }
 
     // ---- LeafNode: closing ops (P1: AxiomLit, One) -------------------
@@ -229,25 +254,16 @@ struct Interp {
             if (H.size() != C.size()) {
                 return MAKE_ERROR << "interpret_tree: Forall arity mismatch";
             }
-            comb::Fograph      target = build_sequent_fograph(fb, C);
-            std::vector<size_t> Coff  = entry_vertex_offsets(fb, C);
-            std::vector<size_t> Hoff  = entry_vertex_offsets(fb, H);
-            const size_t bx = Coff[p];  // •x position in G(C)
-
-            std::vector<size_t> remap(Hoff.back());
-            for (size_t h = 0; h < H.size(); ++h) {
-                size_t len = Hoff[h + 1] - Hoff[h];
-                size_t c_start = (h == p) ? Coff[p] + 1   // body, past •x
-                                          : Coff[h];       // Γ entries
-                for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
-            }
+            comb::Fograph target = build_sequent_fograph(fb, C);
+            BinderRemap   br     = binder_insert_remap(C, H, p);
+            const size_t  bx     = br.Coff[p];  // •x position in G(C)
 
             std::vector<size_t> fib = std::move(child.value().fibration);
-            for (auto& fv : fib) fv = remap[fv];
+            for (auto& fv : fib) fv = br.remap[fv];
 
             bool covered = false;
             for (size_t fv : fib)
-                if (fv > bx && fv < Coff[p + 1]) { covered = true; break; }
+                if (fv > bx && fv < br.Coff[p + 1]) { covered = true; break; }
 
             NodeProof np;
             np.target    = std::move(target);
@@ -286,23 +302,16 @@ struct Interp {
             if (H.size() != C.size()) {
                 return MAKE_ERROR << "interpret_tree: Exists arity mismatch";
             }
-            comb::Fograph      target = build_sequent_fograph(fb, C);
-            std::vector<size_t> Coff  = entry_vertex_offsets(fb, C);
-            std::vector<size_t> Hoff  = entry_vertex_offsets(fb, H);
-            const size_t bx = Coff[p];
+            comb::Fograph target = build_sequent_fograph(fb, C);
+            BinderRemap   br     = binder_insert_remap(C, H, p);
+            const size_t  bx     = br.Coff[p];
 
-            std::vector<size_t> remap(Hoff.back());
-            for (size_t h = 0; h < H.size(); ++h) {
-                size_t len = Hoff[h + 1] - Hoff[h];
-                size_t c_start = (h == p) ? Coff[p] + 1 : Coff[h];
-                for (size_t k = 0; k < len; ++k) remap[Hoff[h] + k] = c_start + k;
-            }
             std::vector<size_t> fib = std::move(child.value().fibration);
-            for (auto& fv : fib) fv = remap[fv];
+            for (auto& fv : fib) fv = br.remap[fv];
 
             std::vector<size_t> P;
             for (size_t v = 0; v < fib.size(); ++v)
-                if (fib[v] > bx && fib[v] < Coff[p + 1]) P.push_back(v);
+                if (fib[v] > bx && fib[v] < br.Coff[p + 1]) P.push_back(v);
 
             NodeProof np;
             np.target    = std::move(target);
@@ -466,82 +475,27 @@ struct Interp {
     }
 };
 
-// Most general dualizer of the source's links (Hughes Lemma 10.12):
-// the dualizer is the MGU of the unification problem ti ≈ ti' over each
-// link's args, solved for existential variables. We compute it once at
-// the root, where the source labels reference the final G(goal) vars —
-// so δ is automatically in the right namespace, regardless of the
-// per-node target rebuilds during the fold.
+// The combinatorial proof's dualizer is the MGU of the final links
+// (Hughes Lemma 10.12) — shared with the verifier via
+// comb::most_general_dualizer. We compute it once at the root, where the
+// source labels reference the final G(goal) vars, so δ lands in the
+// right namespace regardless of the per-node target rebuilds.
 //
-// (Variable-only scope: args are Fixed. Existential = ∃-binder var.
-// rigid = universal/eigen var.)
-util::Result<std::unordered_map<var_index, Term>> mgu_dualizer(
+// The translator requires δ to be TOTAL on existentials: an existential
+// left unconstrained by the links would need a fresh stem witness, which
+// this Term language doesn't yet support — reject it explicitly.
+util::Result<std::unordered_map<var_index, Term>> root_dualizer(
     const comb::CombProof& cp)
 {
-    std::unordered_set<var_index> existential;
+    TRY_ASSIGN(delta, comb::most_general_dualizer(cp));
     for (size_t v = 0; v < cp.source.num_vertex; ++v) {
         const auto& lbl = cp.source_label(v);
-        if (lbl.kind == comb::VertexKind::Binder && lbl.is_existential)
-            existential.insert(lbl.var);
-    }
-    std::unordered_map<var_index, var_index> parent;
-    std::unordered_map<var_index, Term>      anchor;
-    for (var_index x : existential) parent[x] = x;
-    std::function<var_index(var_index)> find = [&](var_index x) {
-        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-        return x;
-    };
-    auto is_unknown = [&](const Term& t) {
-        return t.is_fixed() && existential.count(t.as_variable()) > 0;
-    };
-    auto set_anchor = [&](var_index x, const Term& t) -> bool {
-        var_index r = find(x);
-        auto it = anchor.find(r);
-        if (it != anchor.end() && !(it->second == t)) return false;
-        anchor[r] = t;
-        return true;
-    };
-    auto unite = [&](var_index a, var_index b) -> bool {
-        a = find(a); b = find(b);
-        if (a == b) return true;
-        auto ia = anchor.find(a), ib = anchor.find(b);
-        bool ha = ia != anchor.end(), hb = ib != anchor.end();
-        if (ha && hb && !(ia->second == ib->second)) return false;
-        Term saved;
-        if (ha) saved = ia->second;
-        parent[a] = b;
-        if (ha && !hb) anchor[b] = saved;
-        if (ha) anchor.erase(a);
-        return true;
-    };
-    auto unify = [&](const Term& t, const Term& u) -> bool {
-        int e = (is_unknown(t) << 1) | is_unknown(u);
-        switch (e) {
-            case 0b11: return unite(t.as_variable(), u.as_variable());
-            case 0b10: return set_anchor(t.as_variable(), u);
-            case 0b01: return set_anchor(u.as_variable(), t);
-            case 0b00: return t.as_variable() == u.as_variable();
-        }
-        return false;
-    };
-    for (const auto& link : cp.source.links) {
-        const auto& a1 = cp.source_label(link.first);
-        const auto& a2 = cp.source_label(link.second);
-        for (size_t i = 0; i < a1.args.size() && i < a2.args.size(); ++i)
-            if (!unify(a1.args[i], a2.args[i]))
-                return MAKE_ERROR << "mgu_dualizer: link {" << link.first << ","
-                                  << link.second << "} args do not unify — "
-                                     "no dualizer";
-    }
-    std::unordered_map<var_index, Term> delta;
-    for (var_index x : existential) {
-        auto it = anchor.find(find(x));
-        if (it == anchor.end()) {
-            return MAKE_ERROR << "mgu_dualizer: existential " << x
+        if (lbl.kind == comb::VertexKind::Binder && lbl.is_existential &&
+            !delta.count(lbl.var)) {
+            return MAKE_ERROR << "root_dualizer: existential " << lbl.var
                               << " is unconstrained by links (no witness); "
                                  "stem witnesses are not yet supported";
         }
-        delta[x] = it->second;
     }
     return delta;
 }
@@ -590,7 +544,7 @@ util::Result<comb::CombProof> interpret_tree(
     }
 
     // Dualizer = MGU of the final links (Lemma 10.12), in G(goal) vars.
-    auto delta = mgu_dualizer(cp);
+    auto delta = root_dualizer(cp);
     if (delta.is_error()) return delta.error();
     cp.source.dualizer = std::move(delta.value());
     return cp;

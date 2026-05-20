@@ -73,17 +73,16 @@ struct UnionFind {
 
 }  // namespace
 
-util::Result<Edges> build_leap_graph(const CombProof& proof) {
+util::Result<std::unordered_map<var_index, Term>>
+most_general_dualizer(const CombProof& proof) {
     const Fonet& N = proof.source;
 
-    // (1) Classify binders: var → vertex id, and the existential var set.
-    std::unordered_map<var_index, size_t> binder_vertex;
-    std::unordered_set<var_index>         existential;
+    // Existential variable set (the unknowns of the unification problem).
+    std::unordered_set<var_index> existential;
     for (size_t v = 0; v < N.num_vertex; ++v) {
         const VertexLabel& lbl = proof.source_label(v);
-        if (lbl.kind != VertexKind::Binder) continue;
-        binder_vertex[lbl.var] = v;
-        if (lbl.is_existential) existential.insert(lbl.var);
+        if (lbl.kind == VertexKind::Binder && lbl.is_existential)
+            existential.insert(lbl.var);
     }
 
     // A term is an "unknown" iff it is an existential binder variable.
@@ -92,24 +91,22 @@ util::Result<Edges> build_leap_graph(const CombProof& proof) {
         return t.is_fixed() && existential.count(t.as_variable()) > 0;
     };
 
-    // (2) MGU: union-find over existential vars, fed by the link
-    // equations. No descriptions ⇒ unification is direct: variable
-    // identity for rigid/rigid; union-find for unknowns; anchor for
-    // mixed.
+    // Union-find over existential vars, fed by the link equations. No
+    // function symbols ⇒ unification is direct: variable identity for
+    // rigid/rigid; union-find for unknowns; anchor for mixed.
     UnionFind uf;
     for (var_index x : existential) uf.make(x);
 
-    // PRECONDITION: t, u are Fixed. The Fograph builder rewrites Gen
-    // → Fixed in all atom args (`rewrite_term`), and descriptions are
-    // rejected at the verifier boundary, so atom args reaching this
-    // unifier are always Fixed. `is_unknown` already implies is_fixed.
+    // PRECONDITION: t, u are Fixed. The Fograph builder rewrites Gen →
+    // Fixed in all atom args, and descriptions are rejected at the
+    // verifier boundary, so atom args here are always Fixed.
     auto unify = [&](const Term& t, const Term& u) -> bool {
         int e = (is_unknown(t) << 1) | is_unknown(u);
         switch (e) {
             case 0b11: return uf.unite(t.as_variable(), u.as_variable());
             case 0b10: return uf.set_anchor(t.as_variable(), u);
             case 0b01: return uf.set_anchor(u.as_variable(), t);
-            case 0b00: return t.as_variable() == u.as_variable();   // Fixed-V_U / Fixed-V_U
+            case 0b00: return t.as_variable() == u.as_variable();
         }
         return false;
     };
@@ -120,27 +117,42 @@ util::Result<Edges> build_leap_graph(const CombProof& proof) {
         // 2A.2 already guaranteed same predicate ⇒ matching arity.
         for (size_t i = 0; i < a1.args.size(); ++i) {
             if (!unify(a1.args[i], a2.args[i])) {
-                return MAKE_ERROR << "build_leap_graph: link arguments do not "
-                                     "unify — no dualizer (should be caught by 2B)";
+                return MAKE_ERROR << "most_general_dualizer: link arguments do "
+                                     "not unify — no dualizer exists";
             }
         }
     }
 
-    // (3) Assemble L_N = links ∪ dependencies.
+    // δ: each existential's class anchor (absent ⇒ unconstrained/stem).
+    std::unordered_map<var_index, Term> delta;
+    for (var_index x : existential) {
+        auto it = uf.anchor.find(uf.find(x));
+        if (it != uf.anchor.end()) delta[x] = it->second;
+    }
+    return delta;
+}
+
+util::Result<Edges> build_leap_graph(const CombProof& proof) {
+    const Fonet& N = proof.source;
+
+    // Binder var → vertex id, for turning dependency vars into edges.
+    std::unordered_map<var_index, size_t> binder_vertex;
+    for (size_t v = 0; v < N.num_vertex; ++v) {
+        const VertexLabel& lbl = proof.source_label(v);
+        if (lbl.kind == VertexKind::Binder) binder_vertex[lbl.var] = v;
+    }
+
+    // L_N = links ∪ dependencies. Dependencies come from the MGU
+    // (Lemma 10.12 / 10.13): {x, y} is a dependency iff δ(x) contains the
+    // universal y. With no function symbols, δ(x) is a single rigid var.
+    TRY_ASSIGN(delta, most_general_dualizer(proof));
+
     Edges leaps;
     for (const Edge& link : N.links) leaps.push_back(link);
-
-    // With no descriptions, an existential class's anchor (if any) is
-    // a Fixed-universal term — exactly one dependency edge.
-    for (var_index x : existential) {
-        var_index r  = uf.find(x);
-        auto      it = uf.anchor.find(r);
-        if (it == uf.anchor.end()) continue;           // unconstrained
-        const Term& rigid = it->second;
+    for (const auto& [x, rigid] : delta) {
         if (!rigid.is_fixed()) continue;               // defensively skip non-Fixed
         leaps.push_back({binder_vertex[x], binder_vertex[rigid.as_variable()]});
     }
-
     return leaps;
 }
 

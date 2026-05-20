@@ -162,6 +162,7 @@ cc_library(
         "//src/core:formula",
         "//src/proof:proof_value",
         "//src/proof/comb:comb_proof",
+        "//src/proof/comb:leap",
         "//src/proof/lkr:ops",
         "//src/util:error",
     ],
