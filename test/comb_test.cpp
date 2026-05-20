@@ -970,23 +970,33 @@ void test_2C_case_A_single_one() {
     EXPECT_OK(v.verify_fonet(cp));
 }
 
-// Case B: ∀x. (p(x) ∧ ¬p(x)). The ∀x binder is +-disjoint from its
-// scope (no incident cograph edge), so Case B strips it. The remaining
-// W = {atoms} then has cograph edge {1,2} (from ∧) and proceeds via
-// Case C.1 fusion (both atoms are literals) → recurses into singletons
-// → Case A.
+// Case B then Case C.1: ∀x. ((P(x) ∨ ¬P(x)) ∧ (Q(x) ∨ ¬Q(x))).
+// The ∀x binder is +-disjoint from its scope (no incident cograph
+// edge), so Case B strips it. The remaining W = {1,2,3,4} is
+// (P(x) ∨ ¬P(x)) × (Q(x) ∨ ¬Q(x)): a × between two +-pairs. The dual
+// literals {P,¬P} and {Q,¬Q} are linked but NOT cograph-adjacent (they
+// sit on opposite sides of ∨), so links are disjoint from the × edges
+// — a genuine fonet. Case C.1 fusion splits the two ×-halves; each
+// recurses to Case A.
+//
+// NB the earlier version of this test used ∀x.(p(x) ∧ ¬p(x)), where
+// the linked dual literals were ALSO ×-adjacent — that is an induced
+// bimatching on W={p,¬p} (Def. 5.3), i.e. NOT a fonet. It only passed
+// because the verifier was missing the leap/cograph-disjointness check.
 void test_2C_case_B_forall_strip() {
     LeapFixture f;
     CombProof cp;
-    cp.source.num_vertex    = 3;
-    cp.source.cograph_edges = {{1, 2}};          // ∧ between atoms
-    cp.source.links         = {{1, 2}};
+    cp.source.num_vertex    = 5;
+    cp.source.cograph_edges = {{1, 3}, {1, 4}, {2, 3}, {2, 4}};  // {P,¬P} × {Q,¬Q}
+    cp.source.links         = {{1, 2}, {3, 4}};
     cp.target.labels = {
         f.binder(0, /*existential=*/false),       // ∀x
-        f.atom(f.p1, false, {Term::fixed(0)}),    // p(x)
-        f.atom(f.p1, true,  {Term::fixed(0)}),    // ¬p(x)
+        f.atom(f.p1, false, {Term::fixed(0)}),    // P(x)
+        f.atom(f.p1, true,  {Term::fixed(0)}),    // ¬P(x)
+        f.atom(f.q1, false, {Term::fixed(0)}),    // Q(x)
+        f.atom(f.q1, true,  {Term::fixed(0)}),    // ¬Q(x)
     };
-    identity_fibration(cp, 3);
+    identity_fibration(cp, 5);
 
     CombVerifier v;
     EXPECT_OK(v.verify_fonet(cp));
@@ -1018,26 +1028,29 @@ void test_2C_case_C2_exists_quantification() {
     EXPECT_OK(v.verify_fonet(cp));
 }
 
-// Case C.1: (A ∧ ¬A) ∨ (B ∧ ¬B). Two disjoint ×-pairs (2K2 cograph),
-// no binders. Case C builds parts = [[0], [1], [2], [3]]. The Ω graph
-// has edges 0-1 and 2-3 (only, since the leaps are the links which
-// coincide with the cograph edges). Bridge (0,1) exists → split into
-// W_left, W_right. C.1 fusion: both halves contain literals.
-// Recursion through each half eventually hits Case A.
+// Case C.1: (A ∨ ¬A) ∧ (B ∨ ¬B). A × between two +-pairs. The dual
+// literals {A,¬A} and {B,¬B} are linked but NOT cograph-adjacent
+// (∨ = +), so the links are disjoint from the × edges — a genuine
+// fonet. Case C builds parts = [{0,1}, {2,3}]; Ω has the single edge
+// (part0, part1) from the × edges. Bridge → C.1 fusion: both halves
+// contain literals. Each half recurses to Case A.
+//
+// NB the earlier version used (A ∧ ¬A) ∨ (B ∧ ¬B), where each linked
+// pair was ×-adjacent — an induced bimatching, hence not a fonet.
 void test_2C_case_C1_fusion() {
     LeapFixture f;
-    PredicateHandle p0 = f.ctx.add_predicate("a", 0);
-    PredicateHandle q0 = f.ctx.add_predicate("b", 0);
+    PredicateHandle a0 = f.ctx.add_predicate("a", 0);
+    PredicateHandle b0 = f.ctx.add_predicate("b", 0);
 
     CombProof cp;
     cp.source.num_vertex    = 4;
-    cp.source.cograph_edges = {{0, 1}, {2, 3}};   // (A ∧ ¬A) and (B ∧ ¬B)
+    cp.source.cograph_edges = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};  // {A,¬A} × {B,¬B}
     cp.source.links         = {{0, 1}, {2, 3}};
     cp.target.labels = {
-        f.atom(p0, false, {}),                     // A
-        f.atom(p0, true,  {}),                     // ¬A
-        f.atom(q0, false, {}),                     // B
-        f.atom(q0, true,  {}),                     // ¬B
+        f.atom(a0, false, {}),                     // A
+        f.atom(a0, true,  {}),                     // ¬A
+        f.atom(b0, false, {}),                     // B
+        f.atom(b0, true,  {}),                     // ¬B
     };
     identity_fibration(cp, 4);
 
@@ -1045,33 +1058,38 @@ void test_2C_case_C1_fusion() {
     EXPECT_OK(v.verify_fonet(cp));
 }
 
-// Case C.1 fusion with an L-to-L pair: (A ∧ ¬A) ∨ B ∨ ¬B.
-//   - (A ∧ ¬A) contributes cograph edge {0, 1} and link {0, 1}.
-//   - B and ¬B are +-disjoint singletons, linked to each other.
+// Case C.1 fusion with an L-to-L pair: ((A ∨ ¬A) ∧ (C ∨ ¬C)) ∨ B ∨ ¬B.
+//   - (A ∨ ¬A) × (C ∨ ¬C) contributes the × block (parts {0,1}, {2,3}).
+//   - B and ¬B are +-disjoint lone literals, linked to each other.
 // Case C decomposes:
-//   parts = [[0], [1]] (from the UNION{0,1} child of root JOIN),
-//   L     = [2, 3] (lone literals at root JOIN, link mates *each other*).
-// Bridge (0,1) → fusion split. The L-partition step sees mate[2]=3 and
-// part_of[3]=-1 (3 is in L, not in any part), so both 2 and 3 fall
-// into the "mate in L → W_left" branch and *stay together* on the
-// left side. Then recurse on W_left={0,2,3} (Case A) and W_right={1}
-// (Case A).
+//   parts = [{0,1}, {2,3}] (from the UNION child of root JOIN),
+//   L     = {4, 5} (lone literals at root JOIN, link mates *each other*).
+// Bridge (part0, part1) → fusion split. The L-partition step sees
+// mate[4]=5 and part_of[5]=-1 (5 is in L, not in any part), so both 4
+// and 5 fall into the "mate in L → W_left" branch and *stay together*.
+// Recurse on W_left={0,1,4,5} (Case A) and W_right={2,3} (Case A).
+//
+// NB the earlier version used (A ∧ ¬A) ∨ B ∨ ¬B, where the linked pair
+// {A,¬A} was ×-adjacent — an induced bimatching, hence not a fonet.
 void test_2C_case_C1_fusion_LtoL_pair() {
     LeapFixture f;
     PredicateHandle a0 = f.ctx.add_predicate("a", 0);
+    PredicateHandle c0 = f.ctx.add_predicate("c", 0);
     PredicateHandle b0 = f.ctx.add_predicate("b", 0);
 
     CombProof cp;
-    cp.source.num_vertex    = 4;
-    cp.source.cograph_edges = {{0, 1}};              // only the (A ∧ ¬A) ∧-edge
-    cp.source.links         = {{0, 1}, {2, 3}};      // A-¬A, B-¬B (the L-to-L pair)
+    cp.source.num_vertex    = 6;
+    cp.source.cograph_edges = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};  // {A,¬A} × {C,¬C}
+    cp.source.links         = {{0, 1}, {2, 3}, {4, 5}};          // A-¬A, C-¬C, B-¬B (L-to-L)
     cp.target.labels = {
         f.atom(a0, false, {}),   // A
         f.atom(a0, true,  {}),   // ¬A
+        f.atom(c0, false, {}),   // C
+        f.atom(c0, true,  {}),   // ¬C
         f.atom(b0, false, {}),   // B   (lone literal in L)
         f.atom(b0, true,  {}),   // ¬B  (lone literal in L, linked to B)
     };
-    identity_fibration(cp, 4);
+    identity_fibration(cp, 6);
 
     CombVerifier v;
     EXPECT_OK(v.verify_fonet(cp));
