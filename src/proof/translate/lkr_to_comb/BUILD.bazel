@@ -134,6 +134,39 @@ cc_library(
     ],
 )
 
+# comb_build — CombProof builder helpers for the paper-exact §11.1 fold:
+# G(Φ(Γ)) target construction + entry vertex offsets.
+cc_library(
+    name = "comb_build",
+    srcs = ["comb_build.cpp"],
+    hdrs = ["comb_build.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+    ],
+)
+
+# interpret_tree — paper-exact (Hughes §11.1) LKR→Comb fold. Folds the
+# DerivationTree bottom-up, one local operation per cut-free LKR rule.
+# Built in parallel with walk.cpp until P8. See PAPER_EXACT_DESIGN.md.
+cc_library(
+    name = "interpret_tree",
+    srcs = ["interpret_tree.cpp"],
+    hdrs = ["interpret_tree.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":comb_build",
+        ":sequent_replay",
+        ":tree",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs CombVerifier on emitted CombProofs.
 cc_library(
     name = "output_gate",
@@ -144,6 +177,7 @@ cc_library(
         "//src/core:formula",
         "//src/proof:proof_value",
         "//src/proof/comb:comb_proof",
+        "//src/proof/comb:debug",
         "//src/proof/comb:verifier",
         "//src/util:error",
     ],
@@ -169,6 +203,7 @@ cc_library(
         "//src/proof:proof_value",
         "//src/proof/comb:comb_proof",
         "//src/proof/lkr:ops",
+        "//src/proof/translate/lkr_cut_elim:cut_elim",
         "//src/util:error",
     ],
 )
