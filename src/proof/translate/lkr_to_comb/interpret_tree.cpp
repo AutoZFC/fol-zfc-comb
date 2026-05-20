@@ -32,14 +32,56 @@ struct Interp {
     }
 
     // ---- LeafNode: closing ops (P1: AxiomLit, One) -------------------
+    //
+    // Both close a (possibly larger) sequent Γ. The combinatorial proof
+    // has target G(Φ(Γ)); the source is the minimal axiom mapped to the
+    // closing entries; every other entry of Γ is left uncovered by the
+    // fibration (weakening — paper §11.1's W is folded into the leaf).
     util::Result<NodeProof> dispatch(const LeafNode& n) {
         const lkr::Instr& op = prog.instrs[n.op_idx];
-        if (std::holds_alternative<lkr::AxiomLit>(op)) {
-            return MAKE_ERROR << "interpret_tree: AxiomLit not yet implemented (P1)";
+        const std::vector<FormulaHandle>& seq = conclusion_of(replay, n.op_idx);
+
+        comb::Fograph target = build_sequent_fograph(fb, seq);
+        std::vector<size_t> off = entry_vertex_offsets(fb, seq);
+
+        if (const auto* ax = std::get_if<lkr::AxiomLit>(&op)) {
+            // §11.1 α,ᾱ rule: source = two dual literals sharing one
+            // link, no edges, empty dualizer. They map to the atom
+            // vertices of entries lit_a and lit_b (each atomic ⇒ one
+            // vertex). LKRVerifier already guaranteed they are dual.
+            if (ax->lit_a >= seq.size() || ax->lit_b >= seq.size()) {
+                return MAKE_ERROR << "interpret_tree: AxiomLit index out of range";
+            }
+            auto is_single = [&](size_t e) { return off[e + 1] - off[e] == 1; };
+            if (!is_single(ax->lit_a) || !is_single(ax->lit_b)) {
+                return MAKE_ERROR << "interpret_tree: AxiomLit entry is not a "
+                                     "single-atom literal";
+            }
+            NodeProof np;
+            np.target = std::move(target);
+            np.source.num_vertex = 2;
+            np.source.links = {{0, 1}};
+            np.fibration = {off[ax->lit_a], off[ax->lit_b]};
+            return np;
         }
-        if (std::holds_alternative<lkr::One>(op)) {
-            return MAKE_ERROR << "interpret_tree: One not yet implemented (P1)";
+
+        if (const auto* one = std::get_if<lkr::One>(&op)) {
+            // §11.1 1 rule: source = a single 1-labelled vertex, no
+            // link, no edges, empty dualizer (the minimal fonet •1).
+            if (one->idx >= seq.size()) {
+                return MAKE_ERROR << "interpret_tree: One index out of range";
+            }
+            if (off[one->idx + 1] - off[one->idx] != 1) {
+                return MAKE_ERROR << "interpret_tree: One entry is not a single "
+                                     "vertex";
+            }
+            NodeProof np;
+            np.target = std::move(target);
+            np.source.num_vertex = 1;
+            np.fibration = {off[one->idx]};
+            return np;
         }
+
         if (std::holds_alternative<lkr::CloseByLemma>(op)) {
             return MAKE_ERROR << "interpret_tree: CloseByLemma is out of scope "
                                  "(cut-free only)";
