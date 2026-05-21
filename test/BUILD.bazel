@@ -115,6 +115,17 @@ cc_test(
 )
 
 cc_test(
+    name = "scope_augment_test",
+    srcs = ["scope_augment_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof/translate/lkr_to_comb:scope_augment",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "lkr_to_comb_test",
     srcs = ["lkr_to_comb_test.cpp"],
     deps = [
@@ -126,6 +137,31 @@ cc_test(
         "//src/proof/translate/lkr_to_comb",
         "//src/proof/translate/nd_to_lkr",
         "//src/runtime",
+    ],
+)
+
+cc_test(
+    name = "lkr_cut_elim_test",
+    srcs = ["lkr_cut_elim_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate/lkr_cut_elim:cut_elim",
+        "//src/proof/translate/nd_to_lkr",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
+    name = "ks1_equiv_test",
+    srcs = ["ks1_equiv_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/ks1:equiv",
     ],
 )
 
@@ -154,6 +190,8 @@ test_suite(
         ":comb_test",
         ":core_test",
         ":iota_translator_test",
+        ":ks1_equiv_test",
+        ":lkr_cut_elim_test",
         ":lkr_to_comb_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_test",
