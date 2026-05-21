@@ -34,7 +34,7 @@ a test oracle but not on the critical path.
    KS1 derivation  Φ : t ⟶ A          (cut-free; A = goal in NNF)
         │  Thm 17  (decomposition)
         ▼
-   t ──MLS1^X──▶ A'  ──{w,w∀,ac,c∀,m,m∨,m∃,≡}──▶ A
+   t ──MLS1^X──▶ A'  ──{w,w∀,ac,c∀,m,m∀,m∃,≡}──▶ A
         Φ1  (linear core)        Φ2  (resource: contraction + weakening)
         │                                  │
         │ Thm 33: [[Φ̂1]] = ⟨[[Â']],∼Φ̂1⟩    │ Lemma 41: ⌊Φ̂2⌋ : [[Â']] → [[A]]
@@ -121,7 +121,7 @@ change the fograph, so they contribute nothing to the fonet or fibration.
 > `cotree.{h,cpp}`, `comb_proof.h`). Therefore **K1 implements `≡` as a
 > normalize-modulo-eq(2) canonicalizer** on the formula (flatten ∧/∨
 > associativity, sort commutative operands by a stable key, normalize adjacent
-> same-quantifier and ∀/∃-over-∧ swaps), then structural equality on the
+> same-quantifier swaps and ∀-over-∨ / ∃-over-∧ distribution), then structural equality on the
 > normal form — not via the fograph. Graph isomorphism is the fallback if the
 > canonical form proves awkward for the quantifier-shift equations.
 
@@ -170,31 +170,32 @@ rules fire inside a context `S{·}`. The **dashed-box** subsystem is
 | `w`  | `S{A} / S{A ∨ B}` | weakening |
 | `w∀` | `S{A} / S{∀x.A}`  (x not free in A) | universal weakening |
 | `ac` | `S{a ∨ a} / S{a}` | **atomic** contraction |
-| `c∀` | `S{∀x.∀x.A} / S{∀x.A}` | binder contraction — see note ⚠ |
+| `c∀` | `S{∀x.∀x.A} / S{∀x.A}` | binder contraction (two nested ∀ → one) |
 | `m`  | `S{(A∧C) ∨ (B∧D)} / S{(A∨B) ∧ (C∨D)}` | medial |
-| `m∨` | `S{(∀x.A) ∨ (∀x.B)} / S{∀x.(A∨B)}` | medial for ∀ |
+| `m∀` | `S{(∀x.A) ∨ (∀x.B)} / S{∀x.(A∨B)}` | medial for ∀ |
 | `m∃` | `S{(∃x.A) ∨ (∃x.B)} / S{∃x.(A∨B)}` | medial for ∃ |
 
-> ⚠ **`c∀` schema is OCR-uncertain.** Fig. 6 rendered its premise and
-> conclusion identically in the extracted image. The **authoritative** form is
-> the *rectified* `c̃∀` from §IX:  `S{∀y.∀x.Ax} / S{∀x.Ax}`  (contract two
-> universal binders that agree up to the bound-variable renaming; here `Ax` is
-> a body with the bound variable as a placeholder). The non-rectified Fig.-6
-> `c∀` above is my reconstruction `S{∀x.∀x.A}/S{∀x.A}`; **verify against a
-> clean copy of Fig. 6 before implementing the contraction phase.**
+> **`c∀` resolved (2026-05-21).** Extracted verbatim from Fig. 6 via
+> `pdftotext -layout` p.5: premise `S{∀x.∀x.A}`, conclusion `S{∀x.A}` — two
+> nested universal binders contract to one. (Earlier the figure's image render
+> was ambiguous.) The *rectified* form used by Φ̂2 (§IX) is `c̃∀ :
+> S{∀y.∀x.Ax} / S{∀x.Ax}`, with `Ax` a body whose only relevant binder is the
+> inner one. Also confirmed from the same extraction: the medials are named
+> `m∀`/`m∃` (an earlier draft wrote `m∨`); decomposition phases (Thm 17) are
+> `{∀,ai,t}/{s,mix,≡}/{∃}/{m,m∀,m∃,≡}/{ac,c∀}/{w,w∀,≡}`.
 
 ### 4.3 General contraction `c` (eq (3)) and derived rules
 
 The general (non-atomic) contraction `c : S{A ∨ A} / S{A}` is **not primitive**
-in KS1 — it is **derivable** (Lemma 25: `c ∈ {ac, m, m∨, m∃, ≡}`). Likewise
-`w∀, c∀, m∨, m∃` are derivable from `{w, c, ≡}` (Lemma 26). KS1 keeps the
+in KS1 — it is **derivable** (Lemma 25: `c ∈ {ac, m, m∀, m∃, ≡}`). Likewise
+`w∀, c∀, m∀, m∃` are derivable from `{w, c, ≡}` (Lemma 26). KS1 keeps the
 atomic/medial rules primitive precisely so contraction is *pushed down to
 atoms* — this is what makes the decomposition (Thm 17) and the comb read-off
-work. **Lemma 27:** `A ⟶{w,c,≡} B  ⟺  A ⟶{w,w∀,ac,c∀,m,m∨,m∃,≡} B`.
+work. **Lemma 27:** `A ⟶{w,c,≡} B  ⟺  A ⟶{w,w∀,ac,c∀,m,m∀,m∃,≡} B`.
 
 ### 4.4 Rectified rules `c̃∀, m̃∀, m̃∃` (§IX)
 
-`c∀, m∨, m∃` cannot be applied as-is when premise/conclusion must stay
+`c∀, m∀, m∃` cannot be applied as-is when premise/conclusion must stay
 rectified (they would collide bound variables). §IX defines rectified
 variants used in the *rectified* resource derivation Φ̂2:
 
@@ -225,10 +226,10 @@ reorganized into f-free formulas `A1,…,A5` and a derivation with the rules in
   A4                                          ⎪      (= A5..A3 region, all MLS1^X)
   ║ {∃}               ── instantiation       ⎭
   A3
-  ║ {m, m∨, m∃, ≡}    ── medial              ⎫
+  ║ {m, m∀, m∃, ≡}    ── medial              ⎫
   A2                                          ⎪
   ║ {ac, c∀}          ── contraction         ⎬  Φ2 = the resource phase
-  A1                                          ⎪      {w,w∀,ac,c∀,m,m∨,m∃,≡}
+  A1                                          ⎪      {w,w∀,ac,c∀,m,m∀,m∃,≡}
   ║ {w, w∀, ≡}        ── weakening           ⎭
   A
 ```
@@ -247,7 +248,7 @@ fed to the bridge: `Φ : t⟶A` ⟹ ∃ f-free `A'`, an MLS1^X proof of `A'`, an
 ### 6.1 KS1 → comb  (decomposed derivation ⟶ CombProof)   [critical path]
 
 Input: a decomposed derivation as in Thm 17 / eq (6):
-`t ─MLS1^X(Φ1)→ A' ─{w,w∀,ac,c∀,m,m∨,m∃,≡}(Φ2)→ A`.
+`t ─MLS1^X(Φ1)→ A' ─{w,w∀,ac,c∀,m,m∀,m∃,≡}(Φ2)→ A`.
 
 1. **Rectify Φ1.** Transform `Φ1` into rectified `Φ̂1` proving `Â'` (§IX-A:
    each line of a rectified-conclusion MLS1^X derivation is rectified; rectify
@@ -280,7 +281,7 @@ Input: a decomposed derivation as in Thm 17 / eq (6):
 
 Given `φ : C → A`, `A = [[A]]` (Thm 19 proof, §X):
 1. Pick `C` with `[[C]] = C`, `ρφ` the induced renaming. **Lemma 43:** there
-   is a resource derivation `Φ2 : Cρφ ⟶{w,w∀,ac,c∀,m,m∨,m∃,≡} A` (built from
+   is a resource derivation `Φ2 : Cρφ ⟶{w,w∀,ac,c∀,m,m∀,m∃,≡} A` (built from
    the skew bifibration via Lemmas 44 + 45).
 2. `C` is a fonet, so **Thm 38** gives an MLS1^X derivation `Φ1' : t ⟶ C`
    (sequentialization: Thm 37 fonet→MLL1^X via the splitting-tensor theorem,
