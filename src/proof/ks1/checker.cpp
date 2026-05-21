@@ -328,13 +328,11 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
 
 }  // namespace
 
-ResultStatus check(FormulaBuilder& fb, const Derivation& d) {
-    if (!d.top.valid() || !d.bottom.valid())
-        return MAKE_ERROR << "derivation: top/bottom not set";
-
-    FormulaHandle current = d.top;
-    for (size_t k = 0; k < d.steps.size(); ++k) {
-        const Step& s = d.steps[k];
+Result<FormulaHandle> replay(FormulaBuilder& fb, FormulaHandle top,
+                             const std::vector<Step>& steps) {
+    if (!top.valid()) return MAKE_ERROR << "derivation: top not set";
+    FormulaHandle current = top;
+    for (const Step& s : steps) {
         auto P = sub_at(current, s.context, 0);
         if (P.is_error()) return std::move(P).error();
         auto Q = apply_rule(fb, s, P.value());
@@ -343,7 +341,14 @@ ResultStatus check(FormulaBuilder& fb, const Derivation& d) {
         if (next.is_error()) return std::move(next).error();
         current = next.value();
     }
-    if (!(current == d.bottom))
+    return current;
+}
+
+ResultStatus check(FormulaBuilder& fb, const Derivation& d) {
+    if (!d.bottom.valid()) return MAKE_ERROR << "derivation: bottom not set";
+    auto end = replay(fb, d.top, d.steps);
+    if (end.is_error()) return std::move(end).error();
+    if (!(end.value() == d.bottom))
         return MAKE_ERROR << "derivation: final formula does not match bottom";
     return Ok();
 }

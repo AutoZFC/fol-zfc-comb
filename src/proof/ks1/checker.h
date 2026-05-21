@@ -17,6 +17,13 @@
 
 namespace logic::proof::ks1 {
 
+// Replay `steps` (applied top-down) starting from `top`, verifying each is a
+// valid Fig. 6 rule instance at its context. Returns the resulting formula.
+// `check` is replay + the final-equals-bottom test; `split` (decompose.h)
+// reuses this to compute the linear-core conclusion A'.
+util::Result<FormulaHandle> replay(FormulaBuilder& fb, FormulaHandle top,
+                                   const std::vector<Step>& steps);
+
 // Verify `d` is a valid KS1 derivation from d.top to d.bottom. Ok() on success.
 util::ResultStatus check(FormulaBuilder& fb, const Derivation& d);
 

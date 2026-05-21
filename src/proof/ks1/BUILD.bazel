@@ -30,3 +30,17 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# decompose: Thm 17 decomposition-form check + split into (Φ1, A', Φ2).
+# Track 2 phase K3. See decompose.h, translate/KS1_TRACK2_DESIGN.md §5.
+cc_library(
+    name = "decompose",
+    srcs = ["decompose.cpp"],
+    hdrs = ["decompose.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":checker",
+        "//src/core:formula",
+        "//src/util:error",
+    ],
+)
