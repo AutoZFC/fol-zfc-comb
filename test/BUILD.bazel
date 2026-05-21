@@ -166,6 +166,15 @@ cc_test(
 )
 
 cc_test(
+    name = "ks1_checker_test",
+    srcs = ["ks1_checker_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/ks1:checker",
+    ],
+)
+
+cc_test(
     name = "axiom_rewrap_test",
     srcs = ["axiom_rewrap_test.cpp"],
     deps = [
@@ -190,6 +199,7 @@ test_suite(
         ":comb_test",
         ":core_test",
         ":iota_translator_test",
+        ":ks1_checker_test",
         ":ks1_equiv_test",
         ":lkr_cut_elim_test",
         ":lkr_to_comb_test",

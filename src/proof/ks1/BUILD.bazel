@@ -13,3 +13,20 @@ cc_library(
         "//src/core:formula",
     ],
 )
+
+# derivation + checker: KS1 derivations (Fig. 6) and their validator.
+# Track 2 phase K2. Independent of the comb layer. See derivation.h,
+# checker.h, translate/KS1_TRACK2_DESIGN.md §3/§4.
+cc_library(
+    name = "checker",
+    srcs = ["checker.cpp"],
+    hdrs = [
+        "checker.h",
+        "derivation.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/util:error",
+    ],
+)
