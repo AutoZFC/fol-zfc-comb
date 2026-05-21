@@ -80,34 +80,32 @@ cut-free fold already works; only the elimination procedure is missing.
      of several missing pieces, not the headline).
 - Still **NOT wired** into `lkr_to_comb.cpp` (dead `#include`).
 
-**Open design fork (decide before the big impl).**
-- **A. Inline-then-Gentzen.** Inline `CloseByLemma` first (reuse
-  `lemma_inliner`) so every cut is a logical cut between two structural
-  derivations, then implement textbook Gentzen ∧/∨/∀/∃ reductions + the
-  And split. Pro: well-understood, reuses inliner. Con: inlining can blow
-  up size; full Gentzen + permutation is a lot of careful code.
-- **B. Native cut-spine collapse.** Exploit NDtoLKR's specific shape (each
-  `Cut(F_k)`: LEFT derives F_k, RIGHT consumes `¬F_k`) and splice LEFT's
-  derivation into RIGHT's single use-site. Pro: matches the producer,
-  likely bounded cost when each step is used once. Con: relies on the
-  shape invariant; a derived step reused at multiple instantiations is a
-  **contraction-on-the-cut** — the exact wall §15 hit. First measure
-  whether NDtoLKR ever contracts a cut on the corpus.
+**Design — SETTLED (2026-05-21): rigorous classical Gentzen Hauptsatz.**
+Full case-analysis spec: **`lkr_cut_elim/CUT_ELIM_DESIGN.md`**. Not
+shape-matching; the complete procedure. Three stages: (A) inline
+`CloseByLemma` by replaying the lemma's cut-free proof with Γ as inert
+context; (B0) additive Cut → multiplicative Cut + Contraction; (B) Gentzen
+by `(degree, rank)` induction — axiom/atomic, principal ∧/∨ and ∀/∃
+(eigenvar:=witness), permutation, structural (W dead-cut, **C = duplicate +
+cut twice**, X). LKR is **classical**, so this is classically complete and
+well-behaved; the ND-normalization reframe is abandoned (clean only
+intuitionistically → not classically complete). The **§15 contraction wall
+is dissolved**: contraction-against-cut is just subderivation duplication in
+the sequent calculus (the wall was a *comb-representation* constraint, HSW
+Thm 17). The old `walk_reduce`/`try_*_cut`/`ShiftPoint` hacks are DELETED.
 
-**Next actions.**
-- [x] Write `test/lkr_cut_elim_test.cpp` (round-trip property). DONE — red,
-      pinning the gap above.
-- [ ] DECIDE the design fork (A vs B), informed by: does NDtoLKR contract
-      cuts (reuse a derived step) on the real corpus? If never, B is
-      bounded and clean; if it does, that reuse IS the §15 contraction
-      problem and A (or Track 2/KS1) is needed.
-- [ ] Implement the chosen route rule-by-rule under the math-first
-      discipline (one reduction → its test goes green → commit), starting
-      with the CloseByLemma cut (the most common).
-- [ ] Fix the `:441` And split as part of the ∧ logical-cut work.
-- [ ] Re-wire `lkr_to_comb::apply`: try `eliminate_cuts` → `fold_cut_free`
-      (interpret_tree). Keep §15 fold + walk as ordered fallbacks.
-- [ ] Run the corpus; measure coverage + blowup cost.
+**Next actions** (per `CUT_ELIM_DESIGN.md` §9, math-first one phase at a time).
+- [x] Write `test/lkr_cut_elim_test.cpp` (round-trip property). DONE — red.
+- [x] Settle the design: rigorous classical Hauptsatz (CUT_ELIM_DESIGN.md).
+- [ ] **A** lemma inlining (replay-with-inert-context) + test.
+- [ ] **B0** additive→multiplicative Cut + Contraction + test.
+- [ ] **B1–B5** Gentzen cases: axiom/atomic; ∧/∨ principal; ∀/∃ principal
+      (+ capture-avoidance); permutation; structural (W/C/X).
+- [ ] **B6** termination worklist (topmost maximal-degree) + delete the
+      old `walk_reduce`/`try_*_cut`/`ShiftPoint` machinery.
+- [ ] Wire-up: route `lkr_to_comb::apply` cut branch through
+      `eliminate_cuts → interpret_tree`.
+- [ ] Run the corpus as a GATE only; measure blowup cost.
 
 **Risks.** Non-elementary blowup on deep proofs (the eq/extensionality
 proofs that already fail at the dualizer are the likely stressors). Eigen-
@@ -163,16 +161,40 @@ map (Lemma 41).
       (26 assertions, green; committed ff68631). NOT via fograph equality
       (K1 finding). TODO: quantifier-shift equations (binder swap,
       mini-scoping) + context `S{·}` (folded into K2 where it's consumed).
-- [ ] K2: KS1 derivation + per-rule checker, independent of comb. Replay
-      Fig. 7's decomposed example; sound/complete sanity (Thm 16).
-- [ ] K3: decomposition-form checker + split into `(Φ1, A', Φ2)` (require
-      decomposed input; defer the reorganizer).
-- [ ] K4: fonet read-off (Thm 33) — links from `ai`, dualizer from `∃`;
-      validate against `CombVerifier` on Fig. 4's examples.
-- [ ] K5: skew-bifibration read-off (Lemma 41) — induced vertex map → assemble
-      `CombProof`; end-to-end `CombVerifier` pass.
+- [x] K2: KS1 derivation + per-rule checker, independent of comb. DONE —
+      `src/proof/ks1/{derivation.h,checker.{h,cpp}}` covers all 14 Fig. 6
+      rules + the eq (2) equations (≡ as single-equation instances), context
+      `S{·}` as a root→redex Path, full De Bruijn. Tests: `ks1_checker_test`
+      (34, per-rule accept/reject + context + De Bruijn), `ks1_validation_test`
+      (4 end-to-end decomposed derivations incl. the contraction phase).
+      Fig. 7 not transcribed byte-exact (PDF loses negation overlines → risk
+      of encoding an invalid derivation); validated by constructed derivations
+      instead. Committed 73284cb + validation commit.
+- [x] K3: decomposition-form checker + split `(Φ1, A', Φ2)`. DONE —
+      `ks1/decompose.{h,cpp}`, `ks1_decompose_test`. Requires decomposed input
+      (reorganizer deferred). Committed.
+- [x] K4: fonet read-off (Thm 33) — links from `ai`, dualizer from `∃`. DONE —
+      `ks1_to_comb/read_fonet.{h,cpp}` via provenance-tracking tagged replay +
+      cross-check; validated against `CombVerifier` (fonet phase) on
+      ∀x.(px∨p̄x) and the ∀y.∃x.(p̄x∨py) drinker (universal-var dualizer).
+      Committed 6eddcb5.
+- [x] K5: skew-bifibration read-off (Lemma 41) + full bridge (Thm 19). DONE —
+      `ks1_to_comb/read_skew.{h,cpp}`: induced vertex map (w/w∀ inject,
+      ac/c∀/m∀/m∃ contract, m/≡ identity) + `build_comb_proof`. End-to-end
+      weakening derivation passes ALL FOUR `CombVerifier` phases; ac yields a
+      non-injective fibration. Committed aee3205.
 - [ ] K6: front end (ND→KS1 / LKR→KS1 / consume Track 1's cut-free LKR);
       measure corpus coverage. (Cuts must be gone before the comb read-off.)
+      NOT STARTED — this is the only remaining Track-2 piece; it feeds real
+      proofs into the (now complete + verifier-validated) KS1→Comb bridge.
+
+**STATUS (2026-05-21): the KS1 proof system + KS1→Comb bridge are COMPLETE
+and verifier-validated** (K0–K5). The deep-inference system (syntax, ≡, all 14
+Fig. 6 rules, derivation checker, Thm 17 decomposition + split) and the Thm 19
+bridge (fonet off the linear core, skew bifibration off the resource phase)
+are built and tested; a decomposed KS1 derivation translates to a CombProof
+that passes the independent `CombVerifier`. Remaining: K6 front-end (feed
+cut-free proofs in) — the cut obligation still lives upstream (Track 1).
 
 **Risks.** Largest engineering surface (a whole new proof system + bridge).
 Still depends on cut handling upstream. Reading the full HSW construction is
