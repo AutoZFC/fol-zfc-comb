@@ -16,3 +16,20 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# read_skew: KS1 resource phase Φ2 → skew bifibration (Lemma 41) + the full
+# build_comb_proof bridge (Thm 19). Track 2 K5. See read_skew.h.
+cc_library(
+    name = "read_skew",
+    srcs = ["read_skew.cpp"],
+    hdrs = ["read_skew.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":read_fonet",
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/ks1:checker",
+        "//src/proof/ks1:decompose",
+        "//src/util:error",
+    ],
+)

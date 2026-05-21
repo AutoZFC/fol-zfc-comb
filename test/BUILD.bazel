@@ -237,6 +237,18 @@ cc_test(
 )
 
 cc_test(
+    name = "ks1_bridge_test",
+    srcs = ["ks1_bridge_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/comb:verifier",
+        "//src/proof/ks1:checker",
+        "//src/proof/translate/ks1_to_comb:read_skew",
+    ],
+)
+
+cc_test(
     name = "axiom_rewrap_test",
     srcs = ["axiom_rewrap_test.cpp"],
     deps = [
@@ -264,6 +276,7 @@ test_suite(
         ":iota_translator_test",
         ":ks1_checker_test",
         ":ks1_decompose_test",
+        ":ks1_bridge_test",
         ":ks1_equiv_test",
         ":ks1_read_fonet_test",
         ":ks1_validation_test",
