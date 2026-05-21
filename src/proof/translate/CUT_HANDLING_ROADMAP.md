@@ -157,8 +157,12 @@ map (Lemma 41).
 - [x] Spec KS1 (Fig. 6): rules + `≡` + context `S{·}`. → `KS1_TRACK2_DESIGN.md`
       §1–4. (One open item: the *non-rectified* `c∀` schema is OCR-uncertain;
       the rectified `c̃∀` used by the bridge is authoritative — §4.2 ⚠.)
-- [ ] K1: KS1 formula view (units `t`/`f`) + context `S{·}` + `≡` (lean on
-      Thm 8: `A≡B ⟺ [[A]]==[[B]]`). Tests per §7.
+- [~] K1: KS1 formula view (units `t`/`f`, reuse `core::FormulaHandle` NNF) +
+      `≡`. DONE: `≡` *propositional* fragment (assoc+comm of ∧/∨) as a
+      canonicalizer — `src/proof/ks1/equiv.{h,cpp}`, `test/ks1_equiv_test`
+      (26 assertions, green; committed ff68631). NOT via fograph equality
+      (K1 finding). TODO: quantifier-shift equations (binder swap,
+      mini-scoping) + context `S{·}` (folded into K2 where it's consumed).
 - [ ] K2: KS1 derivation + per-rule checker, independent of comb. Replay
       Fig. 7's decomposed example; sound/complete sanity (Thm 16).
 - [ ] K3: decomposition-form checker + split into `(Φ1, A', Φ2)` (require
