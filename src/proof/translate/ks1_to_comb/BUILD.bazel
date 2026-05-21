@@ -1,0 +1,18 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# read_fonet: KS1 linear core Φ1 → comb fonet (HSW 2021 Thm 33). Track 2 K4.
+# Reads the fonet (links from ai, dualizer from ∃) off an MLS1^X derivation
+# via a provenance-tracking tagged replay. See read_fonet.h and
+# translate/KS1_TRACK2_DESIGN.md §6.
+cc_library(
+    name = "read_fonet",
+    srcs = ["read_fonet.cpp"],
+    hdrs = ["read_fonet.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/ks1:checker",
+        "//src/util:error",
+    ],
+)
