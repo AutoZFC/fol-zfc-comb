@@ -1,5 +1,7 @@
 #include "src/proof/ks1/checker.h"
 
+#include <cassert>
+
 namespace logic::proof::ks1 {
 
 using util::Result;
@@ -19,12 +21,18 @@ bool is_top(FormulaHandle h) {
     return f.is_compound() && f.as_compound().op == Op::Not &&
            f.as_compound().left.valid() && is_bottom(f.as_compound().left);
 }
-// A proper atomic literal: a predicate or its negation (used by ai/ac).
+// An atom of HSW's grammar `a ::= t | f | p(...) | p̄(...)` — i.e., a positive
+// predicate, a negated predicate, or one of the truth units. Used by ai/ac.
 bool is_atom_literal(FormulaHandle h) {
     const Formula& f = h.get();
     if (f.is_predicate()) return true;
-    return f.is_compound() && f.as_compound().op == Op::Not &&
-           f.as_compound().left.valid() && f.as_compound().left.get().is_predicate();
+    if (!f.is_compound()) return false;
+    Op op = f.as_compound().op;
+    if (op == Op::Bottom) return true;   // f (⊥)
+    if (op != Op::Not || !f.as_compound().left.valid()) return false;
+    const Formula& inner = f.as_compound().left.get();
+    if (inner.is_predicate()) return true;                                      // p̄
+    return inner.is_compound() && inner.as_compound().op == Op::Bottom;         // t (¬⊥)
 }
 bool is_op(FormulaHandle h, Op op) {
     const Formula& f = h.get();
@@ -83,19 +91,16 @@ bool gen_occurs_free(FormulaHandle h, var_index target) {
     return false;  // SchemaVar / Sentence: not produced by KS1 inputs
 }
 
-FormulaHandle swap_gen(FormulaBuilder& fb, FormulaHandle h, var_index lo);
-
-// Swap free Gen(lo) and Gen(lo+1) in a term (KS1 is description-free; a
-// description body binds one variable, so its indices shift by 1 inside).
-Term swap_in_term(FormulaBuilder& fb, const Term& t, var_index lo) {
+// Swap free Gen(lo) and Gen(lo+1) in a term. KS1 is description-free
+// (precondition the comb layer also enforces — see comb_proof.h), so the
+// only term shapes here are Gen and Fixed; assert against descriptions.
+Term swap_in_term(const Term& t, var_index lo) {
+    assert(!t.is_description() && "KS1: description in atom args (eliminate first)");
     if (t.is_generalized()) {
         var_index v = t.as_variable();
         if (v == lo)     return Term::generalized(lo + 1);
         if (v == lo + 1) return Term::generalized(lo);
-        return t;
     }
-    if (t.is_description())
-        return Term::description(swap_gen(fb, t.as_description().body, lo + 1));
     return t;
 }
 
@@ -105,7 +110,7 @@ FormulaHandle swap_gen(FormulaBuilder& fb, FormulaHandle h, var_index lo) {
         std::vector<Term> args;
         args.reserve(f.as_predicate().args().size());
         for (const Term& t : f.as_predicate().args())
-            args.push_back(swap_in_term(fb, t, lo));
+            args.push_back(swap_in_term(t, lo));
         return fb.predicate(f.as_predicate().predicate(), std::move(args));
     }
     if (f.is_compound()) {
@@ -122,17 +127,28 @@ FormulaHandle swap_gen(FormulaBuilder& fb, FormulaHandle h, var_index lo) {
 
 // ---- context navigation (paper §V) -----------------------------------
 
+// A Compound is "navigable" via Left/Right only if it is ∧ or ∨. Per the
+// paper §V, the context S{·}'s hole sits in atom position; in NNF that means
+// at a literal slot. Descending into a Compound{Not, atom} (a literal) or
+// Compound{Bottom} would place the hole BELOW the atom-position, allowing a
+// rule like Tu to plug a non-literal there and produce a non-NNF formula.
+bool is_navigable_binary(const Formula& f) {
+    if (!f.is_compound()) return false;
+    Op op = f.as_compound().op;
+    return op == Op::And || op == Op::Or;
+}
+
 Result<FormulaHandle> sub_at(FormulaHandle root, const Path& p, size_t i) {
     if (i == p.size()) return root;
     const Formula& f = root.get();
     switch (p[i]) {
         case Dir::Left:
-            if (!f.is_compound() || !f.as_compound().left.valid())
-                return MAKE_ERROR << "context: Left into non-binary node";
+            if (!is_navigable_binary(f))
+                return MAKE_ERROR << "context: Left into non-∧/∨ node (hole would leave atom position)";
             return sub_at(f.as_compound().left, p, i + 1);
         case Dir::Right:
-            if (!f.is_compound() || !f.as_compound().right.valid())
-                return MAKE_ERROR << "context: Right into non-binary node";
+            if (!is_navigable_binary(f))
+                return MAKE_ERROR << "context: Right into non-∧/∨ node (hole would leave atom position)";
             return sub_at(f.as_compound().right, p, i + 1);
         case Dir::Down:
             if (!f.is_quantified())
@@ -153,8 +169,8 @@ Result<FormulaHandle> rewrite_at(FormulaBuilder& fb, FormulaHandle root,
         if (child.is_error()) return std::move(child).error();
         return fb.make_quantified(f.as_quantified().op, child.value());
     }
-    if (!f.is_compound() || !f.as_compound().left.valid())
-        return MAKE_ERROR << "context: descent into non-binary node";
+    if (!is_navigable_binary(f))
+        return MAKE_ERROR << "context: descent into non-∧/∨ node (hole would leave atom position)";
     const Compound& c = f.as_compound();
     FormulaHandle nl = c.left, nr = c.right;
     if (p[i] == Dir::Left) {
@@ -162,8 +178,6 @@ Result<FormulaHandle> rewrite_at(FormulaBuilder& fb, FormulaHandle root,
         if (child.is_error()) return std::move(child).error();
         nl = child.value();
     } else {
-        if (!c.right.valid())
-            return MAKE_ERROR << "context: Right into unary node";
         auto child = rewrite_at(fb, c.right, p, i + 1, sub);
         if (child.is_error()) return std::move(child).error();
         nr = child.value();

@@ -219,6 +219,32 @@ void test_context_descent() {
                            {step(Rule::Mix, {Dir::Down})}}));
 }
 
+// The context S{·} has its hole in atom position (paper §V) — in NNF that
+// means at a literal slot. Descending into a Compound{Not, atom} would put
+// the hole inside the literal, allowing Tu to plug a non-literal there and
+// produce a non-NNF result. The navigation must reject Left/Right into Not.
+void test_context_no_descent_into_not() {
+    Fixture f;
+    // top = ¬a;  Tu @ [Left] would land at the inner predicate. Must reject.
+    EXPECT_ERR((Derivation{f.Not(f.a()), f.Not(f.And(f.a(), f.top())),
+                           {step(Rule::Tu, {Dir::Left})}}));
+}
+
+// Per the paper's atom grammar `a ::= t | f | p | p̄`, units count as atoms;
+// ai and ac on units are paper-permitted (a∨ā with a=⊤ is ⊤∨⊥; a∨a on ⊤).
+void test_ai_on_top() {
+    Fixture f;
+    Step s = step(Rule::Ai); s.f_param = f.top();           // a = ⊤
+    // dual of ⊤ = ¬¬⊥ ≡ ⊥? In our NNF dual_literal(¬⊥) returns the inner = ⊥.
+    EXPECT_OK((Derivation{f.top(), f.Or(f.top(), f.fb.make_bottom()), {s}}));
+}
+
+void test_ac_on_top() {
+    Fixture f;
+    // ⊤∨⊤ → ⊤
+    EXPECT_OK((Derivation{f.Or(f.top(), f.top()), f.top(), {step(Rule::Ac)}}));
+}
+
 void test_multi_step() {
     Fixture f;
     // t → ⊤∧⊤ (Tu) → (a∨ā)∧⊤ (ai at Left) → (a∨ā)∧(b∨b̄) (ai at Right)
@@ -250,6 +276,9 @@ int main() {
     test_medial();
     test_medial_quant();
     test_context_descent();
+    test_context_no_descent_into_not();
+    test_ai_on_top();
+    test_ac_on_top();
     test_multi_step();
 
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";

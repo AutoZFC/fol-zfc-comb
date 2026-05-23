@@ -29,11 +29,23 @@ struct Fixture {
     FormulaBuilder fb{ctx};
     PredicateHandle A0 = ctx.add_predicate("A", 0);
     PredicateHandle B0 = ctx.add_predicate("B", 0);
+    PredicateHandle C0 = ctx.add_predicate("C", 0);
+    PredicateHandle D0 = ctx.add_predicate("D", 0);
+    PredicateHandle P1 = ctx.add_predicate("p", 1);
+    PredicateHandle Q1 = ctx.add_predicate("q", 1);
     FormulaHandle top() { return fb.make_not(fb.make_bottom()); }
     FormulaHandle a() { return fb.predicate(A0, {}); }
     FormulaHandle na() { return fb.make_not(fb.predicate(A0, {})); }
     FormulaHandle b() { return fb.predicate(B0, {}); }
+    FormulaHandle c() { return fb.predicate(C0, {}); }
+    FormulaHandle d() { return fb.predicate(D0, {}); }
+    FormulaHandle p(Term t) { return fb.predicate(P1, {t}); }
+    FormulaHandle q(Term t) { return fb.predicate(Q1, {t}); }
     FormulaHandle Or(FormulaHandle l, FormulaHandle r) { return fb.make_or(l, r); }
+    FormulaHandle And(FormulaHandle l, FormulaHandle r) { return fb.make_and(l, r); }
+    FormulaHandle fa(FormulaHandle b) { return fb.make_quantified(Op::Forall, b); }
+    FormulaHandle ex(FormulaHandle b) { return fb.make_quantified(Op::Exists, b); }
+    Term g0() { return Term::generalized(0); }
 };
 
 Step S(Rule r, Path c = {}) { return Step{r, std::move(c)}; }
@@ -86,11 +98,111 @@ void test_ac_contraction_fibration() {
     }
 }
 
+// --- per-resource-rule fibration unit tests --------------------------
+//
+// Each test exercises one rule's induced map on a small Φ2 and asserts the
+// fibration vector matches the expected source→target vertex correspondence
+// computed by hand from comb::Fograph's pre-order numbering.
+
+// w∀: S{A}/S{∀x.A}. Premise [[A]] = [atom_A(0)]. Conclusion [[∀x.A]] =
+// [binder(0), atom_A(1)]. Atom maps to itself (offset by the new binder);
+// the binder is uncovered.
+void test_w_forall_fibration() {
+    Fixture f;
+    Derivation phi2{f.a(), f.fa(f.a()), {S(Rule::WForall)}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 1);
+        EXPECT(sk.value().fibration[0] == 1);     // atom A → atom A (target idx 1)
+        EXPECT(sk.value().target.num_vertex() == 2);
+    }
+}
+
+// c∀: S{∀x.∀x.A}/S{∀x.A}. Premise vertices: outer-binder(0), inner-binder(1),
+// atom(2). Conclusion vertices: binder(0), atom(1). Both binders contract to
+// the kept binder; atom keeps its place.
+void test_c_forall_fibration() {
+    Fixture f;
+    FormulaHandle bot = f.fa(f.p(f.g0()));               // ∀x.p(x)
+    FormulaHandle top = f.fa(bot);                       // ∀.∀.p(Gen0)  (outer vacuous)
+    Derivation phi2{top, bot, {S(Rule::CForall)}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 3);
+        EXPECT(sk.value().fibration[0] == 0);     // outer binder → merged binder
+        EXPECT(sk.value().fibration[1] == 0);     // inner binder → merged binder
+        EXPECT(sk.value().fibration[2] == 1);     // atom → atom
+    }
+}
+
+// m∀: S{(∀x.A)∨(∀x.B)}/S{∀x.(A∨B)}.
+//   Premise pre-order: binder_l(0), atom_p(1), binder_r(2), atom_q(3).
+//   Conclusion pre-order: merged binder(0), atom_p(1), atom_q(2).
+void test_m_forall_fibration() {
+    Fixture f;
+    Derivation phi2{f.Or(f.fa(f.p(f.g0())), f.fa(f.q(f.g0()))),
+                    f.fa(f.Or(f.p(f.g0()), f.q(f.g0()))),
+                    {S(Rule::MForall)}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 4);
+        EXPECT(sk.value().fibration[0] == 0);  // left binder → merged
+        EXPECT(sk.value().fibration[1] == 1);  // atom p → atom p
+        EXPECT(sk.value().fibration[2] == 0);  // right binder → merged
+        EXPECT(sk.value().fibration[3] == 2);  // atom q → atom q
+    }
+}
+
+// m∃: dual of m∀ on existentials.
+void test_m_exists_fibration() {
+    Fixture f;
+    Derivation phi2{f.Or(f.ex(f.p(f.g0())), f.ex(f.q(f.g0()))),
+                    f.ex(f.Or(f.p(f.g0()), f.q(f.g0()))),
+                    {S(Rule::MExists)}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration[0] == 0);
+        EXPECT(sk.value().fibration[1] == 1);
+        EXPECT(sk.value().fibration[2] == 0);
+        EXPECT(sk.value().fibration[3] == 2);
+    }
+}
+
+// m: S{(A∧C)∨(B∧D)}/S{(A∨B)∧(C∨D)}. Atoms keep identity, but pre-order
+// changes:
+//   Premise (A∧C)∨(B∧D): A(0), C(1), B(2), D(3).
+//   Conclusion (A∨B)∧(C∨D): A(0), B(1), C(2), D(3).
+//   ⟹ fibration A:0→0, C:1→2, B:2→1, D:3→3.
+void test_m_fibration() {
+    Fixture f;
+    Derivation phi2{f.Or(f.And(f.a(), f.c()), f.And(f.b(), f.d())),
+                    f.And(f.Or(f.a(), f.b()), f.Or(f.c(), f.d())),
+                    {S(Rule::M)}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 4);
+        EXPECT(sk.value().fibration[0] == 0);  // A
+        EXPECT(sk.value().fibration[1] == 2);  // C
+        EXPECT(sk.value().fibration[2] == 1);  // B
+        EXPECT(sk.value().fibration[3] == 3);  // D
+    }
+}
+
 }  // namespace
 
 int main() {
     test_weakening_end_to_end();
     test_ac_contraction_fibration();
+    test_w_forall_fibration();
+    test_c_forall_fibration();
+    test_m_forall_fibration();
+    test_m_exists_fibration();
+    test_m_fibration();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

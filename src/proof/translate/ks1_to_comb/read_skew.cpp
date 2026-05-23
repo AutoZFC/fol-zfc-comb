@@ -109,6 +109,10 @@ size_t to_mirror(Arena& a, FormulaHandle h, std::vector<size_t>& stack,
     return self;
 }
 
+// Atoms / units are leaves; navigation only descends into ∧/∨ (Left/Right) or
+// a quantifier (Down). See checker.cpp::is_navigable_binary.
+bool is_nav_binary(MNode::K k) { return k == MNode::And || k == MNode::Or; }
+
 // Navigate to redex, collecting enclosing binder tags.
 Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
                    std::vector<size_t>& stack) {
@@ -116,10 +120,10 @@ Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
     const MNode& n = a.nodes[root];
     switch (p[i]) {
         case Dir::Left:
-            if (n.k != MNode::And && n.k != MNode::Or) return MAKE_ERROR << "skew: Left";
+            if (!is_nav_binary(n.k)) return MAKE_ERROR << "skew: Left into non-∧/∨";
             return nav(a, n.l, p, i + 1, stack);
         case Dir::Right:
-            if (n.k != MNode::And && n.k != MNode::Or) return MAKE_ERROR << "skew: Right";
+            if (!is_nav_binary(n.k)) return MAKE_ERROR << "skew: Right into non-∧/∨";
             return nav(a, n.r, p, i + 1, stack);
         case Dir::Down:
             if (n.k != MNode::Forall && n.k != MNode::Exists) return MAKE_ERROR << "skew: Down";
@@ -138,7 +142,7 @@ Result<size_t> rewrite(Arena& a, size_t root, const Path& p, size_t i, size_t su
         if (c.is_error()) return std::move(c).error();
         return a.quant(n.k, c.value(), n.binder_tag);
     }
-    if (n.k != MNode::And && n.k != MNode::Or) return MAKE_ERROR << "skew: descent";
+    if (!is_nav_binary(n.k)) return MAKE_ERROR << "skew: descent into non-∧/∨";
     if (p[i] == Dir::Left) {
         auto c = rewrite(a, n.l, p, i + 1, sub);
         if (c.is_error()) return std::move(c).error();

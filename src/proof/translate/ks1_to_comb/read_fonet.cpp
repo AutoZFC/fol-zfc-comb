@@ -58,6 +58,10 @@ struct Arena {
     size_t fresh_binder() { return next_binder++; }
 };
 
+// Only ∧/∨ are navigable (Left/Right) — atoms and units are leaves. The hole
+// must stay in atom position (paper §V); see checker.cpp::is_navigable_binary.
+bool is_nav_binary(TNode::K k) { return k == TNode::And || k == TNode::Or; }
+
 // Navigate to the redex index, collecting the enclosing binder-tag stack
 // (outermost first) for Gen-resolution.
 Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
@@ -66,12 +70,12 @@ Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
     const TNode& n = a.nodes[root];
     switch (p[i]) {
         case Dir::Left:
-            if (n.k != TNode::And && n.k != TNode::Or)
-                return MAKE_ERROR << "read_fonet: Left into non-binary";
+            if (!is_nav_binary(n.k))
+                return MAKE_ERROR << "read_fonet: Left into non-∧/∨ node";
             return nav(a, n.l, p, i + 1, stack);
         case Dir::Right:
-            if (n.k != TNode::And && n.k != TNode::Or)
-                return MAKE_ERROR << "read_fonet: Right into non-binary";
+            if (!is_nav_binary(n.k))
+                return MAKE_ERROR << "read_fonet: Right into non-∧/∨ node";
             return nav(a, n.r, p, i + 1, stack);
         case Dir::Down:
             if (n.k != TNode::Forall && n.k != TNode::Exists)
@@ -93,8 +97,8 @@ Result<size_t> rewrite(Arena& a, size_t root, const Path& p, size_t i, size_t su
         if (c.is_error()) return std::move(c).error();
         return a.quant(n.k, c.value(), n.binder_tag);
     }
-    if (n.k != TNode::And && n.k != TNode::Or)
-        return MAKE_ERROR << "read_fonet: descent into non-binary";
+    if (!is_nav_binary(n.k))
+        return MAKE_ERROR << "read_fonet: descent into non-∧/∨ node";
     if (p[i] == Dir::Left) {
         auto c = rewrite(a, n.l, p, i + 1, sub);
         if (c.is_error()) return std::move(c).error();
