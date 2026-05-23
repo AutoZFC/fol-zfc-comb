@@ -4,6 +4,58 @@
 
 A C++ implementation of a natural deduction proof system for first-order logic, with ZFC (Zermelo-Fraenkel with Choice) set theory axioms. Built with Bazel.
 
+## Hard rule: no string hacks in IR / system design
+
+The IR and every pass over it must work in **structured abstract space**,
+not in strings.
+
+- Theory references must carry **typed handles** (`SentenceHandle`,
+  `FormulaHandle`, `PredicateHandle`, a future `SchemaHandle`, …), not
+  names. Names are a parser-input concept and a diagnostic-output concept;
+  they have no place inside the IR's vocabulary.
+- Identities of facts, formulas, schema instances, terms, scopes, etc.
+  must be carried by registry handles or strongly-typed IR newtypes.
+  Encoding identity into a string (`"@schema#5#412"`, name-mangling
+  schemes, hash-into-name) is the violation pattern — refuse it.
+- `unordered_map<string, …>` keyed by an IR-internal identifier is the
+  same violation. Promote to `unordered_map<TypedHandle, …>`.
+- The only legitimate strings in the IR are (a) `ScopeName` inside
+  deferred-formula AST payloads (a parser carve-out documented in
+  `src/proof/ir.h`), and (b) diagnostic text in `OpHeader::loc`. Anything
+  else is a smell.
+- When a pass needs to introduce new entities (e.g., synthetic
+  schema-instance facts), register them in the appropriate Registry and
+  use the returned handle as the identity — do not invent a name.
+
+Apply this when designing new passes, new IR types, and when refactoring.
+If the existing code uses strings where handles would do (e.g., today's
+`AxiomRef { std::string name }`), the right answer is usually "tighten
+the IR" rather than "match the existing convention."
+
+## Hard rule: no corpus awareness in design
+
+The ZFC corpus (and any other proof corpus) is **strictly a bug-catcher**.
+It does NOT inform design or system development. Concretely:
+
+- **Never** justify a design choice with "the corpus does / doesn't do X",
+  "for ZFC, only Y occurs", "this case is rare in practice", or similar
+  empirical-distribution arguments. These framings are disallowed.
+- **Never** scope, prioritize, simplify, or omit a case based on what
+  corpus proofs happen to exercise. Every case enumerated by the math
+  (sound + complete spec, exhaustive variant cover, metatheorem branches)
+  must be handled or explicitly rejected at an input gate — regardless of
+  whether the corpus uses it.
+- **Never** measure the corpus to pick between approaches. Pick on
+  mathematical principle (soundness, completeness, the controlling
+  theorem). The corpus has no vote.
+- Corpus runs are valid **only** as a post-implementation bug-catcher:
+  "the chosen design failed on input X — locate the bug." Not as an input
+  to design.
+
+Violating this rule (even with phrasing like "for the ZFC corpus this
+case doesn't arise" inside a spec) is a hard error. Retract and re-derive
+from the math.
+
 ## Build Commands
 
 ```bash
