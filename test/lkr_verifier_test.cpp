@@ -212,7 +212,7 @@ void test_cross_system_use_theorem() {
     FormulaHandle goal = thm.value().get().root();
     LKRProgram prog;
     prog.claim_name = "lkr_uses_my_thm";
-    prog.instrs.push_back(lkr::CloseByLemma{{}, AxiomRef{"my_thm"}, {}});
+    prog.instrs.push_back(lkr::CloseByLemma{{}, AxiomRef{thm.value()}, "my_thm"});
 
     Proof p{System::LKR, std::move(prog)};
     lkr::LKRVerifier v;
@@ -538,8 +538,10 @@ void test_close_by_lemma_arity_n_schema() {
 
     LKRProgram prog;
     prog.claim_name = "lkr_arity_n_close";
-    prog.instrs.push_back(lkr::CloseByLemma{
-        {}, AxiomRef{"unary_self_impl"}, step0.schema_bindings});
+    SchemaInstData inst_data;
+    inst_data.schema   = SchemaRef{"unary_self_impl"};
+    inst_data.bindings = step0.schema_bindings;
+    prog.instrs.push_back(lkr::CloseByLemma{{}, std::move(inst_data)});
 
     Proof p{System::LKR, std::move(prog)};
     lkr::LKRVerifier v;

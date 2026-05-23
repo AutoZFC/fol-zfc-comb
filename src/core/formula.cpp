@@ -955,6 +955,7 @@ void GlobalContext::add_axiom(const std::string& name, SentenceHandle sentence) 
     SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_axioms_[name] = normalized;
     known_.insert(normalized);
+    sentence_to_name_.try_emplace(normalized, name);
 }
 
 void GlobalContext::add_definition(const std::string& predicate_name,
@@ -968,6 +969,7 @@ void GlobalContext::add_theorem(const std::string& name, SentenceHandle sentence
     SentenceHandle normalized = elim_desc_sentence(*this, sentence);
     named_theorems_[name] = normalized;
     known_.insert(normalized);
+    sentence_to_name_.try_emplace(normalized, name);
 }
 
 void GlobalContext::add_unproved_theorem(const std::string& name, SentenceHandle sentence) {
@@ -975,6 +977,7 @@ void GlobalContext::add_unproved_theorem(const std::string& name, SentenceHandle
     named_theorems_[name] = normalized;
     known_.insert(normalized);
     unproved_theorems_.insert(name);
+    sentence_to_name_.try_emplace(normalized, name);
 }
 
 void GlobalContext::add_claim(const std::string& name, SentenceHandle sentence) {

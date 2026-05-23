@@ -149,23 +149,28 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const One& op) {
 
 util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const CloseByLemma& op) {
     TRY(require_top(s, "close_by_lemma"));
-    s.used_names.insert(op.axiom.name);
 
-    // Resolve the closing formula. If bindings are empty, the name must
-    // resolve to a theorem/axiom; otherwise it must resolve to a schema
-    // (instantiated with the bindings).
+    // Resolve the closing formula by dispatching on the typed target.
     FormulaHandle raw{};
-    if (op.bindings.empty()) {
-        auto found = s.ctx.find_known(op.axiom.name);
-        if (!found.has_value()) {
-            return MAKE_ERROR << "close_by_lemma: unknown axiom/theorem '"
-                              << op.axiom.name << "'";
+    std::string  diag_name;       // for the not-found-in-sequent error path
+    if (const auto* ax = std::get_if<AxiomRef>(&op.target)) {
+        SentenceHandle sent = ax->sentence;
+        if (!op.source_name.empty()) {
+            s.used_names.insert(op.source_name);
+            diag_name = op.source_name;
+        } else if (auto name = s.ctx.name_of(sent); name.has_value()) {
+            // No source-cited name (translator-synthesized); fall back to
+            // reverse-lookup for diagnostics only — used_names skipped to
+            // avoid attributing this op to an unrelated alias.
+            diag_name = *name;
+        } else {
+            diag_name = "<unnamed sentence>";
         }
-        raw = found.value().get().root();
+        raw = sent.get().root();
     } else {
-        SchemaInstData data;
-        data.schema = SchemaRef{op.axiom.name};
-        data.bindings = op.bindings;
+        const auto& data = std::get<SchemaInstData>(op.target);
+        s.used_names.insert(data.schema.name);
+        diag_name = data.schema.name;
         TRY_ASSIGN(inst, resolve_and_instantiate_schema(
             s.ctx, s.builder, data, s.name_table, "close_by_lemma"));
         raw = inst;
@@ -179,7 +184,7 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const CloseByLemma& op)
     }
     if (!found_match) {
         return MAKE_ERROR << "close_by_lemma: lemma formula (NNF) for '"
-                          << op.axiom.name << "' is not present in the current goal";
+                          << diag_name << "' is not present in the current goal";
     }
     s.open_goals.pop_back();
     return util::Ok();

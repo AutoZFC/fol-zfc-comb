@@ -147,7 +147,8 @@ util::ResultStatus close_use(
 {
     (void)cc;
     lkr::CloseByLemma cb{};
-    cb.axiom = AxiomRef{op.axiom.name};
+    cb.target      = op.axiom;            // AxiomRef carries SentenceHandle (already resolved by lowering)
+    cb.source_name = op.source_name;      // forward the user-cited name for used_names tracking
     out.emplace_back(std::move(cb));
     return util::Ok();
 }
@@ -171,8 +172,7 @@ util::ResultStatus close_schema_inst(
 {
     (void)cc;
     lkr::CloseByLemma cb{};
-    cb.axiom    = AxiomRef{op.data.schema.name};
-    cb.bindings = op.data.bindings;
+    cb.target = op.data;                  // SchemaInstData carries SchemaRef (string today, SchemaHandle after R.3) + bindings
     out.emplace_back(std::move(cb));
     return util::Ok();
 }

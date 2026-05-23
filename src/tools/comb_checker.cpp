@@ -103,7 +103,7 @@ void process_proof_file(
 
         try {
 
-        auto lower_r = nd::lower(parsed_proof);
+        auto lower_r = nd::lower(parsed_proof, rt.context());
         if (!lower_r.ok()) {
             results.push_back({proof_path, name, "nd_lower",
                               lower_r.error().to_string()});
@@ -165,11 +165,23 @@ void process_proof_file(
         auto comb_r = comb.apply(lkr_r.value());
         if (!comb_r.ok()) {
             fail("lkr_to_comb", comb_r.error().to_string());
-            lemma_lkr_programs[name] = std::move(lkr_r).unwrap();
+            // Key the lemma registry by SentenceHandle (typed identity, per
+        // the "no string hacks in IR" rule). The lemma's name must resolve
+        // to a known axiom/theorem in ctx for the key to be available;
+        // skip otherwise.
+        if (auto sh = rt.context().find_known(name); sh.has_value()) {
+            lemma_lkr_programs[sh.value()] = std::move(lkr_r).unwrap();
+        }
             results.push_back({proof_path, name, first_stage, first_detail});
             continue;
         }
-        lemma_lkr_programs[name] = std::move(lkr_r).unwrap();
+        // Key the lemma registry by SentenceHandle (typed identity, per
+        // the "no string hacks in IR" rule). The lemma's name must resolve
+        // to a known axiom/theorem in ctx for the key to be available;
+        // skip otherwise.
+        if (auto sh = rt.context().find_known(name); sh.has_value()) {
+            lemma_lkr_programs[sh.value()] = std::move(lkr_r).unwrap();
+        }
         results.push_back({proof_path, name, "ok", ""});
 
         } catch (const std::exception& ex) {

@@ -30,7 +30,7 @@ static_assert(TermRef{0} == TermRef{0});
     std::unordered_map<ScopeName, int> m_scope;
     s_step.insert(StepRef{0});
     s_term.insert(TermRef{0});
-    m_axiom[AxiomRef{"x"}] = 0;
+    m_axiom[AxiomRef{}] = 0;       // default-constructed SentenceHandle
     m_schema[SchemaRef{"y"}] = 0;
     m_scope[ScopeName{"z"}] = 0;
 }

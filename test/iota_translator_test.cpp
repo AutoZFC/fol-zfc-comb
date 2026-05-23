@@ -49,8 +49,8 @@ int g_failed = 0;
 } while (0)
 
 // Lower a ParsedProof to an NDProgram or abort.
-Program<nd::Instr> lower_or_die(const ParsedProof& parsed) {
-    auto r = nd::lower(parsed);
+Program<nd::Instr> lower_or_die(const ParsedProof& parsed, const GlobalContext& ctx) {
+    auto r = nd::lower(parsed, ctx);
     if (!r.ok()) {
         std::cerr << "lowering failed: " << r.error().to_string() << "\n";
         std::abort();
@@ -87,7 +87,7 @@ void test_iota_basic() {
     )");
     if (!parsed.ok()) { std::cerr << parsed.error().to_string() << "\n"; ++g_failed; return; }
 
-    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     // Confirm input has iota_elim and verifies under ND.
     if (nd_iota_free(nd_prog)) {
@@ -156,7 +156,7 @@ void test_iota_used_in_forall_elim() {
     )");
     if (!parsed.ok()) { std::cerr << parsed.error().to_string() << "\n"; ++g_failed; return; }
 
-    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto claim = rt.context().find_claim("q_witness");
     if (!claim.has_value()) { std::cerr << "no claim\n"; ++g_failed; return; }
@@ -213,7 +213,7 @@ void test_iota_nested_witnesses() {
     )");
     if (!parsed.ok()) { std::cerr << parsed.error().to_string() << "\n"; ++g_failed; return; }
 
-    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto claim = rt.context().find_claim("pair_witness");
     if (!claim.has_value()) { std::cerr << "no claim\n"; ++g_failed; return; }
@@ -257,7 +257,7 @@ void test_iota_free_input_passes_through() {
     )");
     if (!parsed.ok()) { std::cerr << parsed.error().to_string() << "\n"; ++g_failed; return; }
 
-    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     if (translate::iota_elim::EliminateIotaInProof::program_contains_iota(nd_prog)) {
         std::cerr << "FAIL: iota-free program reported as containing iota\n";
         ++g_failed; return;

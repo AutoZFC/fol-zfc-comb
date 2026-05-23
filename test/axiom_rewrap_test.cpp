@@ -56,8 +56,8 @@ int g_failed = 0;
     } \
 } while (0)
 
-Program<nd::Instr> lower_or_die(const ParsedProof& parsed) {
-    auto r = nd::lower(parsed);
+Program<nd::Instr> lower_or_die(const ParsedProof& parsed, const GlobalContext& ctx) {
+    auto r = nd::lower(parsed, ctx);
     if (!r.ok()) {
         std::cerr << "lowering failed: " << r.error().to_string() << "\n";
         std::abort();
@@ -83,7 +83,7 @@ void test_empty_axiom_set() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     TheoremFactsMap registry;
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
@@ -113,7 +113,7 @@ void test_single_axiom_used_once() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     TheoremFactsMap registry;
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
@@ -143,7 +143,7 @@ void test_same_axiom_used_many_times() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     TheoremFactsMap registry;
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
@@ -177,7 +177,7 @@ void test_multiple_axioms_lex_sort() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     TheoremFactsMap registry;
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
@@ -224,15 +224,16 @@ void test_one_theorem_dep() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0]);
-    // Need to register t_thm as a theorem in ctx (the load above only
-    // registers it as a claim with an attached proof; execute_all_proofs
-    // would promote it). Manually promote via runtime API.
+    // Register t_thm as a theorem in ctx BEFORE lowering — lowering now
+    // eagerly resolves Use names to SentenceHandles, so the cited theorem
+    // must be visible. (Previously this happened lazily at verify time.)
     auto t_thm_sentence = rt.context().find_claim("t_thm");
     if (!t_thm_sentence.has_value()) {
         std::cerr << "FAIL: t_thm claim not found\n"; ++g_failed; return;
     }
     rt.context().add_theorem("t_thm", t_thm_sentence.value());
+
+    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0], rt.context());
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
@@ -280,8 +281,7 @@ void test_chained_theorem_deps() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0]);
-    // Register t1, t2 as theorems.
+    // Register t1, t2 as theorems BEFORE lowering — eager resolution.
     auto t1_s = rt.context().find_claim("t1");
     auto t2_s = rt.context().find_claim("t2");
     if (!t1_s || !t2_s) {
@@ -289,6 +289,8 @@ void test_chained_theorem_deps() {
     }
     rt.context().add_theorem("t1", t1_s.value());
     rt.context().add_theorem("t2", t2_s.value());
+
+    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0], rt.context());
 
     auto r = compute_transitive_facts(prog, rt.context(), registry);
     EXPECT_TRUE(r.ok());
@@ -326,11 +328,14 @@ void test_theorem_not_in_registry_errors() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0]);
     // Promote t_missing as a theorem in ctx but DO NOT add to registry.
+    // (Must be done before lowering so the Use's name resolves at
+    // lowering time — see lowering.cpp.)
     auto t_s = rt.context().find_claim("t_missing");
     if (!t_s) { std::cerr << "FAIL: claim missing\n"; ++g_failed; return; }
     rt.context().add_theorem("t_missing", t_s.value());
+
+    Program<nd::Instr> prog = lower_or_die(parsed2.value().proofs[0], rt.context());
 
     TheoremFactsMap registry;  // empty: t_missing not registered
 
@@ -359,7 +364,8 @@ int count_axiom_uses(const Program<nd::Instr>& prog, const GlobalContext& ctx) {
     int n = 0;
     for (const auto& instr : prog.instrs) {
         if (const auto* u = std::get_if<nd::Use>(&instr)) {
-            if (ctx.find_axiom(u->axiom.name).has_value()) ++n;
+            if (auto name = ctx.name_of(u->axiom.sentence); name.has_value()
+                && ctx.find_axiom(*name).has_value()) ++n;
         }
     }
     return n;
@@ -382,7 +388,7 @@ void test_apply_no_axioms_identity() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     size_t input_size = prog.instrs.size();
     auto claim = rt.context().find_claim("p_self");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
@@ -423,7 +429,7 @@ void test_apply_single_axiom_wrap() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     size_t input_size = prog.instrs.size();
     auto claim = rt.context().find_claim("p_y");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
@@ -484,7 +490,7 @@ void test_apply_two_axioms_wrap() {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("q1_and_q2");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -549,7 +555,7 @@ void verify_wrap(Runtime& rt, const char* source, const char* claim_name) {
         ++g_failed; return;
     }
 
-    Program<nd::Instr> prog = lower_or_die(*target);
+    Program<nd::Instr> prog = lower_or_die(*target, rt.context());
     auto claim = rt.context().find_claim(claim_name);
     if (!claim) {
         std::cerr << "claim '" << claim_name << "' missing\n";
@@ -705,7 +711,7 @@ void test_apply_axiom_dropped_no_other_uses() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("a_again");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -739,7 +745,7 @@ void test_apply_axiom_cached_across_multi_use() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("p_and_p_and_p");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -782,7 +788,7 @@ void test_apply_two_axioms_dropped_with_extracts() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("a_and_b");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -827,7 +833,7 @@ void test_apply_three_axioms_dropped_with_extracts() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("abc");
     if (!claim) { std::cerr << "claim missing\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -886,7 +892,7 @@ RewrapResult setup_wrapped_theorem(
         std::cerr << "setup_wrapped_theorem: no proof for '" << T_name << "'\n";
         std::abort();
     }
-    Program<nd::Instr> prog = lower_or_die(*p);
+    Program<nd::Instr> prog = lower_or_die(*p, rt.context());
     auto claim = rt.context().find_claim(T_name);
     if (!claim) {
         std::cerr << "setup_wrapped_theorem: no claim for '" << T_name << "'\n";
@@ -935,7 +941,7 @@ void test_apply_theorem_use_one_axiom() {
             for (const auto& p : parsed.value().proofs)
                 if (p.claim_name == "outer") return &p;
             return nullptr;
-        }());
+        }(), rt.context());
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
@@ -996,7 +1002,7 @@ void test_apply_theorem_use_two_axioms() {
             for (const auto& p : parsed.value().proofs)
                 if (p.claim_name == "outer") return &p;
             return nullptr;
-        }());
+        }(), rt.context());
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
@@ -1053,7 +1059,7 @@ void test_apply_theorem_chain() {
             for (const auto& p : parsed.value().proofs)
                 if (p.claim_name == "outer") return &p;
             return nullptr;
-        }());
+        }(), rt.context());
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
@@ -1109,7 +1115,7 @@ void test_apply_theorem_no_axioms_no_unwrap() {
             for (const auto& p : parsed.value().proofs)
                 if (p.claim_name == "outer") return &p;
             return nullptr;
-        }());
+        }(), rt.context());
     auto outer_claim = rt.context().find_claim("outer");
     FormulaHandle outer_goal = outer_claim.value().get().root();
 
@@ -1129,7 +1135,8 @@ void test_apply_theorem_no_axioms_no_unwrap() {
     int use_taut_count = 0;
     for (const auto& instr : r.value().proof.instrs) {
         if (const auto* u = std::get_if<nd::Use>(&instr)) {
-            if (u->axiom.name == "taut") ++use_taut_count;
+            if (auto name = rt.context().name_of(u->axiom.sentence);
+                name.has_value() && *name == "taut") ++use_taut_count;
         }
     }
     EXPECT_EQ(use_taut_count, 0);
@@ -1181,7 +1188,7 @@ void test_integration_simple_axiom_to_comb() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("derive_p");
     FormulaHandle goal = claim.value().get().root();
 
@@ -1232,7 +1239,7 @@ void test_integration_two_axioms_to_comb() {
         std::cerr << "parse fail: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0]);
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("derive_ab");
     FormulaHandle goal = claim.value().get().root();
 

@@ -22,10 +22,10 @@
 // (each rule) has its own arity and signature. The IR records that structure
 // faithfully — proof-internal identifiers are integers (StepRef/TermRef are
 // instr-index newtypes); identifiers that cross the runtime boundary into
-// GlobalContext stay as strings (axiom/schema names) because they reference
-// the theory's named registries. The one remaining string class — ScopeName
-// inside a deferred formula AST — is a parser artifact, not an IR-level
-// identifier (see Option A in design discussion).
+// GlobalContext are typed handles (AxiomRef carries SentenceHandle, SchemaRef
+// will carry SchemaHandle after R.3), NOT strings. The one remaining string
+// class — ScopeName inside a deferred formula AST — is a parser artifact, not
+// an IR-level identifier (see CLAUDE.md "no string hacks in IR" rule).
 
 #include "src/parser/parser.h"     // SchemaBinding (parser-side struct, reused as-is)
 #include "src/util/error.h"        // util::SourceLocation
@@ -68,10 +68,14 @@ struct TermRef {
     bool operator==(const TermRef&) const = default;
 };
 
-// Reference to an axiom or proven theorem in GlobalContext.
-// Resolution: ctx.find_axiom(name) ?? ctx.find_theorem(name).
+// Reference to an axiom or proven theorem in GlobalContext, carried as the
+// typed SentenceHandle for its formula. Resolution from source-level name
+// to SentenceHandle happens at lowering time (src/proof/nd/lowering.cpp);
+// the IR never carries the source name as an identifier (see CLAUDE.md
+// "no string hacks in IR" rule). Diagnostic / dependency-tracking code that
+// needs the registered name uses GlobalContext::name_of(SentenceHandle).
 struct AxiomRef {
-    std::string name;
+    SentenceHandle sentence;
     bool operator==(const AxiomRef&) const = default;
 };
 
@@ -188,7 +192,7 @@ template <> struct hash<logic::proof::TermRef> {
 
 template <> struct hash<logic::proof::AxiomRef> {
     size_t operator()(const logic::proof::AxiomRef& r) const noexcept {
-        return std::hash<std::string>{}(r.name);
+        return std::hash<logic::SentenceHandle>{}(r.sentence);
     }
 };
 

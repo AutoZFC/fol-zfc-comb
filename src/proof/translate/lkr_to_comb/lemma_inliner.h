@@ -39,10 +39,15 @@
 
 namespace logic::proof::translate::lkr_to_comb {
 
-// Lemma registry: lemma name → LKR program proving the lemma formula.
-// Each program must standalone-verify under LKRVerifier against its
-// formula (the caller is responsible for this precondition).
-using LemmaPrograms = std::unordered_map<std::string, Program<lkr::Instr>>;
+// Lemma registry: lemma SentenceHandle → LKR program proving the lemma's
+// formula. Each program must standalone-verify under LKRVerifier against
+// its formula (the caller is responsible for this precondition).
+//
+// Keyed by SentenceHandle (typed identity, no string hacks); the producer
+// resolves the user-facing name to a SentenceHandle via ctx.find_known()
+// before inserting. CloseByLemma's axiom/theorem target carries the
+// matching SentenceHandle, so lookups are direct.
+using LemmaPrograms = std::unordered_map<SentenceHandle, Program<lkr::Instr>, SentenceHandleHash>;
 
 // Splice every CloseByLemma in `outer` with the corresponding lemma's
 // LKR ops. On success, the returned program has no CloseByLemma ops

@@ -417,11 +417,24 @@ util::Result<Program<lkr::Instr>> inline_lemmas(
         const auto& op = outer.instrs[i];
 
         if (auto* cbl = std::get_if<lkr::CloseByLemma>(&op)) {
-            auto it = lemmas.find(cbl->axiom.name);
+            // Schema-target CloseByLemma cannot be inlined here: the
+            // lemma registry is keyed by SentenceHandle of an
+            // axiom/theorem, not by a schema name. R.3 / Stage 1
+            // converts schema-instance closures into axiom-target form
+            // before this pass.
+            const auto* ax = std::get_if<AxiomRef>(&cbl->target);
+            if (!ax) {
+                return MAKE_ERROR
+                    << "inline_lemmas: CloseByLemma at op #" << i
+                    << " has a schema-instance target; inliner only "
+                       "handles the axiom/theorem branch (lemma "
+                       "registry is keyed by SentenceHandle)";
+            }
+            auto it = lemmas.find(ax->sentence);
             if (it == lemmas.end()) {
                 return MAKE_ERROR
-                    << "inline_lemmas: unknown lemma '"
-                    << cbl->axiom.name << "' (not in registry)";
+                    << "inline_lemmas: unknown lemma at op #" << i
+                    << " (SentenceHandle not in registry)";
             }
             const Program<lkr::Instr>& L = it->second;
             if (goal_sizes.empty()) {

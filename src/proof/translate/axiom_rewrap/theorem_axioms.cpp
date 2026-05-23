@@ -16,7 +16,24 @@ util::Result<std::vector<std::string>> compute_transitive_facts(
 
     for (const auto& instr : prog.instrs) {
         if (const auto* u = std::get_if<nd::Use>(&instr)) {
-            const std::string& name = u->axiom.name;
+            // Prefer the op's source-cited name (the user-written cite)
+            // for closure keying — disambiguates aliasing where two names
+            // share a SentenceHandle (e.g. theorem and axiom with the
+            // same body, which the registry interns to one handle). Fall
+            // back to the SentenceHandle's first-registered name only
+            // when the op is translator-synthesized without a source cite.
+            std::string name;
+            if (!u->source_name.empty()) {
+                name = u->source_name;
+            } else if (auto opt = ctx.name_of(u->axiom.sentence); opt.has_value()) {
+                name = *opt;
+            } else {
+                return MAKE_ERROR
+                    << "compute_transitive_facts: Use has no source_name "
+                       "and its SentenceHandle has no registered name in "
+                       "ctx (translator-synthesized Use without registry "
+                       "entry?)";
+            }
             if (ctx.find_axiom(name).has_value()) {
                 closure.insert(name);
             } else if (ctx.find_theorem(name).has_value()) {

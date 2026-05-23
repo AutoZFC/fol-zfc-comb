@@ -156,7 +156,7 @@ util::ResultStatus Runtime::execute_proof(const ParsedProof& proof) {
 
     // Lower the parsed proof to nd::Program. Lowering is system-specific
     // (Phase 7 will route to lkr::lower for .fol.lkr.proof inputs).
-    auto lowered = proof::nd::lower(proof);
+    auto lowered = proof::nd::lower(proof, ctx_);
     if (!lowered.ok()) {
         return MAKE_ERROR << "lowering '" << proof.claim_name << "': "
                           << lowered.error().to_string();

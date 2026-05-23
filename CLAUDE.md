@@ -21,8 +21,14 @@ not in strings.
   same violation. Promote to `unordered_map<TypedHandle, …>`.
 - The only legitimate strings in the IR are (a) `ScopeName` inside
   deferred-formula AST payloads (a parser carve-out documented in
-  `src/proof/ir.h`), and (b) diagnostic text in `OpHeader::loc`. Anything
-  else is a smell.
+  `src/proof/ir.h`), (b) diagnostic text in `OpHeader::loc`, and (c)
+  source-cited-name fields on theory-reference ops that exist purely for
+  diagnostic output and source-level dependency tracking (e.g. the
+  `source_name` field on `nd::Use` / `lkr::CloseByLemma`'s axiom target —
+  the dependency graph that Bazel consumes is keyed by the user-written
+  source name, which can disambiguate two distinct names that intern to
+  the same `SentenceHandle`). Such fields MUST NOT participate in
+  identity (no `operator==`, no hashing). Anything else is a smell.
 - When a pass needs to introduce new entities (e.g., synthetic
   schema-instance facts), register them in the appropriate Registry and
   use the returned handle as the identity — do not invent a name.

@@ -280,12 +280,25 @@ util::Result<RewrapResult> AxiomRewrap::apply(const Program<nd::Instr>& in) {
         if (i == qed_idx) continue;   // original Qed is replaced by postlude
 
         if (const auto* u = std::get_if<nd::Use>(&in.instrs[i])) {
-            auto it = fact_step_table.find(u->axiom.name);
+            // Prefer the op's source-cited name (matches what
+            // compute_transitive_facts keyed by). Fall back to the
+            // handle's first-registered name only when no source cite.
+            std::string name;
+            if (!u->source_name.empty()) {
+                name = u->source_name;
+            } else if (auto opt = ctx_.name_of(u->axiom.sentence); opt.has_value()) {
+                name = *opt;
+            } else {
+                return MAKE_ERROR
+                    << "axiom_rewrap: Use has no source_name and its "
+                       "SentenceHandle has no registered name";
+            }
+            auto it = fact_step_table.find(name);
             if (it == fact_step_table.end()) {
                 // compute_transitive_facts should have validated every
                 // cited fact; defensive error.
                 return MAKE_ERROR
-                    << "axiom_rewrap: Use('" << u->axiom.name
+                    << "axiom_rewrap: Use('" << name
                     << "') has no entry in fact_step_table (transitive "
                        "facts computation skipped it?)";
             }

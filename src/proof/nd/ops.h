@@ -62,20 +62,24 @@ struct Let {
 // =========================================================================
 // Theory imports
 // =========================================================================
-// Use pulls a previously-proven axiom or theorem in by name. The name is
-// resolved against GlobalContext at execute time.
+// Use pulls a previously-proven axiom or theorem into the proof. The
+// AxiomRef carries the typed SentenceHandle of the axiom/theorem; lowering
+// resolves the source-level name to a SentenceHandle and lowering fails on
+// unknown names (so the verifier never re-runs the lookup). Translator-
+// synthesized Use ops construct AxiomRef directly with the synthesized
+// SentenceHandle — the former `resolved` escape hatch is unnecessary under
+// the tightened AxiomRef.
 //
-// `resolved`, if set, supplies the formula to bind directly and bypasses
-// the name lookup. This path exists for translator-synthesized Use ops
-// (e.g., axiom_rewrap's unwrap macro citing a theorem's wrapped form
-// `H_T → φ_T` that lives outside the ctx name registry). Mutually
-// exclusive with `axiom.name` in practice: lowering sets `axiom.name`
-// from the source; translators set `resolved`. Mirrors the
-// `Assume.resolved` convention.
+// `source_name` is a diagnostic-only field (per CLAUDE.md "no string hacks
+// in IR" carve-out (c)): lowering populates it from the source rule_name
+// so the verifier can record the user-written name into used_names for the
+// Bazel-consumed proof-dependency graph. NOT part of identity (no
+// operator==, no hashing). Translator-synthesized Use ops may leave it
+// empty; the verifier then skips the used_names insertion for that op.
 struct Use {
-    OpHeader h{};
-    AxiomRef axiom{};
-    std::optional<FormulaHandle> resolved{};
+    OpHeader    h{};
+    AxiomRef    axiom{};
+    std::string source_name{};
 };
 
 // SchemaInst instantiates a proven schema with concrete bindings.

@@ -223,7 +223,7 @@ util::Result<Instr> lower_rule(const ParsedProofStep& step, LowerCtx& lc) {
 
 }  // namespace
 
-util::Result<NDProgram> lower(const ParsedProof& parsed) {
+util::Result<NDProgram> lower(const ParsedProof& parsed, const GlobalContext& ctx) {
     NDProgram prog;
     prog.claim_name = parsed.claim_name;
     prog.instrs.reserve(parsed.steps.size());
@@ -260,7 +260,17 @@ util::Result<NDProgram> lower(const ParsedProof& parsed) {
             }
 
             case ParsedProofStep::Kind::Use: {
-                instr = Use{{}, AxiomRef{step.rule_name}};
+                // Resolve the source-level name to a SentenceHandle here so
+                // that the IR carries the typed identity downstream (per the
+                // "no string hacks in IR" rule). Unknown names are a lowering
+                // error — the verifier never sees an unresolved Use.
+                auto found = ctx.find_known(step.rule_name);
+                if (!found.has_value()) {
+                    return MAKE_ERROR
+                        << "step " << (i + 1) << ": use('" << step.rule_name
+                        << "'): unknown axiom/theorem in ctx";
+                }
+                instr = Use{{}, AxiomRef{found.value()}, step.rule_name};
                 break;
             }
 

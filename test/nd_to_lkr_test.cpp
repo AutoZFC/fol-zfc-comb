@@ -46,8 +46,8 @@ int g_failed = 0;
     }                                                                        \
 } while (0)
 
-Program<nd::Instr> lower_or_die(const ParsedProof& parsed) {
-    auto r = nd::lower(parsed);
+Program<nd::Instr> lower_or_die(const ParsedProof& parsed, const GlobalContext& ctx) {
+    auto r = nd::lower(parsed, ctx);
     if (!r.ok()) {
         std::cerr << "lowering failed: " << r.error().to_string() << "\n";
         std::abort();
@@ -77,7 +77,7 @@ void test_gate_rejects_iota() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("p_exists_again");
     FormulaHandle goal = claim.value().get().root();
 
@@ -111,7 +111,7 @@ void test_gate_rejects_eq_subst() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("eq_app");
     FormulaHandle goal = claim.value().get().root();
 
@@ -143,7 +143,7 @@ void test_gate_rejects_non_verifying() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("qx_claim");
     FormulaHandle goal = claim.value().get().root();
 
@@ -177,7 +177,7 @@ void run_e2e(const char* src, const char* claim_name) {
                   << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim(claim_name);
     if (!claim.has_value()) {
         std::cerr << "claim not found: " << claim_name << "\n";
@@ -320,7 +320,7 @@ void test_integration_iota_pipeline() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("p_exists_again");
     if (!claim.has_value()) {
         std::cerr << "claim not found\n"; ++g_failed; return;
@@ -524,7 +524,7 @@ void test_e2e_forall_block() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("all_p_again");
     FormulaHandle goal = claim.value().get().root();
 
@@ -554,7 +554,7 @@ void test_e2e_implies_block() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("impl_self");
     FormulaHandle goal = claim.value().get().root();
 
@@ -581,7 +581,7 @@ void test_e2e_use_axiom() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     auto claim = rt.context().find_claim("all_p_claim");
     FormulaHandle goal = claim.value().get().root();
 
@@ -633,7 +633,7 @@ void test_block_outer_only() {
             qed h
     )");
     EXPECT_TRUE(parsed.ok());
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto root_r = decompose_blocks(nd_prog);
     EXPECT_TRUE(root_r.ok());
@@ -663,7 +663,7 @@ void test_block_forall() {
             qed h2
     )");
     EXPECT_TRUE(parsed.ok());
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto root_r = decompose_blocks(nd_prog);
     EXPECT_TRUE(root_r.ok());
@@ -697,7 +697,7 @@ void test_block_implies() {
             qed h_fa
     )");
     EXPECT_TRUE(parsed.ok());
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto root_r = decompose_blocks(nd_prog);
     EXPECT_TRUE(root_r.ok());
@@ -736,7 +736,7 @@ void test_block_not() {
             qed h_fa
     )");
     EXPECT_TRUE(parsed.ok());
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto root_r = decompose_blocks(nd_prog);
     EXPECT_TRUE(root_r.ok());
@@ -768,7 +768,7 @@ void test_block_exists_elim() {
             qed h_close
     )");
     EXPECT_TRUE(parsed.ok());
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
 
     auto root_r = decompose_blocks(nd_prog);
     EXPECT_TRUE(root_r.ok());
@@ -798,7 +798,7 @@ void test_block_rejects_no_qed() {
             h = use all_p
             qed h
     )");
-    auto nd_prog = lower_or_die(parsed.value().proofs[0]);
+    auto nd_prog = lower_or_die(parsed.value().proofs[0], rt.context());
     // Strip the qed.
     nd_prog.instrs.pop_back();
     auto root_r = decompose_blocks(nd_prog);

@@ -222,20 +222,15 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const Let& op) {
 }
 
 util::ResultStatus exec_op(Session& s, uint32_t idx, const Use& op) {
-    SentenceHandle sent;
-    if (op.resolved.has_value()) {
-        // Translator-synthesized: bind to the supplied formula directly.
-        // Wrap into a fresh Sentence so use_theorem's add_sentence path
-        // is uniform; no entry in used_names since there's no name to
-        // track (this op is internal to the translator chain).
-        sent = s.ctx.add_sentence(Sentence(*op.resolved));
-    } else {
-        auto found = s.ctx.find_known(op.axiom.name);
-        if (!found.has_value()) {
-            return MAKE_ERROR << "use: unknown axiom/theorem '" << op.axiom.name << "'";
-        }
-        s.used_names.insert(op.axiom.name);
-        sent = found.value();
+    // AxiomRef carries the SentenceHandle directly (lowering already
+    // resolved any source-level name). For dependency tracking, use the
+    // op's `source_name` (the user-written cite) when present — this
+    // disambiguates two distinct names that intern to the same
+    // SentenceHandle (e.g. theorem and axiom with identical bodies),
+    // which a SentenceHandle reverse-lookup cannot distinguish.
+    SentenceHandle sent = op.axiom.sentence;
+    if (!op.source_name.empty()) {
+        s.used_names.insert(op.source_name);
     }
     auto r = s.stack.use_theorem(sent);
     if (!r.ok()) return r.error();

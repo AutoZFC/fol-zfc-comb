@@ -211,7 +211,8 @@ void test_lkr_to_comb_cut_with_lemma() {
     lemma_prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     translate::lkr_to_comb::LemmaCombProofs lemmas;
-    lemmas["lemma_pp"] = lemma_prog;
+    SentenceHandle lemma_pp_sh = ctx.find_known("lemma_pp").value();
+    lemmas[lemma_pp_sh] = lemma_prog;
 
     // ---- Step 2: outer proof uses Cut(p → p) + CloseByLemma + RIGHT closer.
     // LKR:
@@ -231,7 +232,7 @@ void test_lkr_to_comb_cut_with_lemma() {
     }
     {
         lkr::CloseByLemma cbl{};
-        cbl.axiom = AxiomRef{"lemma_pp"};
+        cbl.target = AxiomRef{lemma_pp_sh};
         outer.instrs.emplace_back(std::move(cbl));
     }
     outer.instrs.push_back(lkr::Or{{}, 0});
@@ -289,7 +290,8 @@ void test_lkr_to_comb_cut_with_forall_lemma() {
     lemma_prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     translate::lkr_to_comb::LemmaCombProofs lemmas;
-    lemmas["lemma_fa_em"] = lemma_prog;
+    SentenceHandle lemma_fa_em_sh = ctx.find_known("lemma_fa_em").value();
+    lemmas[lemma_fa_em_sh] = lemma_prog;
 
     // ---- Outer proof: cut on the lemma's formula, close LEFT via
     // CloseByLemma, decompose RIGHT structurally.
@@ -314,7 +316,7 @@ void test_lkr_to_comb_cut_with_forall_lemma() {
     }
     {
         lkr::CloseByLemma cbl{};
-        cbl.axiom = AxiomRef{"lemma_fa_em"};
+        cbl.target = AxiomRef{lemma_fa_em_sh};
         outer.instrs.emplace_back(std::move(cbl));
     }
     outer.instrs.push_back(lkr::Forall{{}, /*principal=*/0, /*eigen=*/1});
@@ -369,7 +371,8 @@ void test_lkr_to_comb_cut_with_exists_lemma() {
     lemma_prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     translate::lkr_to_comb::LemmaCombProofs lemmas;
-    lemmas["lemma_fa_ex"] = lemma_prog;
+    SentenceHandle lemma_fa_ex_sh = ctx.find_known("lemma_fa_ex").value();
+    lemmas[lemma_fa_ex_sh] = lemma_prog;
 
     // Outer goal = same lemma formula. Outer LKR cuts on the lemma,
     // CloseByLemma closes LEFT, RIGHT decomposes the negation
@@ -398,7 +401,7 @@ void test_lkr_to_comb_cut_with_exists_lemma() {
     }
     {
         lkr::CloseByLemma cbl{};
-        cbl.axiom = AxiomRef{"lemma_fa_ex"};
+        cbl.target = AxiomRef{lemma_fa_ex_sh};
         outer.instrs.emplace_back(std::move(cbl));
     }
     outer.instrs.push_back(lkr::Forall{{}, /*p=*/0, /*eigen=*/10});
@@ -444,7 +447,7 @@ void test_lkr_to_comb_classical_absurd_e2e() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = nd::lower(parsed.value().proofs[0]).unwrap();
+    auto nd_prog = nd::lower(parsed.value().proofs[0], rt.context()).unwrap();
     auto claim = rt.context().find_claim("dne_via_ca");
     if (!claim.has_value()) { std::cerr << "claim not found\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -480,7 +483,7 @@ void test_lkr_to_comb_peirce_e2e() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_prog = nd::lower(parsed.value().proofs[0]).unwrap();
+    auto nd_prog = nd::lower(parsed.value().proofs[0], rt.context()).unwrap();
     auto claim = rt.context().find_claim("peirce_law");
     if (!claim.has_value()) { std::cerr << "claim not found\n"; ++g_failed; return; }
     FormulaHandle goal = claim.value().get().root();
@@ -645,7 +648,7 @@ void test_end_to_end_nd_to_comb_self_impl() {
         std::cerr << "load: " << parsed.error().to_string() << "\n";
         ++g_failed; return;
     }
-    auto nd_r = nd::lower(parsed.value().proofs[0]);
+    auto nd_r = nd::lower(parsed.value().proofs[0], rt.context());
     if (!nd_r.ok()) {
         std::cerr << "lower: " << nd_r.error().to_string() << "\n";
         ++g_failed; return;
@@ -677,6 +680,40 @@ void test_end_to_end_nd_to_comb_self_impl() {
     ++g_passed;
 }
 
+
+
+// End-to-end: ∀x.(p(x) → p(x)) — an OPEN first-order cut (the implies-intro
+// cuts on p(x₀) with x₀ the ∀x eigenvar). Exercises the §15 absorb-at-binder
+// path: the inner cut block is nested under the outer ∀x binder so the source
+// binder's cotree scope contains it (CUT_S15_DESIGN.md).
+void test_end_to_end_nd_to_comb_forall_self_impl() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim fpp: forall x. (p(x) -> p(x))
+
+        proof fpp:
+            fix x
+            h_a = assume p(x)
+            h_i = implies_intro h_a
+            h_f = forall_intro h_i
+            qed h_f
+    )");
+    if (!parsed.ok()) { std::cerr << "load: " << parsed.error().to_string() << "\n"; ++g_failed; return; }
+    auto nd_r = nd::lower(parsed.value().proofs[0], rt.context());
+    if (!nd_r.ok()) { std::cerr << "lower: " << nd_r.error().to_string() << "\n"; ++g_failed; return; }
+    auto nd_prog = std::move(nd_r).unwrap();
+    auto claim = rt.context().find_claim("fpp");
+    FormulaHandle goal = claim.value().get().root();
+    translate::nd_to_lkr::NDtoLKR ndl(rt.context(), goal);
+    auto lkr_r = ndl.apply(nd_prog);
+    if (!lkr_r.ok()) { std::cerr << "nd_to_lkr: " << lkr_r.error().to_string() << "\n"; ++g_failed; return; }
+    translate::lkr_to_comb::LemmaCombProofs lemmas;
+    translate::lkr_to_comb::LKRtoComb lc(rt.context(), goal, lemmas);
+    auto cp_r = lc.apply(lkr_r.value());
+    if (!cp_r.ok()) { std::cerr << "lkr_to_comb: " << cp_r.error().to_string() << "\n"; ++g_failed; return; }
+    ++g_passed;
+}
+
 }  // namespace
 
 int main() {
@@ -695,6 +732,7 @@ int main() {
     test_lkr_to_comb_weakening_scaffolding();
     test_lkr_to_comb_weakening_load_bearing_rejected();
     test_end_to_end_nd_to_comb_self_impl();
+    test_end_to_end_nd_to_comb_forall_self_impl();
 
     std::cout << "lkr_to_comb_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

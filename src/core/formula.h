@@ -355,6 +355,16 @@ class GlobalContext {
     std::unordered_map<std::string, SentenceHandle> named_axioms_;
     std::unordered_map<std::string, SentenceHandle> named_theorems_;
 
+    // Reverse index: SentenceHandle → registered name (axiom or theorem).
+    // Populated by add_axiom / add_theorem / add_unproved_theorem; consumed
+    // by name_of() for diagnostics and for the verifier's used_names tracking
+    // (which crosses out to the runtime/library layer as a name keyed map).
+    // Note: distinct axioms with the same body intern to the same
+    // SentenceHandle, so the map keeps the first-registered name; this
+    // matches the historical lookup behavior (find_known returns the first
+    // axiom or theorem registered for that body).
+    std::unordered_map<SentenceHandle, std::string, SentenceHandleHash> sentence_to_name_;
+
     // Claims (to be proven)
     std::unordered_map<std::string, SentenceHandle> named_claims_;
 
@@ -440,6 +450,24 @@ public:
     std::optional<SentenceHandle> find_known(const std::string& name) const {
         if (auto ax = find_axiom(name)) return ax;
         return find_theorem(name);
+    }
+
+    // Reverse lookup: SentenceHandle → registered name.
+    //
+    // For SentenceHandles that were registered as an axiom or theorem,
+    // returns the first-registered name. For SentenceHandles synthesised
+    // outside the registries (e.g., a translator's add_sentence call for a
+    // formula that isn't a registered theorem), returns nullopt.
+    //
+    // Boundary helper: the IR carries SentenceHandle as identity (per the
+    // no-string-hacks rule); diagnostic output and the dependency-graph
+    // tracking surface (last_used_names) still speak names. name_of()
+    // bridges the two without putting strings back into the IR's
+    // vocabulary.
+    std::optional<std::string> name_of(SentenceHandle h) const {
+        auto it = sentence_to_name_.find(h);
+        if (it == sentence_to_name_.end()) return std::nullopt;
+        return it->second;
     }
 
     // Claim API (for theorems to be proven)

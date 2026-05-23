@@ -364,9 +364,18 @@ util::Result<WalkResult> rule_close_by_lemma(
     WalkContext&,
     const lkr::CloseByLemma& op)
 {
+    // Diagnostic only: dispatch on the variant to emit a useful identifier.
+    std::string ident = std::visit([](const auto& t) -> std::string {
+        using T = std::decay_t<decltype(t)>;
+        if constexpr (std::is_same_v<T, AxiomRef>) {
+            return "<axiom SentenceHandle>";       // ctx-less here; identity is the handle
+        } else {
+            return std::string("schema '") + t.schema.name + "'";
+        }
+    }, op.target);
     return MAKE_ERROR
-        << "walk(CloseByLemma): op for lemma '" << op.axiom.name
-        << "' reached the walk; lemma_inliner pre-pass should have "
+        << "walk(CloseByLemma): op for " << ident
+        << " reached the walk; lemma_inliner pre-pass should have "
         << "spliced it (Strategy A, §4.12). Likely cause: lemma not "
         << "in the registry, or pipeline ordering bug.";
 }
