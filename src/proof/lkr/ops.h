@@ -105,10 +105,10 @@ struct One {
 
 // CloseByLemma: close the current goal by appealing to either a
 // previously-verified axiom/theorem (identified by typed AxiomRef =
-// SentenceHandle) or a schema instance (still source-level name +
-// bindings — SchemaRef tightens to SchemaHandle in R.3). The verifier
-// dispatches on `target` to compute the closing formula φ; φ_nnf must
-// appear in the current sequent. The op pops the goal.
+// SentenceHandle) or a schema instance (SchemaRef = SchemaHandle plus
+// binding payload). The verifier dispatches on `target` to compute the
+// closing formula φ; φ_nnf must appear in the current sequent. The op
+// pops the goal.
 //
 // This is the LKR realizer of "use a previously-proven lemma": callers
 // typically pair it with Cut(φ) so that LEFT closes via CloseByLemma
@@ -118,17 +118,17 @@ struct CloseByLemma {
     // Axiom/theorem path: SentenceHandle is the typed identity. No
     // ctx.find_known(name) at verify time; lowering / translators install
     // the handle directly.
-    // Schema path: SchemaInstData carries the SchemaRef (string today;
-    // SchemaHandle after R.3) and the binding payload.
+    // Schema path: SchemaInstData carries the SchemaRef (typed SchemaHandle)
+    // and the binding payload.
     std::variant<AxiomRef, SchemaInstData> target{};
 
     // Diagnostic-only source-cited name (CLAUDE.md "no string hacks in
     // IR" carve-out (c)): the user-written name of the axiom/theorem
     // being closed by, used for the proof-dependency graph that Bazel
     // consumes. NOT part of identity. For the schema branch the schema's
-    // own name lives in SchemaInstData.schema.name and this field is
-    // ignored; for the axiom branch, translators / producers populate it
-    // from the source cite when known (empty if synthesized).
+    // own name is recoverable from data.schema.schema->name and this field
+    // is ignored; for the axiom branch, translators / producers populate
+    // it from the source cite when known (empty if synthesized).
     std::string source_name{};
 };
 
