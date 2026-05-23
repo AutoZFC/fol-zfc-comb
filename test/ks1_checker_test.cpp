@@ -239,6 +239,13 @@ void test_ai_on_top() {
     EXPECT_OK((Derivation{f.top(), f.Or(f.top(), f.fb.make_bottom()), {s}}));
 }
 
+void test_ai_on_bot() {
+    Fixture f;
+    Step s = step(Rule::Ai); s.f_param = f.fb.make_bottom();    // a = ⊥
+    // dual(⊥) = ¬⊥ = ⊤ ; conclusion = ⊥ ∨ ⊤
+    EXPECT_OK((Derivation{f.top(), f.Or(f.fb.make_bottom(), f.top()), {s}}));
+}
+
 void test_ac_on_top() {
     Fixture f;
     // ⊤∨⊤ → ⊤
@@ -278,6 +285,7 @@ int main() {
     test_context_descent();
     test_context_no_descent_into_not();
     test_ai_on_top();
+    test_ai_on_bot();
     test_ac_on_top();
     test_multi_step();
 

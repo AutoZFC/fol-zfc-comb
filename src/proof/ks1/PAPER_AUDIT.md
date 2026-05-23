@@ -27,9 +27,16 @@ or `Compound{Not, predicate}`. This is the LKR convention.
 | File             | What it checks                                  | Crit | Mod | Min | Sty |
 |------------------|-------------------------------------------------|-----:|----:|----:|----:|
 | `derivation.h`   | data types (Rule, Step, Derivation, EqRule)     | 0 | 0 | 0 | 0 |
-| `checker.cpp`    | per-rule Fig. 6 instances + context navigation  | 0 | 1 | 1 | 0 |
+| `checker.cpp`    | per-rule Fig. 6 instances + context navigation  | 0 | 0 | 0 | 0 |
 | `decompose.cpp`  | Thm 17 form check + split (Φ1, A', Φ2)          | 0 | 1 | 0 | 1 |
 | `equiv.{h,cpp}`  | auxiliary `≡` canonicalizer (propositional)     | 0 | 1 | 0 | 0 |
+
+The remaining items are: `decompose.cpp`'s **MOD DEC-1** (Thm-17 reorganizer
+deferred — checker handles only already-decomposed input) and its **STY** on
+`phase_of`'s unreachable-default fallback; and **MOD** on `equiv`'s
+quantifier-shift incompleteness (auxiliary, not on the soundness path).
+`checker.cpp` has no remaining items after the 2026-05-23 fixes (NNF
+navigation guard, unit-atom extension, `swap_in_term` precondition assert).
 
 The `equiv` module is **auxiliary**: the checker's `Eqv` rule uses single-
 equation-instance matching, not `equiv::canonicalize`. So `equiv`'s
@@ -143,19 +150,32 @@ replaying Φ1. Required input form for the K4/K5 bridge.
 
 ## Open items
 
-- **MIN — Eqv at unit-atom positions.** `Ai` and `Ac` now accept ⊤/⊥ as atoms
-  (`is_atom_literal` extended 2026-05-23 to match HSW's grammar
-  `a ::= t | f | p | p̄`). Tested: `ks1_checker_test::test_ai_on_top` and
-  `test_ac_on_top`.
-
-- **MOD — DEC-1** (decomposition reorganizer deferred), above.
+- **MOD — DEC-1** (`decompose.cpp`): Thm 17 decomposed-form is checked, not
+  constructed (rule-permutation reorganizer deferred). K6's front-end will be
+  arranged to emit decomposed derivations directly.
 
 - **MOD — `equiv.{h,cpp}` quantifier-shift completeness** (auxiliary module
-  only; not on the checker's soundness path).
+  only; not on the checker's soundness path — `Eqv` rule uses single-equation
+  instances, not `equiv::canonicalize`).
 
-- **STY — `decompose.cpp` `phase_of` default.** Returns `Weakening` for `Eqv`
-  in a path that callers always skip; the unreachable default is a defensive
-  fallback, not a correctness concern.
+- **STY — `decompose.cpp::phase_of` default.** Returns `Weakening` for `Eqv`
+  in a path that callers always skip; an unreachable defensive fallback, not
+  a correctness concern.
+
+## Closed in 2026-05-23 (commit `0bb6091`)
+
+- **MIN — context navigation into Not.** `is_navigable_binary` rejects
+  Left/Right into `Compound{Not,·}`/`Compound{Bottom,·}` so the hole stays in
+  atom position (paper §V). Tested by
+  `ks1_checker_test::test_context_no_descent_into_not`.
+- **MOD — `is_atom_literal` excluded units.** Extended to match HSW's atom
+  grammar `a ::= t | f | p | p̄`. Tested by `test_ai_on_top`, `test_ai_on_bot`,
+  `test_ac_on_top`.
+- **STY — `swap_in_term`'s dead description branch.** Replaced with
+  `assert(!t.is_description())` documenting the precondition.
+- **MIN — per-resource-rule fibration coverage in `ks1_to_comb`.** Added unit
+  tests for `w∀, c∀, m∀, m∃, m`, and a `≡`-in-Φ2 fibration test
+  (`test_eqv_in_phi2_fibration`).
 
 ## Soundness & completeness verdict (2026-05-23)
 
@@ -208,11 +228,11 @@ unjustified gaps.
 | File                          | What it covers                                              | Asserts |
 |-------------------------------|-------------------------------------------------------------|---------|
 | `ks1_equiv_test`              | propositional `≡` canonicalizer (auxiliary)                 | 26 |
-| `ks1_checker_test`            | per-rule accept/reject, ≡ equations, context navigation, units | 37 |
+| `ks1_checker_test`            | per-rule accept/reject, ≡ equations, context navigation (incl. NNF guard), units (`Ai`/`Ac` on ⊤ and ⊥) | 38 |
 | `ks1_validation_test`         | end-to-end decomposed derivations exercising each phase     | 4  |
 | `ks1_decompose_test`          | Thm 17 form check + split (Φ1, A', Φ2)                      | 26 |
 | `ks1_read_fonet_test`         | bridge K4 — fonet read-off, CombVerifier-validated          | 10 |
-| `ks1_bridge_test`             | bridge K5 — full CombProof end-to-end + per-rule fibration  | 36 |
+| `ks1_bridge_test`             | bridge K5 — full CombProof end-to-end + per-resource-rule fibration (`w, w∀, ac, c∀, m, m∀, m∃, ≡`) | 40 |
 
 The bridge tests close the loop: a decomposed KS1 derivation translates to a
 CombProof that passes the independent `CombVerifier` (all four phases).

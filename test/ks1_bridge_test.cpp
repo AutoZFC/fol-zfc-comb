@@ -172,6 +172,23 @@ void test_m_exists_fibration() {
     }
 }
 
+// ≡ inside Φ2 (e.g. CommOr between medials): the induced map is the identity
+// on vertices, but their pre-order positions in the conclusion swap with the
+// operands. Premise A∨B: A(0), B(1). Conclusion B∨A: B(0), A(1). So source
+// A(0) maps to target position 1, source B(1) maps to target position 0.
+void test_eqv_in_phi2_fibration() {
+    Fixture f;
+    Step e = S(Rule::Eqv); e.eq = EqRule::CommOr; e.dir = EqDir::Forward;
+    Derivation phi2{f.Or(f.a(), f.b()), f.Or(f.b(), f.a()), {e}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 2);
+        EXPECT(sk.value().fibration[0] == 1);   // A: pos 0 → pos 1
+        EXPECT(sk.value().fibration[1] == 0);   // B: pos 1 → pos 0
+    }
+}
+
 // m: S{(A∧C)∨(B∧D)}/S{(A∨B)∧(C∨D)}. Atoms keep identity, but pre-order
 // changes:
 //   Premise (A∧C)∨(B∧D): A(0), C(1), B(2), D(3).
@@ -202,6 +219,7 @@ int main() {
     test_c_forall_fibration();
     test_m_forall_fibration();
     test_m_exists_fibration();
+    test_eqv_in_phi2_fibration();
     test_m_fibration();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
