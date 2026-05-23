@@ -132,7 +132,10 @@ FolLibrary::Snapshot FolLibrary::snapshot(const GlobalContext& ctx) {
     s.theorems = ctx.named_theorems_;
     s.claims = ctx.named_claims_;
     s.definitions = ctx.defined_predicates_;
-    s.schemas = ctx.named_schemas_;
+    s.schemas.clear();
+    ctx.schemas_.for_each([&](size_t /*id*/, const SchemaDefinition& def) {
+        s.schemas.insert(def.name);
+    });
     s.proven_schemas = ctx.proven_schemas_;
     return s;
 }
@@ -183,11 +186,11 @@ FolLibrary::DeltaData FolLibrary::collect_delta_data(
             collect_reachable(s.root());
         }
     });
-    for (const auto& [name, def] : ctx.named_schemas_) {
-        if (baseline.schemas.find(name) == baseline.schemas.end()) {
+    ctx.schemas_.for_each([&](size_t /*id*/, const SchemaDefinition& def) {
+        if (baseline.schemas.find(def.name) == baseline.schemas.end()) {
             collect_reachable(def.body);
         }
-    }
+    });
 
     // Collect reachable formulas in ID order (topological)
     ctx.formulas_.for_each([&](size_t id, const Formula& f) {
@@ -267,14 +270,14 @@ FolLibrary::DeltaData FolLibrary::collect_delta_data(
     }
 
     // New schemas
-    for (const auto& [name, def] : ctx.named_schemas_) {
-        if (baseline.schemas.find(name) != baseline.schemas.end()) continue;
+    ctx.schemas_.for_each([&](size_t /*id*/, const SchemaDefinition& def) {
+        if (baseline.schemas.find(def.name) != baseline.schemas.end()) return;
         size_t fid = handle_id(def.body);
         auto it = d.formula_id_map.find(fid);
         uint32_t local_id = (it != d.formula_id_map.end()) ? it->second : 0;
-        d.new_schemas.push_back({name, local_id, def.var_names, def.var_arities,
-                                  ctx.proven_schemas_.count(name) > 0});
-    }
+        d.new_schemas.push_back({def.name, local_id, def.var_names, def.var_arities,
+                                  ctx.proven_schemas_.count(def.name) > 0});
+    });
 
     return d;
 }
@@ -835,7 +838,13 @@ util::ResultStatus FolLibrary::link_exports(
         if (body_id > 0 && body_id <= formula_map.size())
             body_h = formula_map[body_id - 1];
 
-        ctx.add_schema(name, SchemaDefinition{body_h, std::move(var_names), std::move(var_arities)});
+        // add_schema fills in def.name from its name argument; leave it empty here.
+        ctx.add_schema(name, SchemaDefinition{
+            /*name=*/"",
+            body_h,
+            std::move(var_names),
+            std::move(var_arities),
+        });
         if (is_proven) ctx.mark_schema_proven(name);
     }
 

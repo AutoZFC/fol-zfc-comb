@@ -63,7 +63,11 @@ public:
         std::unordered_map<std::string, SentenceHandle> theorems;
         std::unordered_map<std::string, SentenceHandle> claims;
         std::unordered_map<std::string, std::string> definitions;
-        std::unordered_map<std::string, SchemaDefinition> schemas;
+        // Schema baseline: names of schemas present at snapshot time.
+        // (Previously held full SchemaDefinitions; we only need name-existence
+        // for delta detection, so the set form fits the actual usage and
+        // avoids carrying registry-internal data across the boundary.)
+        std::unordered_set<std::string> schemas;
         std::unordered_set<std::string> proven_schemas;
     };
 

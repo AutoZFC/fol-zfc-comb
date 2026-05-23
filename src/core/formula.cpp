@@ -982,9 +982,10 @@ void GlobalContext::add_claim(const std::string& name, SentenceHandle sentence) 
     named_claims_[name] = normalized;
 }
 
-void GlobalContext::add_schema(const std::string& name, SchemaDefinition def) {
+SchemaHandle GlobalContext::add_schema(const std::string& name, SchemaDefinition def) {
+    def.name = name;                                  // KeyedRegistry uses name as key
     def.body = elim_desc_formula(*this, def.body);
-    named_schemas_[name] = std::move(def);
+    return schemas_.register_item(std::move(def));
 }
 
 }  // namespace logic

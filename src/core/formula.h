@@ -325,11 +325,23 @@ struct SchemaBind {
 
 // A schema is a formula template parameterized by metavariables (SchemaVar).
 // Variables can be arity 0 (formula substitution) or arity N (predicate substitution).
+//
+// Name field is the schema's registered name in GlobalContext; doubles as the
+// KeyedRegistry key. add_schema() sets it from its name argument before
+// registering, so direct construction sites don't need to populate it.
 struct SchemaDefinition {
+    std::string name;                    // registered name (key for SchemaRegistry)
     FormulaHandle body;                  // contains SchemaVar nodes
     std::vector<std::string> var_names;  // var_names[id] = name
     std::vector<size_t> var_arities;     // var_arities[id] = arity (0 = formula, N = N-arg predicate)
+
+    // KeyedRegistry support
+    const std::string& get_key() const { return name; }
+    bool operator==(const SchemaDefinition&) const = default;
 };
+
+using SchemaRegistry = util::KeyedRegistry<SchemaDefinition, size_t, std::string, std::hash<std::string>>;
+using SchemaHandle   = util::Handle<SchemaDefinition>;
 
 class GlobalContext {
     friend class FolLibrary;
@@ -352,8 +364,11 @@ class GlobalContext {
     // Theorems marked UNPROVED (assumed without proof)
     std::unordered_set<std::string> unproved_theorems_;
 
-    // Schema storage
-    std::unordered_map<std::string, SchemaDefinition> named_schemas_;
+    // Schema storage. KeyedRegistry is keyed by schema name; the SchemaHandle
+    // returned by add_schema is the typed identity used by tightened IR ops
+    // (see CLAUDE.md "no string hacks in IR" rule; SchemaRef in src/proof/ir.h
+    // migrates to carry SchemaHandle in R.3 of the IR-tightening refactor).
+    SchemaRegistry schemas_;
     std::unordered_set<std::string> proven_schemas_;
 
 public:
@@ -453,17 +468,39 @@ public:
     // Schema body is normalized via eliminate_descriptions (Path D /
     // edge case 11: SchemaVar args containing ι get rewritten to ∃-form).
     // Out-of-line so FormulaBuilder is in scope.
-    void add_schema(const std::string& name, SchemaDefinition def);
+    //
+    // Returns the SchemaHandle for the registered schema. Re-registering the
+    // same (name, def) is idempotent (the registry returns the existing handle);
+    // re-registering the same name with a different body throws KeyedRegistry's
+    // ConflictError.
+    SchemaHandle add_schema(const std::string& name, SchemaDefinition def);
+
+    // Name-keyed proven-set ops (string keys are the source-of-truth here;
+    // the handle-keyed convenience overloads delegate to these by reading
+    // the handle's name).
     void mark_schema_proven(const std::string& name) {
         proven_schemas_.insert(name);
+    }
+    void mark_schema_proven(SchemaHandle h) {
+        proven_schemas_.insert(h->name);
     }
     bool is_schema_proven(const std::string& name) const {
         return proven_schemas_.count(name) > 0;
     }
+    bool is_schema_proven(SchemaHandle h) const {
+        return proven_schemas_.count(h->name) > 0;
+    }
+
+    // Value-returning lookup (unchanged API for back-compat with existing callers).
     std::optional<SchemaDefinition> find_schema(const std::string& name) const {
-        auto it = named_schemas_.find(name);
-        if (it != named_schemas_.end()) return it->second;
-        return std::nullopt;
+        auto h = schemas_.find_by_key(name);
+        if (!h.has_value()) return std::nullopt;
+        return *h.value();
+    }
+
+    // Handle-returning lookup (the typed, no-string-hack path for new callers).
+    std::optional<SchemaHandle> find_schema_handle(const std::string& name) const {
+        return schemas_.find_by_key(name);
     }
 };
 
