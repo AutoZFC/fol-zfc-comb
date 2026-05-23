@@ -539,7 +539,7 @@ void test_close_by_lemma_arity_n_schema() {
     LKRProgram prog;
     prog.claim_name = "lkr_arity_n_close";
     SchemaInstData inst_data;
-    inst_data.schema   = SchemaRef{"unary_self_impl"};
+    inst_data.schema   = SchemaRef{ctx.find_schema_handle("unary_self_impl").value()};
     inst_data.bindings = step0.schema_bindings;
     prog.instrs.push_back(lkr::CloseByLemma{{}, std::move(inst_data)});
 

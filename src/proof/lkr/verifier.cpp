@@ -169,8 +169,9 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const CloseByLemma& op)
         raw = sent.get().root();
     } else {
         const auto& data = std::get<SchemaInstData>(op.target);
-        s.used_names.insert(data.schema.name);
-        diag_name = data.schema.name;
+        const std::string& schema_name = data.schema.schema->name;
+        s.used_names.insert(schema_name);
+        diag_name = schema_name;
         TRY_ASSIGN(inst, resolve_and_instantiate_schema(
             s.ctx, s.builder, data, s.name_table, "close_by_lemma"));
         raw = inst;

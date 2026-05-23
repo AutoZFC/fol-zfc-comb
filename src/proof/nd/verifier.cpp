@@ -104,29 +104,31 @@ util::Result<FormulaHandle> parse_deferred(Session& s, const ASTNode* ast,
 // reference fixed vars (in lambda bodies), so this must run with the
 // current Session::name_table populated.
 util::Result<FormulaResult> exec_schema_inst(Session& s, const SchemaInstData& data) {
-    auto schema = s.ctx.find_schema(data.schema.name);
-    if (!schema.has_value())
-        return MAKE_ERROR << "schema_inst: unknown schema '" << data.schema.name << "'";
-    if (!s.ctx.is_schema_proven(data.schema.name))
-        return MAKE_ERROR << "schema_inst: schema '" << data.schema.name << "' not yet proven";
+    // SchemaRef carries the typed SchemaHandle (resolved at lowering time);
+    // no name lookup here, just deref. The schema's name is recoverable
+    // from the handle for diagnostics and used_names tracking.
+    const SchemaDefinition& schema_def = *data.schema.schema;
+    const std::string&      schema_name = schema_def.name;
+    if (!s.ctx.is_schema_proven(data.schema.schema))
+        return MAKE_ERROR << "schema_inst: schema '" << schema_name << "' not yet proven";
 
-    s.used_names.insert(data.schema.name);
+    s.used_names.insert(schema_name);
 
-    std::vector<SchemaBind> bindings(schema->var_names.size());
-    std::vector<bool>       bound(schema->var_names.size(), false);
+    std::vector<SchemaBind> bindings(schema_def.var_names.size());
+    std::vector<bool>       bound(schema_def.var_names.size(), false);
 
     for (const auto& sb : data.bindings) {
         // Locate the schema variable index by name.
-        size_t idx = schema->var_names.size();
-        for (size_t j = 0; j < schema->var_names.size(); ++j) {
-            if (schema->var_names[j] == sb.var_name) { idx = j; break; }
+        size_t idx = schema_def.var_names.size();
+        for (size_t j = 0; j < schema_def.var_names.size(); ++j) {
+            if (schema_def.var_names[j] == sb.var_name) { idx = j; break; }
         }
-        if (idx >= schema->var_names.size())
+        if (idx >= schema_def.var_names.size())
             return MAKE_ERROR << "schema_inst: unknown schema variable '" << sb.var_name << "'";
         if (bound[idx])
             return MAKE_ERROR << "schema_inst: duplicate binding for '" << sb.var_name << "'";
 
-        size_t arity = (idx < schema->var_arities.size()) ? schema->var_arities[idx] : 0;
+        size_t arity = (idx < schema_def.var_arities.size()) ? schema_def.var_arities[idx] : 0;
 
         if (arity == 0) {
             // Formula binding: parse as a concrete formula.
@@ -141,11 +143,11 @@ util::Result<FormulaResult> exec_schema_inst(Session& s, const SchemaInstData& d
             // target schema's vars before parsing the lambda body.
             auto sv_map = s.schema_var_map;
             auto ar_map = s.schema_arity_map;
-            for (size_t j = 0; j < schema->var_names.size(); ++j) {
-                if (!sv_map.count(schema->var_names[j])) {
-                    sv_map[schema->var_names[j]] = j;
-                    if (j < schema->var_arities.size())
-                        ar_map[schema->var_names[j]] = schema->var_arities[j];
+            for (size_t j = 0; j < schema_def.var_names.size(); ++j) {
+                if (!sv_map.count(schema_def.var_names[j])) {
+                    sv_map[schema_def.var_names[j]] = j;
+                    if (j < schema_def.var_arities.size())
+                        ar_map[schema_def.var_names[j]] = schema_def.var_arities[j];
                 }
             }
             // Determine lambda parameter names: explicit, or auto-generated
@@ -181,9 +183,9 @@ util::Result<FormulaResult> exec_schema_inst(Session& s, const SchemaInstData& d
     }
     for (size_t j = 0; j < bound.size(); ++j) {
         if (!bound[j])
-            return MAKE_ERROR << "schema_inst: missing binding for '" << schema->var_names[j] << "'";
+            return MAKE_ERROR << "schema_inst: missing binding for '" << schema_def.var_names[j] << "'";
     }
-    return s.stack.schema_inst(*schema, bindings);
+    return s.stack.schema_inst(schema_def, bindings);
 }
 
 // =========================================================================

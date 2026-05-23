@@ -370,7 +370,7 @@ util::Result<WalkResult> rule_close_by_lemma(
         if constexpr (std::is_same_v<T, AxiomRef>) {
             return "<axiom SentenceHandle>";       // ctx-less here; identity is the handle
         } else {
-            return std::string("schema '") + t.schema.name + "'";
+            return std::string("schema '") + t.schema.schema->name + "'";
         }
     }, op.target);
     return MAKE_ERROR

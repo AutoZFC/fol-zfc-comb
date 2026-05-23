@@ -23,9 +23,9 @@
 // faithfully — proof-internal identifiers are integers (StepRef/TermRef are
 // instr-index newtypes); identifiers that cross the runtime boundary into
 // GlobalContext are typed handles (AxiomRef carries SentenceHandle, SchemaRef
-// will carry SchemaHandle after R.3), NOT strings. The one remaining string
-// class — ScopeName inside a deferred formula AST — is a parser artifact, not
-// an IR-level identifier (see CLAUDE.md "no string hacks in IR" rule).
+// carries SchemaHandle), NOT strings. The one remaining string class —
+// ScopeName inside a deferred formula AST — is a parser artifact, not an
+// IR-level identifier (see CLAUDE.md "no string hacks in IR" rule).
 
 #include "src/parser/parser.h"     // SchemaBinding (parser-side struct, reused as-is)
 #include "src/util/error.h"        // util::SourceLocation
@@ -79,9 +79,14 @@ struct AxiomRef {
     bool operator==(const AxiomRef&) const = default;
 };
 
-// Reference to a schema in GlobalContext. Resolution: ctx.find_schema(name).
+// Reference to a schema in GlobalContext, carried as the typed
+// SchemaHandle. Lowering resolves source-level names to SchemaHandles
+// and fails on unknown names, so verifier-time code derefs the handle
+// directly (no ctx.find_schema(name) lookup). The schema's registered
+// name is recoverable for diagnostics as schema.schema->name (schemas
+// are one-name-per-definition, so no aliasing problem like axioms).
 struct SchemaRef {
-    std::string name;
+    SchemaHandle schema;
     bool operator==(const SchemaRef&) const = default;
 };
 
@@ -198,7 +203,7 @@ template <> struct hash<logic::proof::AxiomRef> {
 
 template <> struct hash<logic::proof::SchemaRef> {
     size_t operator()(const logic::proof::SchemaRef& r) const noexcept {
-        return std::hash<std::string>{}(r.name);
+        return std::hash<logic::SchemaHandle>{}(r.schema);
     }
 };
 

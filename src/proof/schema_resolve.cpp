@@ -12,14 +12,13 @@ util::Result<FormulaHandle> resolve_and_instantiate_schema(
     const std::unordered_map<std::string, Term>& name_table,
     const char* op_name)
 {
-    auto schema = ctx.find_schema(data.schema.name);
-    if (!schema.has_value()) {
-        return MAKE_ERROR << op_name << ": unknown schema '"
-                          << data.schema.name << "'";
-    }
-    if (!ctx.is_schema_proven(data.schema.name)) {
+    // SchemaRef carries the typed SchemaHandle (lowering already resolved
+    // any source-level name). Deref directly; the schema's name is on
+    // schema_def.name for diagnostics.
+    const SchemaDefinition& schema_def = *data.schema.schema;
+    if (!ctx.is_schema_proven(data.schema.schema)) {
         return MAKE_ERROR << op_name << ": schema '"
-                          << data.schema.name << "' not yet proven";
+                          << schema_def.name << "' not yet proven";
     }
 
     // Schema-var/arity tables for parsing binding bodies. A binding body
@@ -28,23 +27,23 @@ util::Result<FormulaHandle> resolve_and_instantiate_schema(
     // pre-populate these maps from the target schema before parsing each
     // binding. Mirrors the ND verifier's exec_schema_inst path.
     std::unordered_map<std::string, size_t> sv_map, ar_map;
-    for (size_t j = 0; j < schema->var_names.size(); ++j) {
-        sv_map[schema->var_names[j]] = j;
-        if (j < schema->var_arities.size())
-            ar_map[schema->var_names[j]] = schema->var_arities[j];
+    for (size_t j = 0; j < schema_def.var_names.size(); ++j) {
+        sv_map[schema_def.var_names[j]] = j;
+        if (j < schema_def.var_arities.size())
+            ar_map[schema_def.var_names[j]] = schema_def.var_arities[j];
     }
 
-    std::vector<SchemaBind> binds(schema->var_names.size());
-    std::vector<bool>       bound(schema->var_names.size(), false);
+    std::vector<SchemaBind> binds(schema_def.var_names.size());
+    std::vector<bool>       bound(schema_def.var_names.size(), false);
 
     for (const auto& sb : data.bindings) {
         // Linear lookup of var_name → positional index. Schemas typically
         // have a handful of variables; an unordered_map would be overkill.
-        size_t idx = schema->var_names.size();
-        for (size_t j = 0; j < schema->var_names.size(); ++j) {
-            if (schema->var_names[j] == sb.var_name) { idx = j; break; }
+        size_t idx = schema_def.var_names.size();
+        for (size_t j = 0; j < schema_def.var_names.size(); ++j) {
+            if (schema_def.var_names[j] == sb.var_name) { idx = j; break; }
         }
-        if (idx >= schema->var_names.size()) {
+        if (idx >= schema_def.var_names.size()) {
             return MAKE_ERROR << op_name << ": unknown schema variable '"
                               << sb.var_name << "'";
         }
@@ -57,8 +56,8 @@ util::Result<FormulaHandle> resolve_and_instantiate_schema(
                               << sb.var_name << "' has no formula AST";
         }
 
-        size_t arity = (idx < schema->var_arities.size())
-                        ? schema->var_arities[idx] : 0;
+        size_t arity = (idx < schema_def.var_arities.size())
+                        ? schema_def.var_arities[idx] : 0;
 
         if (arity == 0) {
             // Closed-formula binding.
@@ -112,11 +111,11 @@ util::Result<FormulaHandle> resolve_and_instantiate_schema(
     for (size_t j = 0; j < bound.size(); ++j) {
         if (!bound[j]) {
             return MAKE_ERROR << op_name << ": missing binding for '"
-                              << schema->var_names[j] << "'";
+                              << schema_def.var_names[j] << "'";
         }
     }
 
-    return builder.instantiate_schema(schema->body, binds);
+    return builder.instantiate_schema(schema_def.body, binds);
 }
 
 }  // namespace logic::proof

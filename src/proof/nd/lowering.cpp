@@ -290,7 +290,15 @@ util::Result<NDProgram> lower(const ParsedProof& parsed, const GlobalContext& ct
             }
 
             case ParsedProofStep::Kind::SchemaInst: {
-                SchemaInstData data{SchemaRef{step.rule_name}, step.schema_bindings};
+                // Resolve schema name to SchemaHandle here (no string hacks
+                // in IR rule); lowering fails on unknown name.
+                auto sh = ctx.find_schema_handle(step.rule_name);
+                if (!sh.has_value()) {
+                    return MAKE_ERROR
+                        << "step " << (i + 1) << ": schema_inst('"
+                        << step.rule_name << "'): unknown schema in ctx";
+                }
+                SchemaInstData data{SchemaRef{sh.value()}, step.schema_bindings};
                 instr = SchemaInst{{}, std::move(data)};
                 break;
             }

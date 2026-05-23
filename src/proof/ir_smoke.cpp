@@ -31,7 +31,7 @@ static_assert(TermRef{0} == TermRef{0});
     s_step.insert(StepRef{0});
     s_term.insert(TermRef{0});
     m_axiom[AxiomRef{}] = 0;       // default-constructed SentenceHandle
-    m_schema[SchemaRef{"y"}] = 0;
+    m_schema[SchemaRef{}] = 0;     // default-constructed SchemaHandle
     m_scope[ScopeName{"z"}] = 0;
 }
 
