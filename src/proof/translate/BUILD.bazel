@@ -14,3 +14,21 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# theorem_facts: SentenceHandle-keyed TheoremFactsMap and the transitive
+# citation-closure computed by compute_transitive_facts. Shared
+# component (typed-handle replacement of the old string-keyed map in
+# axiom_rewrap/theorem_axioms). Consumed by Stage 1 (nd_internalize) and
+# any future pass that needs the closure.
+cc_library(
+    name = "theorem_facts",
+    srcs = ["theorem_facts.cpp"],
+    hdrs = ["theorem_facts.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)

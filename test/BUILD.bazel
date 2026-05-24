@@ -157,37 +157,6 @@ cc_test(
 )
 
 cc_test(
-    name = "reduce_test",
-    srcs = ["reduce_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/lkr:verifier",
-        "//src/proof/translate/lkr_cut_elim:deriv",
-        "//src/proof/translate/lkr_cut_elim:reduce",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "lkr_cut_elim_test",
-    srcs = ["lkr_cut_elim_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/lkr:verifier",
-        "//src/proof/nd:lowering",
-        "//src/proof/translate/lkr_cut_elim:cut_elim",
-        "//src/proof/translate/nd_to_lkr",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
     name = "ks1_equiv_test",
     srcs = ["ks1_equiv_test.cpp"],
     deps = [
@@ -266,10 +235,26 @@ cc_test(
     ],
 )
 
+# Stage 1 (nd_internalize) Phase 1: compute_transitive_facts on the typed IR.
+cc_test(
+    name = "nd_internalize_test",
+    srcs = ["nd_internalize_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/nd:lowering",
+        "//src/proof/nd:ops",
+        "//src/proof/translate:theorem_facts",
+        "//src/runtime",
+    ],
+)
+
 test_suite(
     name = "all_tests",
     tests = [
         ":axiom_rewrap_test",
+        ":nd_internalize_test",
         ":comb_test",
         ":core_test",
         ":deriv_test",
@@ -283,7 +268,6 @@ test_suite(
         ":lkr_to_comb_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_test",
-        ":reduce_test",
         ":runtime_test",
     ],
 )
