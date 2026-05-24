@@ -296,12 +296,48 @@ util::ResultStatus translate_step_impl(
                 return emit_close(ecc, shadow, target_pos, dual_pos, out);
             }
 
-            // ---- ForallIntro requires block_tree integration to find
-            //      its enclosing Fix's eigen — Phase 5e.
+            // ---- ForallIntro (Phase 5e.3) -------------------------
+            // Look up the matching FORALL-block opener (Fix step) via
+            // closer_to_opener, then pull the eigen from trace.term_env.
+            // Pass to Phase 1's emit_forall_intro, then bind
+            // shadow.lkr_term_for[fix_idx] so body-side TermRefs (e.g.
+            // in nested Exists or recursive ForallElim) resolve to the
+            // LKR Forall instr just emitted.
             else if constexpr (std::is_same_v<T, nd::ForallIntro>) {
-                return MAKE_ERROR
-                    << "translate_step: ForallIntro requires block_tree "
-                       "eigen lookup (Phase 5e)";
+                auto co = dcc.closer_to_opener.find(step.idx);
+                if (co == dcc.closer_to_opener.end()) {
+                    return MAKE_ERROR
+                        << "translate_step: ForallIntro at #" << step.idx
+                        << " has no matching FORALL block opener";
+                }
+                uint32_t fix_idx = co->second;
+                if (fix_idx >= dcc.trace.term_env.size() ||
+                    fix_idx >= dcc.trace.term_present.size() ||
+                    !dcc.trace.term_present[fix_idx]) {
+                    return MAKE_ERROR
+                        << "translate_step: ForallIntro's Fix #" << fix_idx
+                        << " has no eigen in trace";
+                }
+                const Term& fix_term = dcc.trace.term_env[fix_idx];
+                if (!fix_term.is_fixed()) {
+                    return MAKE_ERROR
+                        << "translate_step: ForallIntro's Fix #" << fix_idx
+                        << " trace term is not a fixed variable";
+                }
+                var_index eigen = fix_term.as_variable();
+
+                // emit_forall_intro emits the LKR Forall op; its instr
+                // index is out.size() at this point.
+                size_t lkr_forall_idx = out.size();
+                TRY_ASSIGN(r, intros::emit_forall_intro(
+                    ictx, op, eigen, shadow, target_pos, out, norm_demand));
+                if (auto* one = std::get_if<intros::OnePremise>(&r)) {
+                    SequentShadow::TermBinding binding;
+                    binding.lkr_ref = TermRef{static_cast<uint32_t>(lkr_forall_idx)};
+                    binding.value   = fix_term;
+                    one->shadow.lkr_term_for[fix_idx] = binding;
+                }
+                return handle_intro_result(dcc, std::move(r), out);
             }
 
             // ---- not-yet-supported families ------------------------

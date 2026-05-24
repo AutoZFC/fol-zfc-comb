@@ -309,6 +309,34 @@ void test_forall_elim_not_yet_supported() {
 // excluded_middle; not_elim h, em gives ⊥; not_intro h_bot proves
 // ~~(A|~A).
 // =========================================================================
+// =========================================================================
+// Test 9 (5e.3): ForallIntro of a quantified tautology.
+// Goal: forall x. (P(x) -> P(x)). Body: fix x; assume P(x); implies_intro;
+// forall_intro. Exercises Fix opener + ForallIntro NONE integration.
+// =========================================================================
+void test_forall_intro_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim fa_self: forall x. (P(x) -> P(x))
+        proof fa_self:
+            fix x
+            h = assume P(x)
+            h2 = implies_intro h
+            h3 = forall_intro h2
+            qed h3
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("fa_self");
+    if (!sh.has_value()) { std::cerr << "no fa_self claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "fa_self"));
+}
+
 void test_not_intro_e2e() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -365,6 +393,7 @@ int main() {
     test_forall_elim_not_yet_supported();
     test_implies_intro_of_assume_e2e();
     test_not_intro_e2e();
+    test_forall_intro_e2e();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";
