@@ -82,6 +82,27 @@ cc_test(
 )
 
 cc_test(
+    name = "cut_minimal_dispatcher_test",
+    srcs = ["cut_minimal_dispatcher_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof:runner",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:lowering",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/nd_to_lkr:demand",
+        "//src/proof/translate/nd_to_lkr:dispatcher",
+        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "cut_minimal_structural_test",
     srcs = ["cut_minimal_structural_test.cpp"],
     deps = [
@@ -313,6 +334,7 @@ test_suite(
         ":comb_test",
         ":core_test",
         ":cut_minimal_combining_test",
+        ":cut_minimal_dispatcher_test",
         ":cut_minimal_intros_test",
         ":cut_minimal_projections_test",
         ":cut_minimal_structural_test",

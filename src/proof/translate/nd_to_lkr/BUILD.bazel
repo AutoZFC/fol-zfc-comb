@@ -168,6 +168,27 @@ cc_library(
     ],
 )
 
+# dispatcher — Stage 2 Phase 5: recursive descent over ND derivation
+# tree. 5b: intro-only. 5c-5e add projection/combining/structural.
+cc_library(
+    name = "dispatcher",
+    srcs = ["dispatcher.cpp"],
+    hdrs = ["dispatcher.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":demand",
+        ":intros",
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs LKRVerifier on emitted programs. Translator is not
 # trusted; soundness rests on this gate.
 cc_library(
