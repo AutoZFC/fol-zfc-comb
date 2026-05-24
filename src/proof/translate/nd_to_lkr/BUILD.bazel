@@ -78,13 +78,15 @@ cc_library(
 )
 
 # intros — Stage 2 Phase 1 emitters: cut-free LKR right rules for the
-# ND introduction op family. Per CUT_MINIMAL_DESIGN.md §5.
+# ND introduction op family. Per CUT_MINIMAL_DESIGN.md §5. Phase 5a
+# retrofit: demand-aware short-circuits for AndIntro and IffIntro.
 cc_library(
     name = "intros",
     srcs = ["intros.cpp"],
     hdrs = ["intros.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":demand",
         ":emit_close",
         ":sequent_shadow",
         "//src/core:formula",

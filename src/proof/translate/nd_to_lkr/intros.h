@@ -29,10 +29,12 @@
 // past the Phase 1 emitter table.
 
 #include "src/core/formula.h"
+#include "src/proof/ir.h"
 #include "src/proof/lkr/ops.h"
 #include "src/proof/nd/ops.h"
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_to_lkr/demand.h"
 #include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
 #include "src/util/error.h"
 
@@ -61,27 +63,30 @@ struct Ctx {
 // inert Let-payloads or absent). Used by ExcludedMiddle and Peirce.
 struct ZeroPremise {};
 
-// OnePremise: non-branching right rule (Or, Forall, Exists, ...). The
-// post-state `shadow` has the decomposed structure; the dispatcher
-// recurses on the ND op's single derived premise step against
-// (shadow, premise_pos). Used by OrIntroL, OrIntroR, ImpliesIntro,
-// ForallIntro, ExistsIntro.
+// OnePremise: non-branching right rule (Or, Forall, Exists, ...) or
+// a demand-aware short-circuit (AndIntro under AND_LEFT/RIGHT,
+// IffIntro under IFF_LEFT/RIGHT). The post-state `shadow` has the
+// decomposed structure; the dispatcher recurses on `premise_step`
+// (explicit ND step ref) against (shadow, premise_pos).
 struct OnePremise {
     SequentShadow shadow{};
     size_t        premise_pos{0};
+    StepRef       premise_step{};
 };
 
-// TwoPremise: branching right rule (And, IffIntro). Each branch
-// receives its own post-state shadow; the dispatcher recurses on the
-// LEFT ND premise against (left_shadow, left_pos) and on the RIGHT ND
-// premise against (right_shadow, right_pos). The two shadows reflect
-// the multiplicative split (with full-context duplication per
-// CUT_MINIMAL_DESIGN.md §5.1.1).
+// TwoPremise: branching right rule (And, IffIntro under NONE). Each
+// branch receives its own post-state shadow; the dispatcher recurses
+// on the LEFT ND premise (left_step) against (left_shadow, left_pos)
+// and on the RIGHT ND premise (right_step) against (right_shadow,
+// right_pos). The two shadows reflect the multiplicative split (with
+// full-context duplication per CUT_MINIMAL_DESIGN.md §5.1.1).
 struct TwoPremise {
     SequentShadow left_shadow{};
     SequentShadow right_shadow{};
     size_t        left_pos{0};
     size_t        right_pos{0};
+    StepRef       left_step{};
+    StepRef       right_step{};
 };
 
 using IntroResult = std::variant<ZeroPremise, OnePremise, TwoPremise>;
@@ -90,104 +95,105 @@ using IntroResult = std::variant<ZeroPremise, OnePremise, TwoPremise>;
 // Phase 1 emitters.
 // =========================================================================
 
+// All Phase 1 emitters take an optional `demand` parameter (default
+// DemandNone). Under non-NONE demand, demand-aware emitters
+// short-circuit:
+//
+//   AndIntro under DemandAndLeft  → OnePremise routing to op.a, no And emitted.
+//   AndIntro under DemandAndRight → OnePremise routing to op.b, no And emitted.
+//   IffIntro under DemandIffLeft  → OnePremise routing to op.ab, no And emitted.
+//   IffIntro under DemandIffRight → OnePremise routing to op.ba, no And emitted.
+//   ForallIntro under DemandInstance(t) → reserved for Phase 5c (eigen
+//     substitution requires dispatcher integration); currently returns error.
+//
+// All other (emitter, demand) combinations are unsupported and return
+// an error — a translator bug if the dispatcher routes them here.
+
 // AndIntro(a, b) — multiplicative ∧R with full-context duplication.
-//   Emits |Γ| Weakenings (one per non-principal entry) then
-//   And{principal=f_k_idx, right_needs=[duplicate indices]}.
-//   Returns TwoPremise with both branches carrying the full context.
+//   Under DemandNone: emits |Γ| Weakenings then And. Returns TwoPremise.
+//   Under DemandAndLeft/Right: emits nothing; returns OnePremise.
 util::Result<IntroResult> emit_and_intro(
     Ctx&                       cc,
     const nd::AndIntro&        op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // OrIntroL(a, b_formula) — ∨R; left disjunct is derived.
-//   Emits Or{principal=f_k_idx}. After: A at f_k_idx, NNF(B) appended.
-//   Returns OnePremise{shadow, premise_pos=f_k_idx}.
 util::Result<IntroResult> emit_or_intro_l(
     Ctx&                       cc,
     const nd::OrIntroL&        op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // OrIntroR(a_formula, b) — ∨R; right disjunct is derived.
-//   Emits Or{principal=f_k_idx}. After: NNF(A) at f_k_idx, B appended.
-//   Returns OnePremise{shadow, premise_pos=end_idx}.
 util::Result<IntroResult> emit_or_intro_r(
     Ctx&                       cc,
     const nd::OrIntroR&        op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // ImpliesIntro(conclusion) — NNF(A→B) = NNF(¬A) ∨ NNF(B).
-//   Emits Or{principal=f_k_idx}. After: NNF(¬A) at f_k_idx,
-//   NNF(B) appended. Returns OnePremise{shadow, premise_pos=end_idx}.
-//   (The assumed A is brought into the sequent at f_k_idx as its dual
-//   — references to the assumption close against this position.)
 util::Result<IntroResult> emit_implies_intro(
     Ctx&                       cc,
     const nd::ImpliesIntro&    op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // IffIntro(ab, ba) — NNF(A↔B) = (NNF(¬A)∨NNF(B)) ∧ (NNF(¬B)∨NNF(A)).
-//   Multiplicative ∧R with full-context duplication, then ∨R on each
-//   branch's conjunct. Returns TwoPremise (one per direction).
+//   Under DemandNone: And split + Weakenings. TwoPremise.
+//   Under DemandIffLeft: OnePremise routing to op.ab.
+//   Under DemandIffRight: OnePremise routing to op.ba.
 util::Result<IntroResult> emit_iff_intro(
     Ctx&                       cc,
     const nd::IffIntro&        op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // ForallIntro(body) with eigen — ∀R.
-//   Emits Forall{principal=f_k_idx, eigen=eigen}. The eigen is the
-//   fresh variable index bound by the enclosing Fix; the dispatcher
-//   resolves it via the block_tree + trace and passes it explicitly.
-//   Returns OnePremise{shadow, premise_pos=f_k_idx}.
 util::Result<IntroResult> emit_forall_intro(
     Ctx&                       cc,
     const nd::ForallIntro&     op,
     var_index                  eigen,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // ExistsIntro(body, witness=t) — ∃R with explicit witness.
-//   No-witness form (closer of EXISTS_ELIM block) is handled by Phase 4.
-//   Emits Exists{principal=f_k_idx, witness=t_lkr}. The witness's LKR
-//   TermRef comes from shadow.lkr_term_for[t.idx].
-//   Returns OnePremise{shadow, premise_pos=f_k_idx}.
 util::Result<IntroResult> emit_exists_intro(
     Ctx&                       cc,
     const nd::ExistsIntro&     op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // ExcludedMiddle(formula_let) — fixed cut-free skeleton.
-//   NNF(A ∨ ¬A) = NNF(A) ∨ NNF(¬A). Emit Or{principal=f_k_idx} then
-//   emit_close on (f_k_idx, end_idx) — the two are NNF-dual.
-//   Returns ZeroPremise.
 util::Result<IntroResult> emit_excluded_middle(
     Ctx&                       cc,
     const nd::ExcludedMiddle&  op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 // Peirce(a_let, b_let) — fixed cut-free skeleton for Peirce's law.
-//   NNF(((A→B)→A)→A) = ((NNF(¬A)∨NNF(B)) ∧ NNF(¬A)) ∨ NNF(A).
-//   Skeleton: Or; Weakening{NNF(A)}; And; on each branch close via
-//   the (A, NNF(¬A)) dual. Returns ZeroPremise.
 util::Result<IntroResult> emit_peirce(
     Ctx&                       cc,
     const nd::Peirce&          op,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out);
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand = Demand{DemandNone{}});
 
 }  // namespace logic::proof::translate::nd_to_lkr::intros

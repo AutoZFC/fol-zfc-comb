@@ -16,6 +16,7 @@
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
 #include "src/proof/runner.h"
+#include "src/proof/translate/nd_to_lkr/demand.h"
 #include "src/proof/translate/nd_to_lkr/intros.h"
 #include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
 #include "src/runtime/runtime.h"
@@ -29,6 +30,12 @@
 
 using namespace logic;
 using namespace logic::proof;
+using logic::proof::translate::nd_to_lkr::Demand;
+using logic::proof::translate::nd_to_lkr::DemandAndLeft;
+using logic::proof::translate::nd_to_lkr::DemandAndRight;
+using logic::proof::translate::nd_to_lkr::DemandDoubleNeg;
+using logic::proof::translate::nd_to_lkr::DemandIffLeft;
+using logic::proof::translate::nd_to_lkr::DemandIffRight;
 using logic::proof::translate::nd_to_lkr::SequentShadow;
 using logic::proof::translate::nd_to_lkr::intros::Ctx;
 using logic::proof::translate::nd_to_lkr::intros::IntroResult;
@@ -444,6 +451,173 @@ void test_peirce() {
     CHECK_OK(v.verify(f.ctx(), goal, p));
 }
 
+// =========================================================================
+// Phase 5a demand-aware short-circuits
+// =========================================================================
+
+// AndIntro under DemandAndLeft: no LKR ops; routes recursion to op.a.
+void test_and_intro_demand_left() {
+    TestFixture f;
+    FormulaHandle a = parse_root(f.ctx(), "A");
+    SequentShadow shadow;
+    shadow.entries.push_back(a);
+
+    Ctx cc = f.make_ctx();
+    nd::AndIntro op{};
+    op.a = StepRef{42};
+    op.b = StepRef{43};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_and_intro(cc, op, shadow, /*f_k_idx=*/0, emitted,
+                            Demand{DemandAndLeft{}});
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    CHECK(emitted.empty());
+    CHECK(std::holds_alternative<OnePremise>(r.value()));
+    const auto& one = std::get<OnePremise>(r.value());
+    CHECK(one.premise_step.idx == 42);
+    CHECK(one.premise_pos == 0);
+}
+
+// AndIntro under DemandAndRight routes to op.b.
+void test_and_intro_demand_right() {
+    TestFixture f;
+    SequentShadow shadow;
+    shadow.entries.push_back(parse_root(f.ctx(), "B"));
+
+    Ctx cc = f.make_ctx();
+    nd::AndIntro op{};
+    op.a = StepRef{10};
+    op.b = StepRef{11};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_and_intro(cc, op, shadow, 0, emitted,
+                            Demand{DemandAndRight{}});
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    CHECK(emitted.empty());
+    CHECK(std::holds_alternative<OnePremise>(r.value()));
+    CHECK(std::get<OnePremise>(r.value()).premise_step.idx == 11);
+}
+
+// IffIntro under DemandIffLeft routes to op.ab.
+void test_iff_intro_demand_left() {
+    TestFixture f;
+    SequentShadow shadow;
+    shadow.entries.push_back(parse_root(f.ctx(), "A -> B"));
+
+    Ctx cc = f.make_ctx();
+    nd::IffIntro op{};
+    op.ab = StepRef{20};
+    op.ba = StepRef{21};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_iff_intro(cc, op, shadow, 0, emitted,
+                            Demand{DemandIffLeft{}});
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    CHECK(emitted.empty());
+    CHECK(std::holds_alternative<OnePremise>(r.value()));
+    CHECK(std::get<OnePremise>(r.value()).premise_step.idx == 20);
+}
+
+// IffIntro under DemandIffRight routes to op.ba.
+void test_iff_intro_demand_right() {
+    TestFixture f;
+    SequentShadow shadow;
+    shadow.entries.push_back(parse_root(f.ctx(), "B -> A"));
+
+    Ctx cc = f.make_ctx();
+    nd::IffIntro op{};
+    op.ab = StepRef{30};
+    op.ba = StepRef{31};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_iff_intro(cc, op, shadow, 0, emitted,
+                            Demand{DemandIffRight{}});
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    CHECK(emitted.empty());
+    CHECK(std::holds_alternative<OnePremise>(r.value()));
+    CHECK(std::get<OnePremise>(r.value()).premise_step.idx == 31);
+}
+
+// Other emitters reject non-NONE demand as a translator routing bug.
+void test_or_intro_l_rejects_demand() {
+    TestFixture f;
+    SequentShadow shadow;
+    shadow.entries.push_back(parse_root(f.ctx(), "A | B"));
+    Ctx cc = f.make_ctx();
+    nd::OrIntroL op{};
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_or_intro_l(cc, op, shadow, 0, emitted,
+                             Demand{DemandAndLeft{}});
+    CHECK(!r.ok());
+}
+
+void test_forall_intro_instance_reserved() {
+    TestFixture f;
+    SequentShadow shadow;
+    shadow.entries.push_back(parse_root(f.ctx(), "forall x. P(x)"));
+    Ctx cc = f.make_ctx();
+    nd::ForallIntro op{};
+    std::vector<lkr::Instr> emitted;
+    // DemandInstance handling is reserved for Phase 5c.
+    using logic::proof::translate::nd_to_lkr::DemandInstance;
+    auto r = emit_forall_intro(
+        cc, op, /*eigen=*/var_index{0},
+        shadow, 0, emitted,
+        Demand{DemandInstance{Term::fixed(var_index{1})}});
+    CHECK(!r.ok());
+}
+
+// Existing emitters fill StepRef fields under DemandNone.
+void test_implies_intro_step_ref() {
+    TestFixture f;
+    FormulaHandle goal = parse_root(f.ctx(), "A -> A");
+    FormulaHandle goal_nnf = f.builder().to_nnf(goal);
+    SequentShadow shadow;
+    shadow.entries.push_back(goal_nnf);
+    Ctx cc = f.make_ctx();
+
+    nd::ImpliesIntro op{};
+    op.conclusion = StepRef{77};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_implies_intro(cc, op, shadow, 0, emitted);
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    const auto& one = std::get<OnePremise>(r.value());
+    CHECK(one.premise_step.idx == 77);
+}
+
+void test_and_intro_step_refs() {
+    TestFixture f;
+    FormulaHandle goal = parse_root(f.ctx(), "(A | ~A) & (B | ~B)");
+    FormulaHandle goal_nnf = f.builder().to_nnf(goal);
+    SequentShadow shadow;
+    shadow.entries.push_back(goal_nnf);
+    Ctx cc = f.make_ctx();
+
+    nd::AndIntro op{};
+    op.a = StepRef{100};
+    op.b = StepRef{101};
+
+    std::vector<lkr::Instr> emitted;
+    auto r = emit_and_intro(cc, op, shadow, 0, emitted);
+    CHECK(r.ok());
+    if (!r.ok()) return;
+
+    const auto& two = std::get<TwoPremise>(r.value());
+    CHECK(two.left_step.idx  == 100);
+    CHECK(two.right_step.idx == 101);
+}
+
 }  // namespace
 
 int main() {
@@ -455,6 +629,15 @@ int main() {
     test_iff_intro();
     test_excluded_middle();
     test_peirce();
+    // Phase 5a demand-aware:
+    test_and_intro_demand_left();
+    test_and_intro_demand_right();
+    test_iff_intro_demand_left();
+    test_iff_intro_demand_right();
+    test_or_intro_l_rejects_demand();
+    test_forall_intro_instance_reserved();
+    test_implies_intro_step_ref();
+    test_and_intro_step_refs();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";

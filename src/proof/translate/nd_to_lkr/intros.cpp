@@ -41,6 +41,17 @@ util::Result<FormulaHandle> require_quantified(
     return h.get().as_quantified().body;
 }
 
+// Helper: assert demand is DemandNone for an emitter that doesn't
+// accept demand-aware short-circuits.
+util::ResultStatus require_demand_none(const Demand& demand, const char* op_label) {
+    if (!std::holds_alternative<DemandNone>(demand)) {
+        return MAKE_ERROR
+            << op_label << ": unsupported non-NONE demand (variant index "
+            << demand.index() << ") — translator routing bug";
+    }
+    return util::Ok();
+}
+
 }  // namespace
 
 // =========================================================================
@@ -49,11 +60,13 @@ util::Result<FormulaHandle> require_quantified(
 // =========================================================================
 util::Result<IntroResult> emit_or_intro_l(
     Ctx&                     /*cc*/,
-    const nd::OrIntroL&      /*op*/,
+    const nd::OrIntroL&      op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
+    TRY(require_demand_none(demand, "emit_or_intro_l"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_or_intro_l: f_k_idx out of range";
     }
@@ -66,7 +79,7 @@ util::Result<IntroResult> emit_or_intro_l(
     SequentShadow post = shadow;  // copy
     post.entries[f_k_idx] = kids.value().left;
     post.entries.push_back(kids.value().right);
-    return IntroResult{OnePremise{std::move(post), f_k_idx}};
+    return IntroResult{OnePremise{std::move(post), f_k_idx, op.a}};
 }
 
 // =========================================================================
@@ -75,11 +88,13 @@ util::Result<IntroResult> emit_or_intro_l(
 // =========================================================================
 util::Result<IntroResult> emit_or_intro_r(
     Ctx&                     /*cc*/,
-    const nd::OrIntroR&      /*op*/,
+    const nd::OrIntroR&      op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
+    TRY(require_demand_none(demand, "emit_or_intro_r"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_or_intro_r: f_k_idx out of range";
     }
@@ -93,7 +108,7 @@ util::Result<IntroResult> emit_or_intro_r(
     post.entries[f_k_idx] = kids.value().left;
     post.entries.push_back(kids.value().right);
     size_t end_idx = post.entries.size() - 1;
-    return IntroResult{OnePremise{std::move(post), end_idx}};
+    return IntroResult{OnePremise{std::move(post), end_idx, op.b}};
 }
 
 // =========================================================================
@@ -103,11 +118,13 @@ util::Result<IntroResult> emit_or_intro_r(
 // =========================================================================
 util::Result<IntroResult> emit_implies_intro(
     Ctx&                     /*cc*/,
-    const nd::ImpliesIntro&  /*op*/,
+    const nd::ImpliesIntro&  op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
+    TRY(require_demand_none(demand, "emit_implies_intro"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_implies_intro: f_k_idx out of range";
     }
@@ -121,7 +138,7 @@ util::Result<IntroResult> emit_implies_intro(
     post.entries[f_k_idx] = kids.value().left;   // NNF(¬A)
     post.entries.push_back(kids.value().right);  // NNF(B)
     size_t end_idx = post.entries.size() - 1;
-    return IntroResult{OnePremise{std::move(post), end_idx}};
+    return IntroResult{OnePremise{std::move(post), end_idx, op.conclusion}};
 }
 
 // =========================================================================
@@ -130,12 +147,22 @@ util::Result<IntroResult> emit_implies_intro(
 // =========================================================================
 util::Result<IntroResult> emit_forall_intro(
     Ctx&                     cc,
-    const nd::ForallIntro&   /*op*/,
+    const nd::ForallIntro&   op,
     var_index                eigen,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
+    if (std::holds_alternative<DemandInstance>(demand)) {
+        // Phase 5c will implement the INSTANCE short-circuit (eigen
+        // substitution via shadow.lkr_term_for rebinding). For now,
+        // reaching this is a translator routing bug.
+        return MAKE_ERROR
+            << "emit_forall_intro: DemandInstance handling not yet "
+               "implemented (reserved for Phase 5c)";
+    }
+    TRY(require_demand_none(demand, "emit_forall_intro"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_forall_intro: f_k_idx out of range";
     }
@@ -149,7 +176,7 @@ util::Result<IntroResult> emit_forall_intro(
     Term fixed_term = Term::fixed(eigen);
     post.entries[f_k_idx] =
         cc.builder.instantiate_quantifier_body(body.value(), fixed_term);
-    return IntroResult{OnePremise{std::move(post), f_k_idx}};
+    return IntroResult{OnePremise{std::move(post), f_k_idx, op.body}};
 }
 
 // =========================================================================
@@ -161,8 +188,10 @@ util::Result<IntroResult> emit_exists_intro(
     const nd::ExistsIntro&   op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
+    TRY(require_demand_none(demand, "emit_exists_intro"));
     if (!op.witness.has_value()) {
         return MAKE_ERROR
             << "emit_exists_intro: no-witness form is Phase 4 (EXISTS_ELIM closer)";
@@ -187,7 +216,7 @@ util::Result<IntroResult> emit_exists_intro(
     SequentShadow post = shadow;
     post.entries[f_k_idx] =
         cc.builder.instantiate_quantifier_body(body.value(), binding.value);
-    return IntroResult{OnePremise{std::move(post), f_k_idx}};
+    return IntroResult{OnePremise{std::move(post), f_k_idx, op.body}};
 }
 
 // =========================================================================
@@ -205,14 +234,29 @@ util::Result<IntroResult> emit_exists_intro(
 // =========================================================================
 util::Result<IntroResult> emit_and_intro(
     Ctx&                     /*cc*/,
-    const nd::AndIntro&      /*op*/,
+    const nd::AndIntro&      op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_and_intro: f_k_idx out of range";
     }
+
+    // Demand-aware short-circuits: AND_LEFT or AND_RIGHT route the
+    // recursion to op.a or op.b respectively, with no LKR emission.
+    // The shadow is unchanged (caller's f_k_idx already holds the
+    // demanded sub-formula's NNF — the AndIntro's contribution to the
+    // LK proof is absorbed into the routed premise's translation).
+    if (std::holds_alternative<DemandAndLeft>(demand)) {
+        return IntroResult{OnePremise{shadow, f_k_idx, op.a}};
+    }
+    if (std::holds_alternative<DemandAndRight>(demand)) {
+        return IntroResult{OnePremise{shadow, f_k_idx, op.b}};
+    }
+    TRY(require_demand_none(demand, "emit_and_intro"));
+
     auto kids = require_compound(shadow.entries[f_k_idx], Op::And,
                                  "emit_and_intro");
     if (!kids.ok()) return kids.error();
@@ -269,7 +313,7 @@ util::Result<IntroResult> emit_and_intro(
     right_post.entries.push_back(theta);
 
     return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
-                                   left_pos, right_pos}};
+                                   left_pos, right_pos, op.a, op.b}};
 }
 
 // =========================================================================
@@ -291,14 +335,27 @@ util::Result<IntroResult> emit_and_intro(
 // =========================================================================
 util::Result<IntroResult> emit_iff_intro(
     Ctx&                     /*cc*/,
-    const nd::IffIntro&      /*op*/,
+    const nd::IffIntro&      op,
     const SequentShadow&     shadow,
     size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out)
+    std::vector<lkr::Instr>& out,
+    Demand                   demand)
 {
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_iff_intro: f_k_idx out of range";
     }
+
+    // Demand-aware short-circuits: IFF_LEFT → recurse on op.ab (forward
+    // direction A→B); IFF_RIGHT → recurse on op.ba (reverse B→A). No
+    // LKR emission.
+    if (std::holds_alternative<DemandIffLeft>(demand)) {
+        return IntroResult{OnePremise{shadow, f_k_idx, op.ab}};
+    }
+    if (std::holds_alternative<DemandIffRight>(demand)) {
+        return IntroResult{OnePremise{shadow, f_k_idx, op.ba}};
+    }
+    TRY(require_demand_none(demand, "emit_iff_intro"));
+
     auto outer = require_compound(shadow.entries[f_k_idx], Op::And,
                                   "emit_iff_intro");
     if (!outer.ok()) return outer.error();
@@ -356,7 +413,8 @@ util::Result<IntroResult> emit_iff_intro(
     right_post.entries.push_back(theta);
 
     return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
-                                   left_phi_idx, right_theta_idx}};
+                                   left_phi_idx, right_theta_idx,
+                                   op.ab, op.ba}};
 }
 
 // =========================================================================
@@ -371,8 +429,10 @@ util::Result<IntroResult> emit_excluded_middle(
     const nd::ExcludedMiddle&  /*op*/,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out)
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand)
 {
+    TRY(require_demand_none(demand, "emit_excluded_middle"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_excluded_middle: f_k_idx out of range";
     }
@@ -420,8 +480,10 @@ util::Result<IntroResult> emit_peirce(
     const nd::Peirce&          /*op*/,
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out)
+    std::vector<lkr::Instr>&   out,
+    Demand                     demand)
 {
+    TRY(require_demand_none(demand, "emit_peirce"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_peirce: f_k_idx out of range";
     }
