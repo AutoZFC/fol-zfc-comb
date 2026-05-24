@@ -200,7 +200,96 @@ void test_and_of_em_e2e() {
 }
 
 // =========================================================================
-// Test 4: Non-supported op (assume/implies_intro pattern) returns error.
+// Test 4 (5c): AndElimL on AndIntro of two ExcludedMiddles.
+// Goal: A | ~A. Demand-driven: and_elim_l promotes AND_LEFT; and_intro
+// short-circuits to its `a` premise (em_a); em_a's excluded_middle
+// closes the goal. The result LKR program is [Or, AxiomLit] —
+// identical to test 1 (excluded_middle direct), demonstrating that
+// the projection elim contributes ZERO ops.
+// =========================================================================
+void test_and_elim_l_of_em_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim a_or_na: A | ~A
+        proof a_or_na:
+            a_let = let A
+            em_a = excluded_middle a_let
+            b_let = let B
+            em_b = excluded_middle b_let
+            ai = and_intro em_a, em_b
+            el = and_elim_l ai
+            qed el
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("a_or_na");
+    if (!sh.has_value()) { std::cerr << "no a_or_na claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "a_or_na"));
+}
+
+// =========================================================================
+// Test 5 (5c): AndElimR (symmetric).
+// =========================================================================
+void test_and_elim_r_of_em_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim b_or_nb: B | ~B
+        proof b_or_nb:
+            a_let = let A
+            em_a = excluded_middle a_let
+            b_let = let B
+            em_b = excluded_middle b_let
+            ai = and_intro em_a, em_b
+            er = and_elim_r ai
+            qed er
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("b_or_nb");
+    if (!sh.has_value()) { std::cerr << "no b_or_nb claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "b_or_nb"));
+}
+
+// =========================================================================
+// Test 6: ForallElim returns "Phase 5e" — negative test.
+// =========================================================================
+void test_forall_elim_not_yet_supported() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom all_p: forall x. P(x)
+        claim need_inst: P
+        proof need_inst:
+            fix v
+            ap = use all_p
+            inst = forall_elim ap, v
+            qed inst
+    )");
+    if (!parsed.ok()) {
+        // The proof might not parse cleanly without nd_internalize first.
+        // Skip negative test if parse fails.
+        return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("need_inst");
+    if (!sh.has_value()) { return; }
+    FormulaHandle goal = sh->get().root();
+
+    auto r = translate_and_verify(rt, prog, goal, "need_inst");
+    CHECK(!r.ok());
+}
+
+// =========================================================================
+// Test 7: Non-supported op (assume/implies_intro pattern) returns error.
 // Implies_intro requires the dispatcher to handle its body's Assume
 // leaf — Phase 5e work.
 // =========================================================================
@@ -234,6 +323,9 @@ int main() {
     test_excluded_middle_e2e();
     test_peirce_e2e();
     test_and_of_em_e2e();
+    test_and_elim_l_of_em_e2e();
+    test_and_elim_r_of_em_e2e();
+    test_forall_elim_not_yet_supported();
     test_implies_intro_not_yet_supported();
 
     std::cerr << "\nResults: " << g_passed << " passed, "

@@ -1,6 +1,7 @@
 #include "dispatcher.h"
 
 #include "intros.h"
+#include "projections.h"
 
 #include <sstream>
 #include <utility>
@@ -21,6 +22,19 @@ util::ResultStatus translate_step_impl(
 
 intros::Ctx make_intros_ctx(Ctx& dcc) {
     return intros::Ctx{dcc.ctx, dcc.builder, dcc.prog, dcc.trace};
+}
+
+projections::Ctx make_projections_ctx(Ctx& dcc) {
+    return projections::Ctx{dcc.ctx, dcc.builder, dcc.prog, dcc.trace};
+}
+
+// DemandDoubleNeg is a no-op at the NNF level — NNF(¬¬A) = A. The
+// dispatcher normalizes it to DemandNone before passing to Phase 1.
+Demand normalize_demand(const Demand& d) {
+    if (std::holds_alternative<DemandDoubleNeg>(d)) {
+        return Demand{DemandNone{}};
+    }
+    return d;
 }
 
 util::ResultStatus handle_intro_result(
@@ -64,6 +78,8 @@ util::ResultStatus translate_step_impl(
     }
     const auto& instr = dcc.prog.instrs[step.idx];
     intros::Ctx ictx = make_intros_ctx(dcc);
+    projections::Ctx pctx = make_projections_ctx(dcc);
+    Demand norm_demand = normalize_demand(demand);
 
     return std::visit(
         [&](const auto& op) -> util::ResultStatus {
@@ -72,23 +88,23 @@ util::ResultStatus translate_step_impl(
             // ---- intros family (Phase 1) ---------------------------
             if constexpr (std::is_same_v<T, nd::AndIntro>) {
                 TRY_ASSIGN(r, intros::emit_and_intro(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::OrIntroL>) {
                 TRY_ASSIGN(r, intros::emit_or_intro_l(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::OrIntroR>) {
                 TRY_ASSIGN(r, intros::emit_or_intro_r(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ImpliesIntro>) {
                 TRY_ASSIGN(r, intros::emit_implies_intro(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::IffIntro>) {
                 TRY_ASSIGN(r, intros::emit_iff_intro(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ExistsIntro>) {
                 if (!op.witness.has_value()) {
@@ -97,16 +113,59 @@ util::ResultStatus translate_step_impl(
                            "(EXISTS_ELIM closer) requires Phase 5e";
                 }
                 TRY_ASSIGN(r, intros::emit_exists_intro(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ExcludedMiddle>) {
                 TRY_ASSIGN(r, intros::emit_excluded_middle(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::Peirce>) {
                 TRY_ASSIGN(r, intros::emit_peirce(
-                    ictx, op, shadow, target_pos, out, demand));
+                    ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
+            }
+
+            // ---- projection elims (Phase 2) ------------------------
+            else if constexpr (std::is_same_v<T, nd::AndElimL>) {
+                TRY_ASSIGN(desc, projections::emit_and_elim_l(
+                    pctx, op, shadow, target_pos));
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
+            } else if constexpr (std::is_same_v<T, nd::AndElimR>) {
+                TRY_ASSIGN(desc, projections::emit_and_elim_r(
+                    pctx, op, shadow, target_pos));
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
+            } else if constexpr (std::is_same_v<T, nd::IffElimL>) {
+                TRY_ASSIGN(desc, projections::emit_iff_elim_l(
+                    pctx, op, shadow, target_pos));
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
+            } else if constexpr (std::is_same_v<T, nd::IffElimR>) {
+                TRY_ASSIGN(desc, projections::emit_iff_elim_r(
+                    pctx, op, shadow, target_pos));
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
+            } else if constexpr (std::is_same_v<T, nd::DoubleNegElim>) {
+                TRY_ASSIGN(desc, projections::emit_double_neg_elim(
+                    pctx, op, shadow, target_pos));
+                // Demand promotes to DemandDoubleNeg, which the
+                // dispatcher normalizes back to DemandNone via
+                // normalize_demand() at recursion entry.
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
+            } else if constexpr (std::is_same_v<T, nd::ForallElim>) {
+                // ForallElim promotes DemandInstance(t), which requires
+                // ForallIntro to substitute eigen → t. That depends on
+                // block_tree fix-step lookup, deferred to 5e.
+                return MAKE_ERROR
+                    << "translate_step: ForallElim requires "
+                       "ForallIntro/INSTANCE handling (Phase 5e)";
             }
 
             // ---- ForallIntro requires block_tree integration to find
@@ -122,9 +181,9 @@ util::ResultStatus translate_step_impl(
                 std::ostringstream what;
                 what << "translate_step: op family (variant "
                      << instr.index()
-                     << ") not yet supported in Phase 5b "
-                        "(projection/combining/structural/closer "
-                        "integration lands in 5c-5e)";
+                     << ") not yet supported in Phase 5c "
+                        "(combining/structural/closer integration lands "
+                        "in 5d-5e)";
                 return MAKE_ERROR << what.str();
             }
         },

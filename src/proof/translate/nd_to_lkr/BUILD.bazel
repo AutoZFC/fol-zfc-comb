@@ -178,6 +178,7 @@ cc_library(
     deps = [
         ":demand",
         ":intros",
+        ":projections",
         ":sequent_shadow",
         "//src/core:formula",
         "//src/proof:ir",
