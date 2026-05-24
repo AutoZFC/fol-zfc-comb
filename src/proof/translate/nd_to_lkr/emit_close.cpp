@@ -94,8 +94,10 @@ util::ResultStatus emit_close(
 
     // -- Normalise so OR/FORALL is on side a, AND/EXISTS on side b.
     //    By the precondition (a ⊥ b), exactly one of {Or, And} or
-    //    {Forall, Exists} pairs applies.
-    if (is_and(a) || is_exists(a)) {
+    //    {Forall, Exists} pairs applies. Swap only if b is the dual
+    //    shape — otherwise (And, And) / (Exists, Exists) would loop.
+    if ((is_and(a) && is_or(b)) ||
+        (is_exists(a) && is_forall(b))) {
         return emit_close(cc, shadow, pos_b, pos_a, out);
     }
 

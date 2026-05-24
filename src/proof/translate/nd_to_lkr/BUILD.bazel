@@ -56,27 +56,6 @@ cc_library(
     ],
 )
 
-# cut_spine — translator driver. Emits LKR ops from the block tree via
-# the cut-spine schema (§4 of ND_TO_LKR_DESIGN.md).
-cc_library(
-    name = "cut_spine",
-    srcs = ["cut_spine.cpp"],
-    hdrs = ["cut_spine.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":block_tree",
-        ":emit_close",
-        ":sequent_shadow",
-        "//src/core:formula",
-        "//src/proof:ir",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/nd:ops",
-        "//src/proof/nd:verifier",
-        "//src/util:error",
-    ],
-)
-
 # intros — Stage 2 Phase 1 emitters: cut-free LKR right rules for the
 # ND introduction op family. Per CUT_MINIMAL_DESIGN.md §5. Phase 5a
 # retrofit: demand-aware short-circuits for AndIntro and IffIntro.
