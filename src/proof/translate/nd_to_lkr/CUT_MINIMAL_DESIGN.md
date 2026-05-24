@@ -71,7 +71,7 @@ this stronger guarantee:
   combining-elim cuts. The fewer cuts Stage 2 emits, the smaller Stage 3's
   job.
 
-### 1.4 Result-visibility invariant (policy α hard rule)
+### 1.3 Result-visibility invariant (policy α hard rule)
 
 **Invariant.** Every Phase 1–3 per-op emitter, when it emits LKR ops for
 an ND step k with derived formula F_k, must leave **NNF(F_k) visible at
@@ -86,10 +86,10 @@ other, and `emit_close` closes structurally — no Cut needed.
 The invariant has three concrete manifestations:
 
 - **Introductions** (Phase 1): when an intro op emits an LKR right rule
-  on principal `f_k_idx`, the entry at `f_k_idx` becomes NNF(F_k_intro)
-  or is decomposed into NNF(F_k_intro)'s top-level structure (e.g., Or
-  exposes both disjuncts adjacent). Recursive translation of premises
-  proceeds with the structure exposed.
+  on principal `f_k_idx`, the rule decomposes NNF(F_k) into its
+  immediate sub-formulas at adjacent positions (Or, Forall, Exists) or
+  into two new subgoals (And, IffIntro). Recursive descent on premises
+  sees the decomposed structure and continues.
 - **Projection elims** (Phase 2): a projection elim of step k (whose
   producer derives a compound F_producer) leaves NNF(F_k) visible at
   `f_k_idx` by emitting the *demand-driven* decomposition of
@@ -106,6 +106,71 @@ fallback is *not* "emit a Cut anyway." The fallback is "fix the spec":
 identify the missing case mathematically and extend the emitter. This
 keeps the (α) policy as a hard invariant rather than a default with
 silent overrides.
+
+### 1.4 Translator architecture: recursive descent on the derivation tree
+
+The (α) NotElim policy + the "cuts only on combining elims" claim
+together force a different control flow from the existing cut-spine
+translator. The mathematical reason: the existing translator's
+per-step Cut is BOTH a cut-elim work-item AND the SHARING MECHANISM
+for downstream consumers of step k (they find `NNF(¬F_k)` in the
+sequent via `step_to_neg_idx[k]` and close against it). Removing the
+per-step Cut breaks sharing — downstream consumers have no way to
+reference k's result without re-deriving it.
+
+**Decision (2026-05-24): unfold shares via recursive descent.** Each ND
+step referenced N times in the derivation DAG is re-translated N times
+in the LK tree. The LK proof's size is O(2^reuse_depth) worst case but
+its cut count is strictly bounded by the number of combining elims.
+This realizes the Prawitz correspondence on the *unfolded* derivation
+tree — the cleanest mathematical reading.
+
+**Control flow.** The dispatcher (Phase 5) is a recursive function:
+
+```
+translate_step(step_idx, shadow_state, position_for_F_k) -> emits LKR ops:
+   op = program[step_idx]
+   case INTROduction:
+     emit one LKR right rule on `position_for_F_k`
+     return post-state shadow(s) and per-premise position(s)
+     for each premise step:
+       recurse with the appropriate shadow + position
+   case PROJection_elim:
+     decompose the producer's translation demand-drivenly
+     recurse into producer with the demanded shape
+   case COMBining_elim:
+     emit Cut(F_major), recurse on LEFT with major-only,
+     recurse on RIGHT with NNF(¬F_major) carried + body to translate
+   case STRUCTural (Assume, Fix, ExistsElim opener, Qed, Let):
+     emit nothing; bind scope state into shadow if relevant
+     leaf cases (Assume, Fix) close the current goal via the in-scope
+     assumption's dual / eigenvar's binding
+```
+
+The recursion bottoms out at:
+- **`Assume`**: the assumed formula is in the sequent as `NNF(A)` (placed
+  by the enclosing IMPLIES/NOT/CLASSICAL_ABSURD intro's emission); the
+  current goal `F_k` (= `NNF(A)` for an Assume-derived step) is closed
+  against the dual `NNF(¬A)` (the principal entry of the enclosing
+  intro) via AxiomLit / `emit_close`.
+- **`Fix`**: not a derivation step; referenced only as a TermRef. The
+  enclosing ForallIntro emitter binds `shadow.lkr_term_for[fix_idx]`.
+- **`Use` / `SchemaInst` / `IotaElim` / `EqSubst` / `EqSym`**: cannot
+  occur — Stage 1's input gate guarantees their absence.
+
+**Per-op emitter contract** (Phases 1–3): each emitter handles ONE op,
+emits the corresponding LKR rule(s), updates the shadow, and returns
+per-premise positions for the dispatcher to recurse into. NO recursion
+inside the emitter — the dispatcher owns control flow. This makes
+Phase 1–3 unit-testable in isolation.
+
+**Block tree's reduced role.** The block_tree still captures SCOPE
+structure (which assumptions, eigenvars are in scope at each point),
+but its WALK semantics change: the dispatcher walks the derivation
+tree starting from `qed.derived`, not the block tree. The block_tree
+serves as a precomputed map `step_idx → enclosing_block_kind` so
+emitters can recover scope context (e.g., "this Assume step belongs to
+which IMPLIES block").
 
 ### 1.5 Soundness/completeness contracts (boundary discipline)
 
@@ -153,17 +218,17 @@ at most cosmetic edits:
 | File                       | Disposition                                       |
 |----------------------------|---------------------------------------------------|
 | `input_gate.{h,cpp}`       | **KEEP.** I-1/I-2/I-3 checks unchanged.           |
-| `block_tree.{h,cpp}`       | **KEEP.** OUTER/FORALL/IMPLIES/NOT/CLASSICAL_ABSURD/EXISTS_ELIM decomposition is exactly the scope structure Stage 2 needs. |
-| `sequent_shadow.h`         | **KEEP.** The shadow model (verifier-mirror, no soundness role) is correct for cut-minimal too. |
+| `block_tree.{h,cpp}`       | **KEEP, role reduced.** Block decomposition still computes scope-nesting structure, but the dispatcher no longer *walks* the block tree linearly. Instead, the block_tree becomes a precomputed `step_idx → enclosing_block_kind` lookup that emitters consult for scope context. |
+| `sequent_shadow.h`         | **KEEP.** The shadow model (verifier-mirror, no soundness role) is correct for cut-minimal too. Cut-minimal recursion clones shadows per branch (an LKR right rule that splits into two subgoals returns two shadow successors). |
 | `emit_close.{h,cpp}`       | **KEEP.** Dual-decomposition closer is generic over rule provenance; reused by every intro/projection emitter that bottoms out at AxiomLit, and by Phase 4's NOT/BottomElim/CLASSICAL_ABSURD closers (α policy). |
 | `output_gate.{h,cpp}`      | **KEEP.** LKRVerifier acceptance gate unchanged. |
-| `cut_spine.{h,cpp}`        | **DELETE in Phase 5.** Replaced by the split-by-phase emitters below. |
-| `intros.{h,cpp}`           | **NEW, Phase 1.** Emitters for and/or/implies/forall/exists/not/iff_intro + bottom_elim + ExcludedMiddle + Peirce. |
-| `projections.{h,cpp}`      | **NEW, Phase 2.** Emitters for and_elim_l/r, forall_elim, iff_elim_l/r, DoubleNegElim. |
-| `combining.{h,cpp}`        | **NEW, Phase 3.** Emitters for implies/or/exists_elim (Cut sites). |
-| `structural.{h,cpp}`       | **NEW, Phase 4.** Block-opener/closer threading (Assume/Fix/ExistsElim/Qed) + ClassicalAbsurd block + NOT/BottomElim closers (α: emit_close, no Cut). |
-| `dispatcher.{h,cpp}`       | **NEW, Phase 5.** Thin op-family dispatcher; orchestrates the block-tree walk and routes each FlatStep to intros/projections/combining and each block opener/closer to structural. |
-| `nd_to_lkr.{h,cpp}`        | **MINOR.** The Pass header / apply signature stays; the implementation calls dispatcher. |
+| `cut_spine.{h,cpp}`        | **DELETE in Phase 5.** Replaced by the split-by-phase emitters below + the new recursive dispatcher. |
+| `intros.{h,cpp}`           | **NEW, Phase 1.** Emitters for and/or/implies/forall/exists/iff_intro + ExcludedMiddle + Peirce. Per-op contract: emit one LKR right rule, mutate the shadow, return per-premise position(s) for the dispatcher to recurse into. |
+| `projections.{h,cpp}`      | **NEW, Phase 2.** Emitters for and_elim_l/r, forall_elim, iff_elim_l/r, DoubleNegElim. Demand-driven: recurses into the producer with the demanded shape. |
+| `combining.{h,cpp}`        | **NEW, Phase 3.** Emitters for implies/or/exists_elim (the only Cut sites). Each emits Cut(major) + carries the recursion into LEFT (major-only) and RIGHT (with NNF(¬major)). |
+| `structural.{h,cpp}`       | **NEW, Phase 4.** Leaf-case translations for Assume / Fix / ExistsElim (no logical emission; scope state binding); block-closer logic for NOT / BottomElim / CLASSICAL_ABSURD (emit_close on operand positions). |
+| `dispatcher.{h,cpp}`       | **NEW, Phase 5.** Recursive `translate_step` function. Routes by op-family to intros/projections/combining/structural emitters. Initiates the recursion at `qed.derived`. |
+| `nd_to_lkr.{h,cpp}`        | **MINOR.** Pass header / apply signature stays; implementation calls dispatcher. |
 
 The Q4 hard-cutover precedent from Stage 1: deletion of `cut_spine.{h,cpp}`
 happens in one commit at Phase 5, after Phases 1–4 are independently
@@ -184,28 +249,77 @@ mathematical detail is added to this doc as the phase opens.
 
 ## 5. Phase 1 — introductions (cut-free right rules)
 
+### 5.0 Per-op emitter contract (recursive-descent dispatch)
+
+Each Phase 1 emitter is invoked by the Phase 5 dispatcher when an
+intro op is reached during recursive descent on the derivation tree.
+The dispatcher arranges the inputs:
+
+```
+PRE:  shadow.entries[f_k_idx] = NNF(F_k), where F_k is the intro's
+      result formula. The dispatcher computes f_k_idx based on the
+      enclosing right-rule's prior emission (e.g., outer And split's
+      LEFT-subgoal-tail position).
+
+ACTION: emit ≥1 LKR right-rule op(s) into `out`, mutate `shadow` (or
+      return per-branch shadows for branching rules), and return
+      per-premise positions for the dispatcher to recurse into.
+
+POST: F_k's NNF structure has been decomposed by the right rule; the
+      premise formula(s) live at the returned position(s) ready for
+      recursive translation.
+
+NO RECURSION INSIDE THE EMITTER. The dispatcher owns control flow.
+```
+
+For non-branching intros (Or, Forall, Exists, single shadow returned).
+For branching intros (And, IffIntro), two shadows are returned. The
+dispatcher recurses into each in turn.
+
 ### 5.1 Per-op mathematical translation
 
 Let `S = shadow.entries` at the point an intro op fires; `f_k_idx` is the
-sequent position where the intro's *result* must land (typically the
-goal-side position for that subderivation).
-
-For each op, "the rule" is stated as a sequent-level transformation; the
-resulting LKR op stream realises that transformation.
+sequent position where the intro's *result* must land. For each op, "the
+rule" is stated as a sequent-level transformation; the resulting LKR op
+stream realises that transformation. The emitter's return value lists
+the per-premise positions the dispatcher will recurse into.
 
 #### 5.1.1 `AndIntro(a, b)` — result `A ∧ B`
 
+LKR's `And` is multiplicative: `Γ,φ` AND `Δ,θ ⊢ Γ,Δ,φ∧θ`. The
+translator must choose a partition (Γ, Δ) of the parent's non-principal
+entries. For cut-minimal recursive descent, both premises (π_a and
+π_b) may need *all* of the outer scope's accumulated entries
+(assumption duals, eigenvar bindings, etc.) — so a clean partition is
+not generally possible.
+
+**Strategy: full-context duplication.** Before emitting `And`, emit one
+`Weakening{γ_i}` per non-principal entry `γ_i` in the parent shadow,
+appending duplicates. Then `And{principal = f_k_idx, right_needs = …}`
+where `right_needs = [n .. 2n-1]` (the indices of the duplicated
+copies). LEFT receives the original entries + A; RIGHT receives the
+duplicate copies + B. Both branches see the full context.
+
 ```
-  S, …, A∧B, …    ↦    S, …, A, …    ∥    S, …, B, …
+  S, …, A∧B, …      (parent, n+1 entries, principal at f_k_idx)
+   ↓ Weakening × n  (duplicate each non-principal γ_i)
+  S, …, A∧B, …, S'    (2n+1 entries, S' = duplicates of S)
+   ↓ And{principal=f_k_idx, right_needs=[duplicate-indices]}
+  LEFT: S, A      ∥    RIGHT: S', B
 ```
 
-LKR emission: `And{principal = f_k_idx, left_partition = …}`. The
-multiplicative split is determined by which sequent entries each
-subderivation needs (Stage 2 will compute this from the block tree's
-data flow; the existing `emit_and_split` helper in `cut_spine.cpp` is
-reusable verbatim).
+Both `S` and `S'` are formula-equivalent to the parent's non-principal
+context. The cost is n Weakening ops per And-branching intro (and per
+IffIntro, which uses And under the hood). Polynomial in proof size.
 
-The two subgoals are then proved by recursively translating π_a and π_b.
+The dispatcher then recursively translates π_a under LEFT and π_b
+under RIGHT. The emitter returns `(left_shadow, right_shadow,
+left_premise_idx, right_premise_idx, position_a_in_left,
+position_b_in_right)` for the dispatcher to use.
+
+> The existing `emit_and_split` helper takes a `right_needs` parameter
+> matching this design. It is reusable verbatim; the new caller
+> computes `right_needs` as the full-duplicate index set.
 
 #### 5.1.2 `OrIntroL(a, b_formula)` — result `A ∨ B`
 
@@ -471,13 +585,23 @@ witness. Per-phase test files are added as each phase opens.
   (Hauptsatz). Stage 2 is "cut-minimal," not "cut-free."
 - **Non-goal.** Performance optimisation of the translator. Correctness
   + completeness first.
+- **Non-goal.** Bounding LKR proof size. The recursive-descent unfolding
+  of shared ND steps is worst-case exponential in reuse depth (§1.5).
+  Acceptable because (a) the math is cleanest this way, (b) Stage 3
+  receives fewer cuts to eliminate, and (c) corpus blowup is a
+  post-implementation concern, not a design driver.
+- **Risk.** ZFC proofs with deep step-reuse may produce LKR programs too
+  large to materialize. If that becomes a real blocker, the response is
+  to *strengthen Stage 1* — Stage 1 could expose more reuse-via-lemma,
+  cutting reuse at the ND level so Stage 2's tree is naturally smaller.
+  Stage 2 itself stays mathematically pure.
 - **Risk.** Cut-minimal translation of projection elims requires
-  demand-driven analysis (Phase 2). If we discover this needs the full
-  ND derivation tree's data-flow rather than the linear instr stream,
-  Phase 2's design may require an additional precomputation pass before
-  Phase 2's per-op emitters run.
+  demand-driven analysis (Phase 2). The recursive descent makes this
+  natural — the dispatcher recurses into the producer with the demanded
+  shape — but the *demand calculation* needs careful spec'ing in Phase 2.
 - **Risk.** Classical ops (DoubleNegElim etc.) are well-defined in LK
-  but their cut-minimal translation needs care. Phase 4 specifies.
+  but their cut-minimal translation needs care. Phase 2 (DoubleNegElim)
+  and Phase 1 (ExcludedMiddle, Peirce) specify per-op.
 
 ---
 
