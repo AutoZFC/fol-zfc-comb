@@ -41,7 +41,7 @@ struct Fix {
 //
 // `resolved`, if set, supplies the assumed formula directly and bypasses
 // AST parsing. This path exists for translator-synthesized Assume ops
-// (e.g., axiom_rewrap's boundary `assume H`) where the formula is already
+// (e.g., nd_internalize's boundary `assume H`) where the formula is already
 // a closed sentence built via FormulaBuilder and has no source-level
 // var-name dependencies. Mutually exclusive with `formula` in practice:
 // lowering sets `formula` (AST-deferred); translators set `resolved`.

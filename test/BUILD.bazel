@@ -217,27 +217,8 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "axiom_rewrap_test",
-    srcs = ["axiom_rewrap_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/nd:lowering",
-        "//src/proof/nd:verifier",
-        "//src/proof/translate/axiom_rewrap:axiom_rewrap",
-        "//src/proof/translate/axiom_rewrap:theorem_axioms",
-        "//src/proof/translate/lkr_to_comb",
-        "//src/proof/translate/nd_to_lkr",
-        "//src/runtime",
-    ],
-)
-
-# Stage 1 (nd_internalize) tests:
-#   Phase 1 — compute_transitive_facts on the typed IR
-#   Phase 2 — schema_macro (closed-instance replacement)
+# Stage 1 (nd_internalize) tests — Phases 1–6 on the typed IR.
+# Replaces the deleted axiom_rewrap_test (Q4 hard cutover).
 cc_test(
     name = "nd_internalize_test",
     srcs = ["nd_internalize_test.cpp"],
@@ -249,6 +230,7 @@ cc_test(
         "//src/proof/nd:ops",
         "//src/proof/nd:verifier",
         "//src/proof/translate:theorem_facts",
+        "//src/proof/translate/nd_internalize:apply",
         "//src/proof/translate/nd_internalize:body",
         "//src/proof/translate/nd_internalize:prelude",
         "//src/proof/translate/nd_internalize:schema_macro",
@@ -259,7 +241,6 @@ cc_test(
 test_suite(
     name = "all_tests",
     tests = [
-        ":axiom_rewrap_test",
         ":nd_internalize_test",
         ":comb_test",
         ":core_test",

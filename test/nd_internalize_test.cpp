@@ -16,6 +16,7 @@
 #include "src/proof/nd/ops.h"
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_internalize/body.h"
 #include "src/proof/translate/nd_internalize/prelude.h"
 #include "src/proof/translate/nd_internalize/schema_macro.h"
@@ -38,6 +39,8 @@ using logic::proof::translate::nd_internalize::PreludeResult;
 using logic::proof::translate::nd_internalize::emit_prelude;
 using logic::proof::translate::nd_internalize::BodyEmitResult;
 using logic::proof::translate::nd_internalize::emit_body_with_remap;
+using logic::proof::translate::nd_internalize::ApplyResult;
+using logic::proof::translate::nd_internalize::apply;
 
 namespace {
 
@@ -1354,6 +1357,230 @@ void test_body_with_quantifiers() {
     if (!vr.ok()) std::cerr << "verify: " << vr.error().to_string() << "\n";
 }
 
+// =========================================================================
+// Phase 6 — apply (end-to-end orchestrator)
+// =========================================================================
+//
+// Identity case (no facts): wrapped_goal == original φ, no
+// ImpliesIntro. Output gate accepts.
+void test_apply_identity_no_facts() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim p_self: p -> p
+        proof p_self:
+            h = assume p
+            h2 = implies_intro h
+            qed h2
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> input = lower_or_die(parsed.value().proofs[0], rt.context());
+    FormulaHandle goal = rt.context().find_claim("p_self").value().get().root();
+
+    auto r = apply(rt.context(), input, goal, TheoremFactsMap{});
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << "apply: " << r.error().to_string() << "\n"; return; }
+
+    // facts empty → wrapped_goal's formula equals the original goal.
+    EXPECT_TRUE(r.value().facts.empty());
+    EXPECT_EQ(r.value().wrapped_goal.get().root(), goal);
+}
+
+// =========================================================================
+// Single-axiom wrap: facts = {a_ax}, wrapped_goal = a_pred → a_pred.
+void test_apply_single_axiom() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        claim derive_a: a_pred
+        proof derive_a:
+            h = use a_ax
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> input = lower_or_die(parsed.value().proofs[0], rt.context());
+    FormulaHandle goal = rt.context().find_claim("derive_a").value().get().root();
+    SentenceHandle a_sh = rt.context().find_known("a_ax").value();
+
+    auto r = apply(rt.context(), input, goal, TheoremFactsMap{});
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << "apply: " << r.error().to_string() << "\n"; return; }
+
+    EXPECT_EQ(r.value().facts.size(), size_t{1});
+    EXPECT_EQ(r.value().facts[0], a_sh);
+    // wrapped_goal's formula is an Implies whose left = a_pred, right = a_pred.
+    const auto& f = r.value().wrapped_goal.get().root().get();
+    EXPECT_TRUE(f.is_compound());
+    if (f.is_compound()) {
+        EXPECT_TRUE(f.as_compound().op == Op::Implies);
+    }
+}
+
+// =========================================================================
+// Theorem citation: previously proved t1 (with facts {a_ax}) gets cited
+// by a new proof; apply pulls in the transitive closure {a_ax, t1}.
+void test_apply_theorem_with_axioms() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        claim t1: a_pred
+        proof t1:
+            h = use a_ax
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+
+    auto t1_claim = rt.context().find_claim("t1").value();
+    rt.context().add_theorem("t1", t1_claim);
+    SentenceHandle t1_sh = rt.context().find_known("t1").value();
+    SentenceHandle a_sh  = rt.context().find_known("a_ax").value();
+
+    // Populate facts(t1) in the map (mirrors what the runner would do
+    // after Stage 1 ran on t1's proof itself).
+    TheoremFactsMap thm_facts;
+    thm_facts.put(t1_sh, {a_sh});
+
+    auto parsed2 = rt.load_with_proofs(R"(
+        claim derive_a_via_t1: a_pred
+        proof derive_a_via_t1:
+            h = use t1
+            qed h
+    )");
+    if (!parsed2.ok()) { ++g_failed; return; }
+    Program<nd::Instr> input = lower_or_die(parsed2.value().proofs[0], rt.context());
+    // Note: t1 and a_ax share the same formula (a_pred), so they alias
+    // to the same SentenceHandle. closure dedups to one fact in this
+    // pathological case. wrap structure is still valid.
+    FormulaHandle goal = rt.context().find_claim("derive_a_via_t1").value().get().root();
+
+    auto r = apply(rt.context(), input, goal, thm_facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << "apply: " << r.error().to_string() << "\n"; return; }
+    // 1 fact (the shared SH).
+    EXPECT_EQ(r.value().facts.size(), size_t{1});
+}
+
+// =========================================================================
+// Theorem chain with structurally-distinct formulas. t2 (cites t1)
+// gets wrapped; transitive closure = {a_ax, b_to_c, c_to_d, t1, t2}.
+void test_apply_theorem_chain_distinct() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred -> b_pred
+        axiom b_to_c: b_pred -> c_pred
+        axiom c_to_d: c_pred -> d_pred
+        claim t1: a_pred -> c_pred
+        proof t1:
+            h_a = assume a_pred
+            h_ab = use a_ax
+            h_b = implies_elim h_ab, h_a
+            h_bc = use b_to_c
+            h_c = implies_elim h_bc, h_b
+            h_impl = implies_intro h_c
+            qed h_impl
+        claim t2: a_pred -> d_pred
+        proof t2:
+            h_a = assume a_pred
+            h_t1 = use t1
+            h_c = implies_elim h_t1, h_a
+            h_cd = use c_to_d
+            h_d = implies_elim h_cd, h_c
+            h_impl = implies_intro h_d
+            qed h_impl
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    auto t1_c = rt.context().find_claim("t1").value();
+    auto t2_c = rt.context().find_claim("t2").value();
+    rt.context().add_theorem("t1", t1_c);
+    rt.context().add_theorem("t2", t2_c);
+
+    SentenceHandle sh_a   = rt.context().find_known("a_ax").value();
+    SentenceHandle sh_bc  = rt.context().find_known("b_to_c").value();
+    SentenceHandle sh_cd  = rt.context().find_known("c_to_d").value();
+    SentenceHandle sh_t1  = rt.context().find_known("t1").value();
+
+    TheoremFactsMap thm_facts;
+    thm_facts.put(sh_t1, {sh_a, sh_bc});
+
+    auto parsed2 = rt.load_with_proofs(R"(
+        claim use_t2: a_pred -> d_pred
+        proof use_t2:
+            h = use t2
+            qed h
+    )");
+    if (!parsed2.ok()) { ++g_failed; return; }
+
+    // t2's facts in the map.
+    SentenceHandle sh_t2 = rt.context().find_known("t2").value();
+    thm_facts.put(sh_t2, {sh_a, sh_bc, sh_cd, sh_t1});
+
+    Program<nd::Instr> input = lower_or_die(parsed2.value().proofs[0], rt.context());
+    FormulaHandle goal = rt.context().find_claim("use_t2").value().get().root();
+
+    auto r = apply(rt.context(), input, goal, thm_facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << "apply: " << r.error().to_string() << "\n"; return; }
+    EXPECT_EQ(r.value().facts.size(), size_t{5});
+}
+
+// =========================================================================
+// Schema in body: the open-instance ForallElim chain composes through
+// apply; wrapped goal verifies.
+void test_apply_with_schema() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_inst: forall x. (q(x) -> q(x))
+        proof use_inst:
+            h = schema_inst unary_self_impl { P: \y. q(y) }
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> input = lower_or_die(parsed.value().proofs[0], rt.context());
+    FormulaHandle goal = rt.context().find_claim("use_inst").value().get().root();
+
+    auto r = apply(rt.context(), input, goal, TheoremFactsMap{});
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) { std::cerr << "apply: " << r.error().to_string() << "\n"; return; }
+    // The schema instance is the single fact (closed φᵢ = goal itself).
+    EXPECT_EQ(r.value().facts.size(), size_t{1});
+    EXPECT_EQ(r.value().facts[0].get().root(), goal);
+}
+
+// =========================================================================
+// Output gate: confirm inner-pass errors propagate. Use the
+// compute_transitive_facts missing-theorem error path — a proof cites
+// a theorem T, but T is absent from the TheoremFactsMap. apply must
+// return an Error naming the responsible sub-pass.
+void test_apply_propagates_inner_error() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim t_missing: p
+        proof t_missing:
+            h = assume p
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+
+    // Promote t_missing as a theorem so the citation in the next proof
+    // can lower; but DELIBERATELY omit it from the map.
+    auto t_c = rt.context().find_claim("t_missing").value();
+    rt.context().add_theorem("t_missing", t_c);
+
+    auto parsed2 = rt.load_with_proofs(R"(
+        claim use_missing: p
+        proof use_missing:
+            h = use t_missing
+            qed h
+    )");
+    if (!parsed2.ok()) { ++g_failed; return; }
+    Program<nd::Instr> input = lower_or_die(parsed2.value().proofs[0], rt.context());
+    FormulaHandle goal = rt.context().find_claim("use_missing").value().get().root();
+
+    TheoremFactsMap empty_map;        // does NOT contain t_missing
+    auto r = apply(rt.context(), input, goal, empty_map);
+    EXPECT_ERR(r);
+}
+
 }  // namespace
 
 int main() {
@@ -1396,6 +1623,14 @@ int main() {
     test_body_schema_inst_rejected();
     test_body_unknown_use_rejected();
     test_body_with_quantifiers();
+
+    // Phase 6: apply (end-to-end orchestrator + output gate)
+    test_apply_identity_no_facts();
+    test_apply_single_axiom();
+    test_apply_theorem_with_axioms();
+    test_apply_theorem_chain_distinct();
+    test_apply_with_schema();
+    test_apply_propagates_inner_error();
 
     std::cerr << "nd_internalize_test: " << g_passed
               << " passed, " << g_failed << " failed\n";

@@ -52,3 +52,25 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# Phase 6: apply — end-to-end Stage 1 orchestrator. Composes
+# schema_macro → compute_transitive_facts → emit_prelude →
+# emit_body_with_remap → postlude. Output gate runs NDVerifier on the
+# wrapped proof before returning.
+cc_library(
+    name = "apply",
+    srcs = ["apply.cpp"],
+    hdrs = ["apply.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":body",
+        ":prelude",
+        ":schema_macro",
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate:theorem_facts",
+        "//src/util:error",
+    ],
+)

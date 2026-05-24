@@ -1,4 +1,4 @@
-// comb_checker — runs the full ND → iota_elim → axiom_rewrap →
+// comb_checker — runs the full ND → iota_elim → nd_internalize →
 // NDtoLKR → LKRtoComb pipeline per theorem and reports per-theorem
 // success/failure.
 //
@@ -18,11 +18,11 @@
 #include "src/library/library.h"
 #include "src/parser/parser.h"
 #include "src/proof/nd/lowering.h"
-#include "src/proof/translate/axiom_rewrap/axiom_rewrap.h"
-#include "src/proof/translate/axiom_rewrap/theorem_axioms.h"
 #include "src/proof/translate/iota_elim/eliminate_iota.h"
 #include "src/proof/translate/lkr_to_comb/lkr_to_comb.h"
+#include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
+#include "src/proof/translate/theorem_facts.h"
 #include "src/runtime/runtime.h"
 
 #include <cstdlib>
@@ -35,7 +35,8 @@
 
 using namespace logic;
 using namespace logic::proof;
-namespace ar  = logic::proof::translate::axiom_rewrap;
+namespace tr  = logic::proof::translate;
+namespace ni  = logic::proof::translate::nd_internalize;
 namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
 namespace lc  = logic::proof::translate::lkr_to_comb;
@@ -71,7 +72,7 @@ std::string load_headers(Runtime& rt,
 void process_proof_file(
     Runtime&                  rt,
     const std::string&        proof_path,
-    ar::TheoremFactsMap&      theorem_facts,
+    tr::TheoremFactsMap&      theorem_facts,
     lc::LemmaCombProofs&      lemma_lkr_programs,
     std::vector<StageResult>& results)
 {
@@ -135,26 +136,27 @@ void process_proof_file(
             prog = std::move(r).unwrap();
         }
 
-        auto fc_r = ar::compute_transitive_facts(
-            prog, rt.context(), theorem_facts);
-        if (!fc_r.ok()) {
-            results.push_back({proof_path, name, "compute_facts",
-                              fc_r.error().to_string()});
-            continue;
-        }
-        theorem_facts.put(name, fc_r.value());
-
-        ar::AxiomRewrap rewrap(rt.context(), goal, theorem_facts);
-        auto rwr_r = rewrap.apply(prog);
-        if (!rwr_r.ok()) {
-            fail("axiom_rewrap", rwr_r.error().to_string());
+        // Stage 1 (nd_internalize::apply): runs schema_macro,
+        // compute_transitive_facts, emit_prelude, emit_body_with_remap,
+        // and the NDVerifier output gate in one orchestrated pass.
+        auto ni_r = ni::apply(rt.context(), prog, goal, theorem_facts);
+        if (!ni_r.ok()) {
+            fail("nd_internalize", ni_r.error().to_string());
             results.push_back({proof_path, name, first_stage, first_detail});
             continue;
         }
-        FormulaHandle wrapped_goal = rwr_r.value().wrapped_goal;
+
+        // Register this theorem's facts under its own SentenceHandle so
+        // any subsequent citer's compute_transitive_facts can find them.
+        auto sh_self = rt.context().find_known(name);
+        if (sh_self.has_value()) {
+            theorem_facts.put(sh_self.value(), ni_r.value().facts);
+        }
+
+        FormulaHandle wrapped_goal = ni_r.value().wrapped_goal.get().root();
 
         ntl::NDtoLKR ndl(rt.context(), wrapped_goal);
-        auto lkr_r = ndl.apply(rwr_r.value().proof);
+        auto lkr_r = ndl.apply(ni_r.value().proof);
         if (!lkr_r.ok()) {
             fail("nd_to_lkr", lkr_r.error().to_string());
             results.push_back({proof_path, name, first_stage, first_detail});
@@ -229,7 +231,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    ar::TheoremFactsMap   theorem_facts;
+    tr::TheoremFactsMap   theorem_facts;
     lc::LemmaCombProofs   lemma_lkr_programs;
     std::vector<StageResult> results;
 

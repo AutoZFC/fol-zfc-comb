@@ -16,8 +16,9 @@ constexpr uint32_t kInvalid = static_cast<uint32_t>(-1);
 //
 // Duplicate of schema_macro.cpp's private remap_refs by design (math-
 // first phase boundary: Phase 5 is local to body emission). The two
-// will be unified into a shared internal helper as part of the post-
-// Stage-1 cleanup once axiom_rewrap is deleted.
+// can be unified into a shared internal helper as part of a post-
+// Stage-1 cleanup (axiom_rewrap's third copy has already been deleted
+// by Q4 hard cutover).
 nd::Instr remap_refs(const nd::Instr& instr, const std::vector<uint32_t>& remap) {
     auto S = [&](StepRef r) { return StepRef{remap[r.idx]}; };
     auto T = [&](TermRef r) { return TermRef{remap[r.idx]}; };
