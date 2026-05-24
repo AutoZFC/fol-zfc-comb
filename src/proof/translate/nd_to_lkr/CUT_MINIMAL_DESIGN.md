@@ -621,15 +621,92 @@ emit_exists_elim(op, shadow, target_pos)  → ExistsElimSite
 **Phase 3 tests.** Unit-level: descriptor field-mapping per op
 variant. End-to-end LKRVerifier acceptance at Phase 5.
 
-### 6.3 Phase 4 — structural (assume, fix, ExistsElim, Qed, classical)
+### 6.3 Phase 4 — structural (Fix, Assume, ExistsElim, Qed; closers; descriptor-only)
 
-Threads the block-tree's scope structure into the per-op dispatcher.
+**Math.** Phase 4 captures the scope-manipulation and closer machinery
+that the dispatcher (Phase 5) needs to thread the block-tree's
+structure. Same data-only convention as Phases 2 and 3: emitters
+project the op into a descriptor; Phase 5 consumes.
 
-Includes the open NotElim / BottomElim closer questions from §5.1.4 and
-§5.1.5, plus the classical-block treatment (CLASSICAL_ABSURD,
-DoubleNegElim, ExcludedMiddle, Peirce).
+**Per-op contracts** (all descriptor-only; no LKR ops emitted):
 
-To be specified before Phase 4 opens.
+**Openers** (scope-manipulators):
+
+```
+AssumeOpenSite   { assume_step: StepRef, formula: FormulaHandle }
+   Sets up an assumption scope. The enclosing IMPLIES/NOT/
+   CLASSICAL_ABSURD intro emitter places NNF(¬formula) at a
+   specific principal position; Phase 5 records assume_step →
+   that position so references to the assumption (= leaf cases)
+   can close against the dual.
+
+FixOpenSite      { fix_step: StepRef, eigen: var_index }
+   Records the eigenvariable bound by Fix. Phase 5 inserts
+   shadow.lkr_term_for[fix_step.idx] = {lkr_ref, Term::fixed(eigen)}.
+   The trace's term_env[fix_step.idx] provides the eigen.
+
+ExistsElimOpenSite { exists_elim_step: StepRef,
+                     formula_step:   StepRef,
+                     eigen:          var_index }
+   Records the EXISTS_ELIM block opener. Phase 5 emits the
+   combining-elim Cut on the existential (per Phase 3
+   ExistsElimSite) and binds the eigen for the body.
+```
+
+**Closers** (emit_close drivers per α policy):
+
+```
+NotIntroCloseSite      { not_intro_step: StepRef,
+                         neg_step:       StepRef,
+                         formula_step:   StepRef }
+   NOT-block closer. Phase 5 emits emit_close on the LKR sequent
+   positions of NNF(F_neg_step) and NNF(F_formula_step) — by the
+   result-visibility invariant, both are visible after the body's
+   translation.
+
+BottomElimCloseSite    { bottom_elim_step: StepRef,
+                         neg_step:         StepRef,
+                         formula_step:     StepRef,
+                         target_formula:   StepRef }
+   ⊥-elim: discharges a contradiction (via the NotElim ghost at
+   bottom_elim_step.bottom) and the surrounding goal needs
+   target_formula. Phase 5 emits emit_close on the operands.
+
+ClassicalAbsurdCloseSite { absurd_step: StepRef,
+                           neg_step:    StepRef,
+                           formula_step: StepRef }
+   CLASSICAL_ABSURD-block closer (assume ¬A, derive ⊥, conclude A).
+   Mechanically identical to NotIntro at the LKR level — emit_close
+   on the operands.
+```
+
+**Leaf case** (Assume reference in recursive descent):
+
+```
+AssumeLeafSite { assume_step: StepRef, target_pos: size_t }
+   When the recursion lands on a reference to an Assume step (e.g.,
+   the body of an IMPLIES block uses the assumed A in modus
+   ponens), the dispatcher emits emit_close between target_pos
+   (where the consumer expected A) and the previously-recorded
+   dual position (where NNF(¬A) lives).
+```
+
+**Entry point**:
+
+```
+QedSite { qed_step: StepRef, derived_step: StepRef }
+   The OUTER block's Qed. derived_step is the proof's conclusion —
+   the dispatcher's recursive-descent entry point.
+```
+
+**NotElim is NOT in Phase 4 either** (per α policy: no-emit, always).
+It's a "ghost" op consumed by the enclosing closer's descriptor (its
+operands feed the NotIntro/BottomElim/ClassicalAbsurd close sites).
+
+**Phase 4 tests.** Unit-level: each emitter's descriptor field-mapping
++ closer ops' NotElim-operand extraction (the closer's `bottom` field
+points to a NotElim step in the program; the emitter dereferences and
+extracts operands).
 
 ### 6.4 Phase 5 — apply orchestrator + hard cutover
 

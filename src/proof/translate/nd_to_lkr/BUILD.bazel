@@ -148,6 +148,24 @@ cc_library(
     ],
 )
 
+# structural — Stage 2 Phase 4 emitters: scope opener/closer + leaf
+# descriptors. No LKR ops emitted; Phase 5 dispatches.
+cc_library(
+    name = "structural",
+    srcs = ["structural.cpp"],
+    hdrs = ["structural.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs LKRVerifier on emitted programs. Translator is not
 # trusted; soundness rests on this gate.
 cc_library(
