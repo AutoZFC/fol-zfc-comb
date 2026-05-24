@@ -77,6 +77,26 @@ cc_library(
     ],
 )
 
+# intros — Stage 2 Phase 1 emitters: cut-free LKR right rules for the
+# ND introduction op family. Per CUT_MINIMAL_DESIGN.md §5.
+cc_library(
+    name = "intros",
+    srcs = ["intros.cpp"],
+    hdrs = ["intros.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":emit_close",
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs LKRVerifier on emitted programs. Translator is not
 # trusted; soundness rests on this gate.
 cc_library(

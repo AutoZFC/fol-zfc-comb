@@ -82,6 +82,24 @@ cc_test(
 )
 
 cc_test(
+    name = "cut_minimal_intros_test",
+    srcs = ["cut_minimal_intros_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof:runner",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr:verifier",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/nd_to_lkr:intros",
+        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "nd_to_lkr_test",
     srcs = ["nd_to_lkr_test.cpp"],
     deps = [
