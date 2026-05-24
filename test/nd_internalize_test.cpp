@@ -3,11 +3,12 @@
 // Phase 1 (theorem_facts.h):
 //   compute_transitive_facts on the typed IR
 //
-// Phase 2 (nd_internalize/schema_macro.h):
-//   replaces SchemaInst with Use(SH(φᵢ)), closed-instance only
+// Phase 2/3 (nd_internalize/schema_macro.h):
+//   replaces SchemaInst with Use(SH(φᵢ)) (closed) or
+//   Use(SH(closed_φ))+ForallElim chain (open instance, Q1b/α)
 //
-// Covers facts(P) computation, schema macro semantics, and the
-// soundness checks each phase commits to at its boundary.
+// Phase 4 (nd_internalize/prelude.h):
+//   builds the Assume(H) + and_elim chain that opens the wrapped proof
 
 #include "src/core/formula.h"
 #include "src/parser/parser.h"
@@ -15,6 +16,7 @@
 #include "src/proof/nd/ops.h"
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_internalize/prelude.h"
 #include "src/proof/translate/nd_internalize/schema_macro.h"
 #include "src/proof/translate/theorem_facts.h"
 #include "src/runtime/runtime.h"
@@ -31,6 +33,8 @@ using logic::proof::translate::TheoremFactsMap;
 using logic::proof::translate::compute_transitive_facts;
 using logic::proof::translate::nd_internalize::SchemaMacroResult;
 using logic::proof::translate::nd_internalize::schema_macro;
+using logic::proof::translate::nd_internalize::PreludeResult;
+using logic::proof::translate::nd_internalize::emit_prelude;
 
 namespace {
 
@@ -816,6 +820,203 @@ void test_macro_output_verifies() {
     }
 }
 
+// =========================================================================
+// Phase 4 — emit_prelude
+// =========================================================================
+//
+// Helper: register n distinct axioms a0..a_{n-1} on a fresh Runtime
+// and return their SentenceHandles in declaration order (which equals
+// registration order, which equals SentenceHandle.id() order — so the
+// returned vector matches what compute_transitive_facts would hand
+// emit_prelude). Uses distinct nullary predicate names so each formula
+// is structurally distinct (no aliasing).
+std::vector<SentenceHandle> setup_n_axioms(Runtime& rt, size_t n) {
+    std::string src;
+    for (size_t i = 0; i < n; ++i) {
+        src += "axiom a" + std::to_string(i) + ": p" + std::to_string(i) + "\n";
+    }
+    if (!rt.load(src).ok()) {
+        std::cerr << "setup_n_axioms: load failed\n";
+        std::abort();
+    }
+    std::vector<SentenceHandle> out;
+    for (size_t i = 0; i < n; ++i) {
+        auto sh = rt.context().find_known("a" + std::to_string(i));
+        if (!sh.has_value()) { std::cerr << "setup: not found\n"; std::abort(); }
+        out.push_back(sh.value());
+    }
+    return out;
+}
+
+// =========================================================================
+// Phase 4 Test: n = 0 → empty prelude, invalid H, empty table.
+// =========================================================================
+void test_prelude_empty() {
+    Runtime rt;
+    auto r = emit_prelude(rt.context(), {});
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+    EXPECT_TRUE(r.value().instrs.empty());
+    EXPECT_TRUE(!r.value().H.valid());
+    EXPECT_TRUE(r.value().fact_step_table.empty());
+}
+
+// =========================================================================
+// Phase 4 Test: n = 1 → one Assume op; fact's StepRef is {0}.
+// H = φ_{F₁} directly (no AND).
+// =========================================================================
+void test_prelude_n1() {
+    Runtime rt;
+    auto facts = setup_n_axioms(rt, 1);
+
+    auto r = emit_prelude(rt.context(), facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(r.value().instrs.size(), size_t{1});
+    EXPECT_TRUE(std::holds_alternative<nd::Assume>(r.value().instrs[0]));
+    EXPECT_TRUE(r.value().H.valid());
+
+    // H's formula equals φ_{F₁}'s formula.
+    EXPECT_EQ(r.value().H.get().root(), facts[0].get().root());
+
+    EXPECT_EQ(r.value().fact_step_table.size(), size_t{1});
+    EXPECT_EQ(r.value().fact_step_table.at(facts[0]).idx, uint32_t{0});
+}
+
+// =========================================================================
+// Phase 4 Test: n = 2 → Assume + AndElimL + AndElimR; 3 ops.
+//   [0] Assume(H = φ_1 ∧ φ_2)
+//   [1] AndElimL(h)         → φ_1   ← F_1 extract (h_1)
+//   [2] AndElimR(h)         → φ_2   ← F_2 extract
+// =========================================================================
+void test_prelude_n2() {
+    Runtime rt;
+    auto facts = setup_n_axioms(rt, 2);
+
+    auto r = emit_prelude(rt.context(), facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(r.value().instrs.size(), size_t{3});       // 2n - 1
+    EXPECT_TRUE(std::holds_alternative<nd::Assume>(r.value().instrs[0]));
+    EXPECT_TRUE(std::holds_alternative<nd::AndElimL>(r.value().instrs[1]));
+    EXPECT_TRUE(std::holds_alternative<nd::AndElimR>(r.value().instrs[2]));
+
+    // h_1 (= AndElimL of h) at index 1 holds φ_1.
+    EXPECT_EQ(r.value().fact_step_table.at(facts[0]).idx, uint32_t{1});
+    // AndElimR(h) at index 2 holds φ_2.
+    EXPECT_EQ(r.value().fact_step_table.at(facts[1]).idx, uint32_t{2});
+}
+
+// =========================================================================
+// Phase 4 Test: n = 4 → full chain shape; 7 ops.
+//
+//   [0] Assume(H = (((φ_1 ∧ φ_2) ∧ φ_3) ∧ φ_4))   = h = h_4
+//   [1] AndElimL(h_4)                              = h_3
+//   [2] AndElimL(h_3)                              = h_2
+//   [3] AndElimL(h_2)                              = h_1 = φ_1   ← F_1 extract
+//   [4] AndElimR(h_4)                              = φ_4         ← F_4 extract
+//   [5] AndElimR(h_3)                              = φ_3         ← F_3 extract
+//   [6] AndElimR(h_2)                              = φ_2         ← F_2 extract
+// =========================================================================
+void test_prelude_n4_shape_and_table() {
+    Runtime rt;
+    auto facts = setup_n_axioms(rt, 4);
+
+    auto r = emit_prelude(rt.context(), facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(r.value().instrs.size(), size_t{7});       // 2n - 1
+    EXPECT_TRUE(std::holds_alternative<nd::Assume>(r.value().instrs[0]));
+    for (size_t i = 1; i <= 3; ++i) {
+        EXPECT_TRUE(std::holds_alternative<nd::AndElimL>(r.value().instrs[i]));
+    }
+    for (size_t i = 4; i <= 6; ++i) {
+        EXPECT_TRUE(std::holds_alternative<nd::AndElimR>(r.value().instrs[i]));
+    }
+
+    EXPECT_EQ(r.value().fact_step_table.at(facts[0]).idx, uint32_t{3});
+    EXPECT_EQ(r.value().fact_step_table.at(facts[1]).idx, uint32_t{6});
+    EXPECT_EQ(r.value().fact_step_table.at(facts[2]).idx, uint32_t{5});
+    EXPECT_EQ(r.value().fact_step_table.at(facts[3]).idx, uint32_t{4});
+}
+
+// =========================================================================
+// Phase 4 Test: AndElimL chain links correctly (each op refers to the
+// previous step's index). Concrete check on the n=4 case:
+//   AndElimL.of for [1] = StepRef{0}
+//   AndElimL.of for [2] = StepRef{1}
+//   AndElimL.of for [3] = StepRef{2}
+//   AndElimR.of for [4] = StepRef{0}   (h_4)
+//   AndElimR.of for [5] = StepRef{1}   (h_3)
+//   AndElimR.of for [6] = StepRef{2}   (h_2)
+// =========================================================================
+void test_prelude_n4_link_indices() {
+    Runtime rt;
+    auto facts = setup_n_axioms(rt, 4);
+
+    auto r = emit_prelude(rt.context(), facts);
+    if (!r.ok()) { ++g_failed; return; }
+    const auto& instrs = r.value().instrs;
+
+    auto andl = [&](size_t at, uint32_t of) {
+        const auto* op = std::get_if<nd::AndElimL>(&instrs[at]);
+        EXPECT_TRUE(op != nullptr);
+        if (op) EXPECT_EQ(op->of.idx, of);
+    };
+    auto andr = [&](size_t at, uint32_t of) {
+        const auto* op = std::get_if<nd::AndElimR>(&instrs[at]);
+        EXPECT_TRUE(op != nullptr);
+        if (op) EXPECT_EQ(op->of.idx, of);
+    };
+    andl(1, 0); andl(2, 1); andl(3, 2);
+    andr(4, 0); andr(5, 1); andr(6, 2);
+}
+
+// =========================================================================
+// Phase 4 Test: end-to-end — synthesise a tiny proof that uses the
+// prelude to derive an axiom from H, then qed. NDVerifier accepts.
+// Wrapped goal = H → φ_{F₁} where H = φ_{F₁} ∧ φ_{F₂}.
+// =========================================================================
+void test_prelude_synthetic_proof_verifies() {
+    Runtime rt;
+    auto facts = setup_n_axioms(rt, 2);
+
+    auto r = emit_prelude(rt.context(), facts);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    // Build a proof: prelude + ImpliesIntro(F_1's extract step) + Qed.
+    Program<nd::Instr> prog;
+    prog.claim_name = "wrapped_F1";
+    for (const auto& op : r.value().instrs) prog.instrs.push_back(op);
+
+    nd::ImpliesIntro ii{};
+    ii.conclusion = r.value().fact_step_table.at(facts[0]);
+    uint32_t ii_idx = static_cast<uint32_t>(prog.instrs.size());
+    prog.instrs.emplace_back(nd::Instr{std::move(ii)});
+
+    nd::Qed q{};
+    q.derived = StepRef{ii_idx};
+    prog.instrs.emplace_back(nd::Instr{std::move(q)});
+
+    // The wrapped_goal = H → φ_{F₁}.
+    FormulaBuilder builder(rt.context());
+    FormulaHandle wrapped = builder.make_implies(
+        r.value().H.get().root(),
+        facts[0].get().root());
+
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = prog;
+    auto vr = v.verify(rt.context(), wrapped, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "synthetic-prelude verify failed: " << vr.error().to_string() << "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -841,6 +1042,14 @@ int main() {
     test_macro_open_instance_one_fixed();
     test_macro_open_instance_two_fixed();
     test_macro_mixed_closed_and_open();
+
+    // Phase 4: emit_prelude (Assume(H) + and_elim chain)
+    test_prelude_empty();
+    test_prelude_n1();
+    test_prelude_n2();
+    test_prelude_n4_shape_and_table();
+    test_prelude_n4_link_indices();
+    test_prelude_synthetic_proof_verifies();
 
     std::cerr << "nd_internalize_test: " << g_passed
               << " passed, " << g_failed << " failed\n";
