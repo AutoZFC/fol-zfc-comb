@@ -16,6 +16,7 @@
 #include "src/proof/nd/ops.h"
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_internalize/body.h"
 #include "src/proof/translate/nd_internalize/prelude.h"
 #include "src/proof/translate/nd_internalize/schema_macro.h"
 #include "src/proof/translate/theorem_facts.h"
@@ -35,6 +36,8 @@ using logic::proof::translate::nd_internalize::SchemaMacroResult;
 using logic::proof::translate::nd_internalize::schema_macro;
 using logic::proof::translate::nd_internalize::PreludeResult;
 using logic::proof::translate::nd_internalize::emit_prelude;
+using logic::proof::translate::nd_internalize::BodyEmitResult;
+using logic::proof::translate::nd_internalize::emit_body_with_remap;
 
 namespace {
 
@@ -1017,6 +1020,340 @@ void test_prelude_synthetic_proof_verifies() {
     }
 }
 
+// =========================================================================
+// Phase 5 — emit_body_with_remap
+// =========================================================================
+//
+// Run the full Stage 1 sub-pipeline (schema_macro → compute_facts →
+// emit_prelude → emit_body) on a synthetic ND proof, then concatenate
+// prelude + body + postlude (ImpliesIntro + Qed) and verify under
+// NDVerifier against H → φ.
+//
+// This is the "real" integration shape of Stage 1 minus the apply()
+// orchestrator (Phase 6).
+struct WrapResult {
+    Program<nd::Instr> prog;
+    SentenceHandle     wrapped_goal;   // H → φ (or φ if facts empty)
+};
+
+util::Result<WrapResult> wrap_or_fail(
+    Runtime& rt,
+    const Program<nd::Instr>& input_body,
+    FormulaHandle goal)
+{
+    auto& ctx = rt.context();
+
+    // Schema macro (Phases 2/3).
+    auto sm = schema_macro(ctx, input_body);
+    if (!sm.ok()) return sm.error();
+
+    // Facts closure (Phase 1).
+    auto facts_r = compute_transitive_facts(sm.value().proof, ctx, TheoremFactsMap{});
+    if (!facts_r.ok()) return facts_r.error();
+    auto facts = std::move(facts_r).unwrap();
+
+    // Prelude (Phase 4).
+    auto pre = emit_prelude(ctx, facts);
+    if (!pre.ok()) return pre.error();
+    uint32_t prelude_len = static_cast<uint32_t>(pre.value().instrs.size());
+
+    // Body emit (Phase 5).
+    auto bd = emit_body_with_remap(
+        sm.value().proof, pre.value().fact_step_table, prelude_len);
+    if (!bd.ok()) return bd.error();
+
+    // Stitch: prelude + body + ImpliesIntro + Qed (if facts non-empty).
+    WrapResult result;
+    result.prog.claim_name = input_body.claim_name + "_wrapped";
+    for (auto& op : pre.value().instrs) result.prog.instrs.push_back(op);
+    for (auto& op : bd.value().instrs)  result.prog.instrs.push_back(op);
+
+    FormulaBuilder builder(ctx);
+    if (facts.empty()) {
+        // Identity case: no wrap. wrapped_goal = original φ. Body's qed_target
+        // still discharges via a fresh Qed (no ImpliesIntro).
+        nd::Qed qedop{};
+        qedop.derived = bd.value().qed_target;
+        result.prog.instrs.emplace_back(nd::Instr{std::move(qedop)});
+        result.wrapped_goal = ctx.add_sentence(Sentence(goal));
+    } else {
+        nd::ImpliesIntro ii{};
+        ii.conclusion = bd.value().qed_target;
+        uint32_t ii_idx = static_cast<uint32_t>(result.prog.instrs.size());
+        result.prog.instrs.emplace_back(nd::Instr{std::move(ii)});
+
+        nd::Qed qedop{};
+        qedop.derived = StepRef{ii_idx};
+        result.prog.instrs.emplace_back(nd::Instr{std::move(qedop)});
+
+        FormulaHandle H_to_phi = builder.make_implies(
+            pre.value().H.get().root(), goal);
+        result.wrapped_goal = ctx.add_sentence(Sentence(H_to_phi));
+    }
+    return result;
+}
+
+// =========================================================================
+// Phase 5 Test: no Use ops — body emitter copies through with offset.
+// Proof of `p -> p` via assume + implies_intro + qed.
+// =========================================================================
+void test_body_no_use_passthrough() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim p_self: p -> p
+        proof p_self:
+            h = assume p
+            h2 = implies_intro h
+            qed h2
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> body = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto claim = rt.context().find_claim("p_self");
+    if (!claim.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    auto wr = wrap_or_fail(rt, body, goal);
+    EXPECT_TRUE(wr.ok());
+    if (!wr.ok()) return;
+
+    // Facts empty → identity wrap. wrapped_goal = goal; body unchanged
+    // except Qed (which the emitter dropped and we re-emit).
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = wr.value().prog;
+    auto vr = v.verify(rt.context(), wr.value().wrapped_goal.get().root(), p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify: " << vr.error().to_string() << "\n";
+    }
+}
+
+// =========================================================================
+// Phase 5 Test: single axiom Use — Use op dropped, downstream Qed-ref
+// aliased to prelude extract; wrapped_goal = a_pred → a_pred verifies.
+// =========================================================================
+void test_body_single_axiom_use_dropped() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        claim derive_a: a_pred
+        proof derive_a:
+            h = use a_ax
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> body = lower_or_die(parsed.value().proofs[0], rt.context());
+    EXPECT_EQ(body.instrs.size(), size_t{2});  // Use + Qed
+    auto claim = rt.context().find_claim("derive_a");
+    FormulaHandle goal = claim.value().get().root();
+
+    auto wr = wrap_or_fail(rt, body, goal);
+    EXPECT_TRUE(wr.ok());
+    if (!wr.ok()) return;
+
+    // Body had one Use + one Qed. After Stage 1:
+    //   prelude: 1 op (Assume(H = a_pred))
+    //   body: empty (Use dropped, Qed dropped)
+    //   postlude: ImpliesIntro + Qed = 2 ops
+    // Total: 3 ops.
+    EXPECT_EQ(wr.value().prog.instrs.size(), size_t{3});
+
+    // Verify against wrapped_goal = a_pred → a_pred.
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = wr.value().prog;
+    auto vr = v.verify(rt.context(), wr.value().wrapped_goal.get().root(), p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << "verify: " << vr.error().to_string() << "\n";
+}
+
+// =========================================================================
+// Phase 5 Test: Use consumed by another op — that op's StepRef arg
+// must be remapped to the prelude extract.
+//   axiom a_ax: a_pred
+//   axiom b_ax: b_pred
+//   claim ab: a_pred & b_pred
+//   proof ab:
+//     h1 = use a_ax
+//     h2 = use b_ax
+//     h_and = and_intro h1, h2    # consumers of dropped Uses
+//     qed h_and
+// =========================================================================
+void test_body_use_consumed_by_andintro() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        axiom b_ax: b_pred
+        claim ab: a_pred & b_pred
+        proof ab:
+            h1 = use a_ax
+            h2 = use b_ax
+            h_and = and_intro h1, h2
+            qed h_and
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> body = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto claim = rt.context().find_claim("ab");
+    FormulaHandle goal = claim.value().get().root();
+
+    auto wr = wrap_or_fail(rt, body, goal);
+    EXPECT_TRUE(wr.ok());
+    if (!wr.ok()) {
+        std::cerr << "wrap: " << wr.error().to_string() << "\n";
+        return;
+    }
+
+    // Body has 4 ops (Use, Use, AndIntro, Qed). 2 axioms → prelude is
+    // 2n-1 = 3 ops. After Stage 1:
+    //   prelude: 3 ops (Assume + AndElimL + AndElimR)
+    //   body:    1 op  (AndIntro; both Uses dropped, Qed dropped)
+    //   postlude: 2 ops (ImpliesIntro + Qed)
+    // Total: 6 ops.
+    EXPECT_EQ(wr.value().prog.instrs.size(), size_t{6});
+
+    // The AndIntro should be at output index 3 (right after prelude),
+    // and its StepRef args should point at prelude extract indices.
+    const auto* ai = std::get_if<nd::AndIntro>(&wr.value().prog.instrs[3]);
+    EXPECT_TRUE(ai != nullptr);
+    if (ai) {
+        // Both a and b must point INTO the prelude (idx < 3).
+        EXPECT_TRUE(ai->a.idx < 3);
+        EXPECT_TRUE(ai->b.idx < 3);
+    }
+
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = wr.value().prog;
+    auto vr = v.verify(rt.context(), wr.value().wrapped_goal.get().root(), p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << "verify: " << vr.error().to_string() << "\n";
+}
+
+// =========================================================================
+// Phase 5 Test: same axiom used twice → both Use ops drop to the SAME
+// prelude extract (dedup at the SentenceHandle level).
+// =========================================================================
+void test_body_use_dedup_aliases() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom a_ax: a_pred
+        claim a_and_a: a_pred & a_pred
+        proof a_and_a:
+            h1 = use a_ax
+            h2 = use a_ax
+            h_and = and_intro h1, h2
+            qed h_and
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> body = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto claim = rt.context().find_claim("a_and_a");
+    FormulaHandle goal = claim.value().get().root();
+
+    auto wr = wrap_or_fail(rt, body, goal);
+    EXPECT_TRUE(wr.ok());
+    if (!wr.ok()) return;
+
+    // 1 fact → prelude size = 1 (just Assume). Body: 1 AndIntro.
+    // Postlude: 2 (ImpliesIntro + Qed). Total = 4.
+    EXPECT_EQ(wr.value().prog.instrs.size(), size_t{4});
+
+    const auto* ai = std::get_if<nd::AndIntro>(&wr.value().prog.instrs[1]);
+    EXPECT_TRUE(ai != nullptr);
+    if (ai) {
+        // Both args alias to the SAME prelude step (the Assume itself,
+        // index 0, since for n=1 there's no and_elim chain).
+        EXPECT_EQ(ai->a.idx, ai->b.idx);
+        EXPECT_EQ(ai->a.idx, uint32_t{0});
+    }
+
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = wr.value().prog;
+    auto vr = v.verify(rt.context(), wr.value().wrapped_goal.get().root(), p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << "verify: " << vr.error().to_string() << "\n";
+}
+
+// =========================================================================
+// Phase 5 Test: SchemaInst input-gate rejection. emit_body_with_remap
+// expects schema_macro to have run upstream — feed it a body that
+// still contains SchemaInst → error.
+// =========================================================================
+void test_body_schema_inst_rejected() {
+    Runtime rt;
+    Program<nd::Instr> body;
+    body.claim_name = "bad";
+    nd::SchemaInst si{};
+    body.instrs.push_back(nd::Instr{si});
+    nd::Qed q{}; q.derived = StepRef{0};
+    body.instrs.push_back(nd::Instr{q});
+
+    std::unordered_map<SentenceHandle, StepRef, SentenceHandleHash> empty_table;
+    auto r = emit_body_with_remap(body, empty_table, /*prelude_length=*/0);
+    EXPECT_ERR(r);
+}
+
+// =========================================================================
+// Phase 5 Test: Use whose SentenceHandle is missing from the table → error.
+// =========================================================================
+void test_body_unknown_use_rejected() {
+    Runtime rt;
+    rt.load("axiom a_ax: a_pred");
+    auto sh = rt.context().find_known("a_ax").value();
+
+    Program<nd::Instr> body;
+    body.claim_name = "bad";
+    nd::Use u{}; u.axiom = AxiomRef{sh}; u.source_name = "a_ax";
+    body.instrs.push_back(nd::Instr{u});
+    nd::Qed q{}; q.derived = StepRef{0};
+    body.instrs.push_back(nd::Instr{q});
+
+    // table is empty — caller's bug.
+    std::unordered_map<SentenceHandle, StepRef, SentenceHandleHash> empty_table;
+    auto r = emit_body_with_remap(body, empty_table, /*prelude_length=*/0);
+    EXPECT_ERR(r);
+}
+
+// =========================================================================
+// Phase 5 Test: a proof with first-order quantifier work in the body
+// — Fix, forall_elim, forall_intro — verifies through the full Stage 1
+// sub-pipeline. Exercises TermRef offsetting too.
+//   axiom all_p: forall x. p(x)
+//   claim derive: forall x. p(x)
+//   proof derive:
+//     fix y
+//     h1 = use all_p
+//     h2 = forall_elim h1, y
+//     h_all = forall_intro h2
+//     qed h_all
+// =========================================================================
+void test_body_with_quantifiers() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        axiom all_p: forall x. p(x)
+        claim derive: forall x. p(x)
+        proof derive:
+            fix y
+            h1 = use all_p
+            h2 = forall_elim h1, y
+            h_all = forall_intro h2
+            qed h_all
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> body = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto claim = rt.context().find_claim("derive");
+    FormulaHandle goal = claim.value().get().root();
+
+    auto wr = wrap_or_fail(rt, body, goal);
+    EXPECT_TRUE(wr.ok());
+    if (!wr.ok()) {
+        std::cerr << "wrap: " << wr.error().to_string() << "\n";
+        return;
+    }
+
+    nd::NDVerifier v;
+    Proof p{}; p.system = System::ND; p.body = wr.value().prog;
+    auto vr = v.verify(rt.context(), wr.value().wrapped_goal.get().root(), p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) std::cerr << "verify: " << vr.error().to_string() << "\n";
+}
+
 }  // namespace
 
 int main() {
@@ -1050,6 +1387,15 @@ int main() {
     test_prelude_n4_shape_and_table();
     test_prelude_n4_link_indices();
     test_prelude_synthetic_proof_verifies();
+
+    // Phase 5: emit_body_with_remap (drops Use+Qed, offsets others)
+    test_body_no_use_passthrough();
+    test_body_single_axiom_use_dropped();
+    test_body_use_consumed_by_andintro();
+    test_body_use_dedup_aliases();
+    test_body_schema_inst_rejected();
+    test_body_unknown_use_rejected();
+    test_body_with_quantifiers();
 
     std::cerr << "nd_internalize_test: " << g_passed
               << " passed, " << g_failed << " failed\n";

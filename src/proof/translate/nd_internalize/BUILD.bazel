@@ -34,3 +34,21 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# Phase 5: emit_body_with_remap. Drops Use(F) ops (aliasing to prelude
+# extracts via fact_step_table) and Qed (returning its remapped derived
+# step as qed_target). Copies every other ND op with StepRef/TermRef
+# args remapped to absolute output positions (prelude_length offset).
+cc_library(
+    name = "body",
+    srcs = ["body.cpp"],
+    hdrs = ["body.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)

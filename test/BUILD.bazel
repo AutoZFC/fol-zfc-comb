@@ -249,6 +249,7 @@ cc_test(
         "//src/proof/nd:ops",
         "//src/proof/nd:verifier",
         "//src/proof/translate:theorem_facts",
+        "//src/proof/translate/nd_internalize:body",
         "//src/proof/translate/nd_internalize:prelude",
         "//src/proof/translate/nd_internalize:schema_macro",
         "//src/runtime",
