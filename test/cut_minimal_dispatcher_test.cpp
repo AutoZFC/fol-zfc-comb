@@ -303,6 +303,36 @@ void test_forall_elim_not_yet_supported() {
 // = f_k_idx. Recurses on conclusion = the Assume step. Assume leaf
 // handler does emit_close on (target_pos, recorded dual_pos).
 // =========================================================================
+// =========================================================================
+// Test 8 (5e.2): NotIntro of contradiction.
+// Goal: ~~(A | ~A). Proof: assume ~(A|~A); derive em = (A|~A) via
+// excluded_middle; not_elim h, em gives ⊥; not_intro h_bot proves
+// ~~(A|~A).
+// =========================================================================
+void test_not_intro_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim nn_em: ~~(A | ~A)
+        proof nn_em:
+            h = assume ~(A | ~A)
+            em_let = let A
+            em = excluded_middle em_let
+            h_bot = not_elim h, em
+            h_out = not_intro h_bot
+            qed h_out
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("nn_em");
+    if (!sh.has_value()) { std::cerr << "no nn_em claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "nn_em"));
+}
+
 void test_implies_intro_of_assume_e2e() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -334,6 +364,7 @@ int main() {
     test_and_elim_r_of_em_e2e();
     test_forall_elim_not_yet_supported();
     test_implies_intro_of_assume_e2e();
+    test_not_intro_e2e();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";

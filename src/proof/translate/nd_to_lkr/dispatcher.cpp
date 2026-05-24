@@ -89,6 +89,22 @@ util::ResultStatus emit_implies_elim_full(
     size_t                     target_pos,
     std::vector<lkr::Instr>&   out);
 
+// Closer family (Phase 5e.2): NOT / BottomElim / ClassicalAbsurd.
+// All three discharge a contradiction via the NotElim ghost at
+// `bottom`. The closer emits Cut(NNF(F_neg)) + Cut(NNF(F_formula))
+// + recurses on each LEFT branch + emit_close on the duals visible
+// in the final RIGHT branch. For NotIntro and ClassicalAbsurd, the
+// closer also records the matching Assume opener's dual at target_pos
+// so body-side references close correctly.
+util::ResultStatus emit_contradiction_close(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    uint32_t                 closer_step_idx,
+    StepRef                  notelim_bottom,
+    bool                     record_assume_dual,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out);
+
 }  // namespace
 
 // Forward-declared above for use inside translate_step_impl's visitor.
@@ -245,6 +261,21 @@ util::ResultStatus translate_step_impl(
                 return emit_implies_elim_full(dcc, shadow, op, target_pos, out);
             }
 
+            // ---- closer family (Phase 5e.2) -----------------------
+            else if constexpr (std::is_same_v<T, nd::NotIntro>) {
+                return emit_contradiction_close(
+                    dcc, std::move(shadow), step.idx, op.bottom,
+                    /*record_assume_dual=*/true, target_pos, out);
+            } else if constexpr (std::is_same_v<T, nd::BottomElim>) {
+                return emit_contradiction_close(
+                    dcc, std::move(shadow), step.idx, op.bottom,
+                    /*record_assume_dual=*/false, target_pos, out);
+            } else if constexpr (std::is_same_v<T, nd::ClassicalAbsurd>) {
+                return emit_contradiction_close(
+                    dcc, std::move(shadow), step.idx, op.bottom,
+                    /*record_assume_dual=*/true, target_pos, out);
+            }
+
             // ---- Assume leaf (Phase 5e.1) -------------------------
             // Recursing on an Assume step means a downstream op
             // references the assumption's formula. The enclosing
@@ -378,6 +409,88 @@ util::ResultStatus emit_implies_elim_full(
     out.emplace_back(lkr::AxiomLit{{}, target_pos, psi_pos});
 
     return util::Ok();
+}
+
+util::ResultStatus emit_contradiction_close(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    uint32_t                 closer_step_idx,
+    StepRef                  notelim_bottom,
+    bool                     record_assume_dual,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out)
+{
+    if (notelim_bottom.idx >= dcc.prog.instrs.size()) {
+        return MAKE_ERROR
+            << "emit_contradiction_close: bottom #" << notelim_bottom.idx
+            << " out of program range";
+    }
+    const auto& bot_instr = dcc.prog.instrs[notelim_bottom.idx];
+    if (!std::holds_alternative<nd::NotElim>(bot_instr)) {
+        return MAKE_ERROR
+            << "emit_contradiction_close: bottom #" << notelim_bottom.idx
+            << " is not a NotElim";
+    }
+    const auto& ne = std::get<nd::NotElim>(bot_instr);
+
+    if (record_assume_dual) {
+        auto co = dcc.closer_to_opener.find(closer_step_idx);
+        if (co == dcc.closer_to_opener.end()) {
+            return MAKE_ERROR
+                << "emit_contradiction_close: closer #" << closer_step_idx
+                << " has no matching block opener";
+        }
+        // Record the assumption-step's dual at target_pos so body-side
+        // references close against it.
+        shadow.step_to_neg_idx[co->second] = target_pos;
+    }
+
+    if (ne.negation.idx >= dcc.trace.step_env.size() ||
+        ne.formula.idx  >= dcc.trace.step_env.size()) {
+        return MAKE_ERROR
+            << "emit_contradiction_close: NotElim operand out of trace range";
+    }
+    FormulaHandle f_neg = dcc.trace.step_env[ne.negation.idx];
+    FormulaHandle f_form = dcc.trace.step_env[ne.formula.idx];
+    FormulaHandle f_neg_nnf  = dcc.builder.to_nnf(f_neg);
+    FormulaHandle f_form_nnf = dcc.builder.to_nnf(f_form);
+
+    // Step 1: Cut(NNF(F_neg)).
+    out.emplace_back(lkr::Cut{{}, f_neg_nnf});
+
+    // LEFT: shadow + NNF(F_neg). Recurse on neg_step.
+    SequentShadow left_neg = shadow;
+    size_t left_neg_pos = left_neg.entries.size();
+    left_neg.entries.push_back(f_neg_nnf);
+    TRY(translate_step_impl(
+        dcc, std::move(left_neg), ne.negation,
+        left_neg_pos, Demand{DemandNone{}}, out));
+
+    // RIGHT: shadow + NNF(¬F_neg) (= NNF(F_formula) in NNF semantics).
+    SequentShadow right_neg = shadow;
+    size_t outer_dual_pos = right_neg.entries.size();
+    right_neg.entries.push_back(dcc.builder.to_nnf_neg(f_neg));
+
+    // Step 2: Cut(NNF(F_formula)) on RIGHT-of-Cut(F_neg).
+    out.emplace_back(lkr::Cut{{}, f_form_nnf});
+
+    // LEFT: right_neg + NNF(F_formula). Recurse on formula_step.
+    SequentShadow left_form = right_neg;
+    size_t left_form_pos = left_form.entries.size();
+    left_form.entries.push_back(f_form_nnf);
+    TRY(translate_step_impl(
+        dcc, std::move(left_form), ne.formula,
+        left_form_pos, Demand{DemandNone{}}, out));
+
+    // RIGHT: right_neg + NNF(¬F_formula) (= NNF(F_neg)).
+    SequentShadow right_form = right_neg;
+    size_t inner_dual_pos = right_form.entries.size();
+    right_form.entries.push_back(dcc.builder.to_nnf_neg(f_form));
+
+    // Step 3: emit_close on the two duals (NNF(F_formula) at
+    // outer_dual_pos and NNF(F_neg) at inner_dual_pos).
+    EmitCloseContext ecc{dcc.builder};
+    return emit_close(ecc, right_form, outer_dual_pos, inner_dual_pos, out);
 }
 
 }  // namespace
