@@ -15,6 +15,7 @@ cc_library(
         "//src/proof:proof_value",
         "//src/proof:schema_resolve",
         "//src/proof/nd:ops",
+        "//src/proof/translate:pass",
         "//src/util:error",
     ],
 )

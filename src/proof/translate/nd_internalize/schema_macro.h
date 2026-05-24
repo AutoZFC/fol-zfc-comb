@@ -1,33 +1,52 @@
 #pragma once
 
-// Stage 1 schema macro (Phase 2 / closed-instance only).
+// Stage 1 schema macro — closed AND open instances.
 //
 // Walks a Program<nd::Instr> and replaces every SchemaInst(S, σ) op
-// with Use(SH(φᵢ)) where φᵢ = instantiate_schema(S.body, σ_resolved)
-// is the concrete instance formula, registered as a Sentence in ctx
-// (returning a typed SentenceHandle). The Use op's AxiomRef carries
-// that SentenceHandle as identity.
+// with operations whose net effect derives the resolved instance φᵢ at
+// the same point in the program. φᵢ is itself a derived formula in
+// general — it may contain free Fixed terms referring to outer
+// fix-scope vars (open case). Stage 1 splits two cases:
 //
-// "Closed" means φᵢ contains no free Fixed term — i.e., the SchemaInst's
-// bindings do not reference any outer `fix x` scope. Phase 2 handles
-// only this case; SchemaInst with open instances is rejected here and
-// will be handled in Phase 3 by universal-closure + ForallElim chain
-// re-instantiation (per Stage 1 v1 spec §4, Q1b/α).
+//   1. Closed (φᵢ has no free Fixed): register φᵢ as a Sentence,
+//      replace SchemaInst with Use(SH(φᵢ)). 1:1 op replacement.
 //
-// Step-index preservation: the SchemaInst → Use replacement is 1:1
-// at the same instr index, so StepRef references elsewhere in the
-// program need no remapping.
+//   2. Open (φᵢ has free Fixed terms {Fixed(k₁), …, Fixed(kₘ)},
+//      sorted lex):
 //
-// Dedup: two SchemaInst ops whose resolved φᵢ are structurally equal
-// produce the same SentenceHandle (the FormulaRegistry interns by
-// structure, and add_sentence interns by formula). Both Use ops point
-// to the same handle; synthetic_facts records it only once.
+//        closed_φ := ∀v₁. ∀v₂. … ∀vₘ. φᵢ[Fixed(kᵢ) ↦ vᵢ]
 //
-// Soundness obligation handed to the caller: every SentenceHandle in
-// synthetic_facts is a true instance of a proven schema (Stage 1's
-// input gate ensures NDVerifier accepts the input, which entails the
-// schemas are proven). Downstream wrapping puts these into H as true
-// antecedents.
+//      Register closed_φ as a Sentence; the SentenceHandle goes into
+//      synthetic_facts (eventually a conjunct of H, which is closed).
+//      Replace SchemaInst with:
+//
+//        Use(SH(closed_φ))                  ⊢ closed_φ
+//        ForallElim(use, Fixed(k₁))         ⊢ ∀v₂…vₘ. φᵢ[Fixed(k₁), Fixed(kᵢ)↦vᵢ, i≥2]
+//        ForallElim(prev, Fixed(k₂))
+//        …
+//        ForallElim(prev, Fixed(kₘ))        ⊢ φᵢ
+//
+//      (m+1 ops replacing one SchemaInst.) Per Stage 1 v1 spec §4,
+//      Q1b option α — universal closure preserves completeness on
+//      scope-dependent SchemaInst inputs.
+//
+// Step-index threading: open-case replacement is not 1:1, so a
+// step_remap is maintained during the walk and applied to every
+// non-SchemaInst op's StepRef / TermRef args. prog.step_index entries
+// are remapped to point at the corresponding output positions.
+//
+// Scope tracking: schema_macro mirrors the verifier's builder
+// enter_scope / exit_scope behavior for Fix and ExistsElim (open
+// scopes) and ForallIntro / ExistsIntro-without-witness (close
+// scopes). This keeps var_index allocation in sync with the verifier
+// and lets ForallElim's TermRef point at the correct binding op's
+// instr index in the output (fix_index_by_var lookup).
+//
+// Soundness obligation per fact: each SentenceHandle in
+// synthetic_facts is a true instance (or its universal closure over
+// outer-scope vars, which is still a true sentence) of a proven
+// schema — the schema's universal quantification justifies it.
+// Downstream Stage 1 wraps these as antecedents of H, soundly.
 
 #include "src/core/formula.h"
 #include "src/proof/nd/ops.h"
@@ -39,28 +58,17 @@
 namespace logic::proof::translate::nd_internalize {
 
 struct SchemaMacroResult {
-    // Program with every SchemaInst replaced by Use(SH(φᵢ)). All other
-    // ops are copied verbatim. Step indices match the input 1:1.
+    // Program with every SchemaInst replaced (1:1 in the closed case,
+    // 1:(m+1) in the open case where m = |free_fixed|).
     Program<nd::Instr>          proof;
 
-    // SentenceHandles of newly-registered synthetic instance facts,
-    // each distinct. Order is first-encounter (walk order); the caller
-    // (compute_transitive_facts via the Use ops) is responsible for any
-    // canonical sort.
+    // SentenceHandles of newly-registered facts. For closed instances
+    // this is φᵢ; for open instances this is closed_φ (the universal
+    // closure over the free Fixed vars). Each distinct fact appears
+    // once (SentenceRegistry interns by structure).
     std::vector<SentenceHandle> synthetic_facts;
 };
 
-// Eliminate SchemaInst ops from `prog` via Phase 2 / closed-instance
-// replacement.
-//
-// Errors:
-//   - SchemaInst whose binding resolution fails against an empty
-//     name_table (the binding references an outer fix-var, making the
-//     instance scope-dependent → Phase 3 / universal-closure territory)
-//   - SchemaInst whose resolved φᵢ contains a free Fixed term
-//     (same scope-dependence story, caught via post-resolve check)
-//   - Any error surfaced by the shared resolve_and_instantiate_schema
-//     (unknown schema, unproven schema, missing/duplicate binding, etc.)
 util::Result<SchemaMacroResult>
 schema_macro(GlobalContext& ctx, const Program<nd::Instr>& prog);
 

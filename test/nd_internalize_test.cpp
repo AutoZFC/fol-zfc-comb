@@ -610,19 +610,27 @@ void test_macro_two_distinct_instances() {
 }
 
 // =========================================================================
-// Phase 2 Test 5: SchemaInst with binding referencing an outer fix-var
-// → Phase 3 deferral error.
+// Phase 3 Test: SchemaInst with binding referencing an outer fix-var.
+// Per spec §4 / Q1b option α, schema_macro universally closes the open
+// instance and emits a ForallElim chain to re-instantiate at the call
+// site.
 //
 //   fix a                                          # a : Fixed(0)
 //   h = schema_inst unary_self_impl { P: \y. eq(y, a) }
-//         lambda body references 'a' → empty-name_table resolution fails.
+//       resolves to:  forall x. (eq(x, Fixed(0)) -> eq(x, Fixed(0)))
+//                     ← has 1 free Fixed (Fixed(0) = a)
+//   universal closure:
+//                     forall v. forall x. (eq(x, v) -> eq(x, v))
+//   emitted ops at the SchemaInst position:
+//       Use(SH(closure))          ⊢ forall v. forall x. (eq(x, v) -> eq(x, v))
+//       ForallElim(use, a)        ⊢ forall x. (eq(x, a) -> eq(x, a))   = φᵢ
 // =========================================================================
-void test_macro_open_instance_defers() {
+void test_macro_open_instance_one_fixed() {
     Runtime rt;
     setup_unary_self_impl(rt);
 
     auto parsed = rt.load_with_proofs(R"(
-        claim use_open: forall a. (eq(a, a) -> eq(a, a))
+        claim use_open: forall a. (forall x. (eq(x, a) -> eq(x, a)))
         proof use_open:
             fix a
             h = schema_inst unary_self_impl { P: \y. eq(y, a) }
@@ -637,7 +645,136 @@ void test_macro_open_instance_defers() {
     EXPECT_EQ(count_schema_inst(prog), size_t{1});
 
     auto r = schema_macro(rt.context(), prog);
-    EXPECT_ERR(r);   // open instance — Phase 3 not implemented
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "schema_macro: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    // SchemaInst removed; replaced by Use + 1 ForallElim. So total
+    // op count = original + 1.
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(r.value().proof.instrs.size(), prog.instrs.size() + 1);
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{1});
+
+    // Verify the rewritten proof against the original claim's goal.
+    auto claim = rt.context().find_claim("use_open");
+    EXPECT_TRUE(claim.has_value());
+    if (!claim.has_value()) return;
+    FormulaHandle goal = claim.value().get().root();
+
+    nd::NDVerifier v;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = v.verify(rt.context(), goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify failed: " << vr.error().to_string() << "\n";
+    }
+}
+
+// =========================================================================
+// Phase 3 Test: open instance with TWO free Fixed vars. Universal
+// closure must add two outer ∀'s; ForallElim chain has length 2.
+// =========================================================================
+void test_macro_open_instance_two_fixed() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_open2: forall a. forall b.
+            (forall x. ((eq(x, a) | eq(x, b)) -> (eq(x, a) | eq(x, b))))
+        proof use_open2:
+            fix a
+            fix b
+            h = schema_inst unary_self_impl { P: \y. (eq(y, a) | eq(y, b)) }
+            h_all_b = forall_intro h
+            h_all_a = forall_intro h_all_b
+            qed h_all_a
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "schema_macro: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    // 1 SchemaInst → 1 Use + 2 ForallElims = 3 ops.
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(r.value().proof.instrs.size(), prog.instrs.size() + 2);
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{1});
+
+    auto claim = rt.context().find_claim("use_open2");
+    if (!claim.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+    nd::NDVerifier v;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = v.verify(rt.context(), goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify failed: " << vr.error().to_string() << "\n";
+    }
+}
+
+// =========================================================================
+// Phase 3 Test: mix of closed and open SchemaInsts in one proof.
+// Both replaced correctly; step_remap propagates through subsequent ops.
+// =========================================================================
+void test_macro_mixed_closed_and_open() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim mixed: forall a. ((forall x. (q(x) -> q(x))) & (forall x. (eq(x, a) -> eq(x, a))))
+        proof mixed:
+            fix a
+            h_closed = schema_inst unary_self_impl { P: \y. q(y) }
+            h_open   = schema_inst unary_self_impl { P: \y. eq(y, a) }
+            h_and = and_intro h_closed, h_open
+            h_all = forall_intro h_and
+            qed h_all
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    EXPECT_EQ(count_schema_inst(prog), size_t{2});
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "schema_macro: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    // Closed instance: 1:1. Open instance: 1:(1+1) = +1 op. So output
+    // has prog.instrs.size() + 1.
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(r.value().proof.instrs.size(), prog.instrs.size() + 1);
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{2});  // two distinct facts
+
+    auto claim = rt.context().find_claim("mixed");
+    if (!claim.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+    nd::NDVerifier v;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = v.verify(rt.context(), goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify failed: " << vr.error().to_string() << "\n";
+    }
 }
 
 // =========================================================================
@@ -698,8 +835,12 @@ int main() {
     test_macro_single_closed();
     test_macro_two_same_instances_dedup();
     test_macro_two_distinct_instances();
-    test_macro_open_instance_defers();
     test_macro_output_verifies();
+
+    // Phase 3: schema_macro (open instances — universal closure + ForallElim chain)
+    test_macro_open_instance_one_fixed();
+    test_macro_open_instance_two_fixed();
+    test_macro_mixed_closed_and_open();
 
     std::cerr << "nd_internalize_test: " << g_passed
               << " passed, " << g_failed << " failed\n";
