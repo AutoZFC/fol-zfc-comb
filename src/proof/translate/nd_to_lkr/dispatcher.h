@@ -23,14 +23,26 @@
 #include "src/proof/nd/ops.h"
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_to_lkr/block_tree.h"
 #include "src/proof/translate/nd_to_lkr/demand.h"
 #include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
 #include "src/util/error.h"
 
 #include <cstddef>
+#include <unordered_map>
 #include <vector>
 
 namespace logic::proof::translate::nd_to_lkr::dispatcher {
+
+// closer_idx → opener_idx map. Built once from the block_tree at
+// dispatcher entry; the dispatcher uses it for ImpliesIntro / NotIntro
+// / ClassicalAbsurd / ForallIntro / ExistsIntro-no-witness closers to
+// find their matching Assume / Fix / ExistsElim opener.
+using CloserToOpener = std::unordered_map<uint32_t, uint32_t>;
+
+// Build a closer_idx → opener_idx map by walking the block tree.
+// Skips OUTER (kInvalidIdx opener).
+CloserToOpener build_closer_to_opener(const Block& root);
 
 // Dispatcher-wide context. Carries the shared resources every phase
 // needs; the dispatcher itself plus per-phase emitters thread `Ctx`
@@ -40,6 +52,7 @@ struct Ctx {
     FormulaBuilder&                  builder;
     const Program<nd::Instr>&        prog;
     const nd::NDVerifier::TraceFull& trace;
+    const CloserToOpener&            closer_to_opener;
 };
 
 // Recursive entry point. Translates `step`'s derivation into LKR ops

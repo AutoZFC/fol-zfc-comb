@@ -95,6 +95,7 @@ cc_test(
         "//src/proof/nd:lowering",
         "//src/proof/nd:ops",
         "//src/proof/nd:verifier",
+        "//src/proof/translate/nd_to_lkr:block_tree",
         "//src/proof/translate/nd_to_lkr:demand",
         "//src/proof/translate/nd_to_lkr:dispatcher",
         "//src/proof/translate/nd_to_lkr:sequent_shadow",

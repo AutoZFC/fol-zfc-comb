@@ -21,6 +21,7 @@
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
 #include "src/proof/runner.h"
+#include "src/proof/translate/nd_to_lkr/block_tree.h"
 #include "src/proof/translate/nd_to_lkr/demand.h"
 #include "src/proof/translate/nd_to_lkr/dispatcher.h"
 #include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
@@ -35,7 +36,10 @@ using namespace logic::proof;
 using logic::proof::translate::nd_to_lkr::Demand;
 using logic::proof::translate::nd_to_lkr::DemandNone;
 using logic::proof::translate::nd_to_lkr::SequentShadow;
+using logic::proof::translate::nd_to_lkr::decompose_blocks;
+using logic::proof::translate::nd_to_lkr::dispatcher::CloserToOpener;
 using logic::proof::translate::nd_to_lkr::dispatcher::Ctx;
+using logic::proof::translate::nd_to_lkr::dispatcher::build_closer_to_opener;
 using logic::proof::translate::nd_to_lkr::dispatcher::translate_step;
 
 namespace {
@@ -103,7 +107,11 @@ util::ResultStatus translate_and_verify(
     SequentShadow shadow;
     shadow.entries.push_back(goal_nnf);
 
-    Ctx dcc{rt.context(), builder, prog, trace};
+    auto blocks_r = decompose_blocks(prog);
+    if (!blocks_r.ok()) return blocks_r.error();
+    CloserToOpener c2o = build_closer_to_opener(*blocks_r.value());
+
+    Ctx dcc{rt.context(), builder, prog, trace, c2o};
     StepRef qed_derived = find_qed_derived(prog);
 
     std::vector<lkr::Instr> emitted;
@@ -289,11 +297,13 @@ void test_forall_elim_not_yet_supported() {
 }
 
 // =========================================================================
-// Test 7: Non-supported op (assume/implies_intro pattern) returns error.
-// Implies_intro requires the dispatcher to handle its body's Assume
-// leaf — Phase 5e work.
+// Test 7 (5e.1): ImpliesIntro of Assume — A -> A.
+// Dispatcher: Qed.derived = ImpliesIntro. emit_implies_intro emits Or,
+// places ¬A at f_k_idx, records shadow.step_to_neg_idx[assume_step]
+// = f_k_idx. Recurses on conclusion = the Assume step. Assume leaf
+// handler does emit_close on (target_pos, recorded dual_pos).
 // =========================================================================
-void test_implies_intro_not_yet_supported() {
+void test_implies_intro_of_assume_e2e() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
         claim p_self: A -> A
@@ -311,10 +321,7 @@ void test_implies_intro_not_yet_supported() {
     if (!sh.has_value()) { std::cerr << "no p_self claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    auto r = translate_and_verify(rt, prog, goal, "p_self");
-    // The dispatcher reaches the Assume leaf via recursion on the
-    // ImpliesIntro's conclusion, which fails (Assume not yet handled).
-    CHECK(!r.ok());
+    CHECK_OK(translate_and_verify(rt, prog, goal, "p_self"));
 }
 
 }  // namespace
@@ -326,7 +333,7 @@ int main() {
     test_and_elim_l_of_em_e2e();
     test_and_elim_r_of_em_e2e();
     test_forall_elim_not_yet_supported();
-    test_implies_intro_not_yet_supported();
+    test_implies_intro_of_assume_e2e();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";

@@ -1,6 +1,8 @@
 #include "dispatcher.h"
 
+#include "block_tree.h"
 #include "combining.h"
+#include "emit_close.h"
 #include "intros.h"
 #include "projections.h"
 
@@ -11,6 +13,28 @@
 #include <variant>
 
 namespace logic::proof::translate::nd_to_lkr::dispatcher {
+
+// Walk the block tree and record (closer_idx → opener_idx) for every
+// non-OUTER block. Used by the dispatcher to look up an Assume opener
+// from an ImpliesIntro closer (and analogues).
+namespace {
+void walk_block(const Block& blk, CloserToOpener& out) {
+    if (blk.opener_idx != kInvalidIdx && blk.closer_idx != kInvalidIdx) {
+        out[blk.closer_idx] = blk.opener_idx;
+    }
+    for (const auto& item : blk.body) {
+        if (auto* sub = std::get_if<std::unique_ptr<Block>>(&item)) {
+            walk_block(**sub, out);
+        }
+    }
+}
+}  // namespace
+
+CloserToOpener build_closer_to_opener(const Block& root) {
+    CloserToOpener out;
+    walk_block(root, out);
+    return out;
+}
 
 namespace {
 
@@ -132,8 +156,23 @@ util::ResultStatus translate_step_impl(
                     ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ImpliesIntro>) {
+                // emit_implies_intro emits Or which places NNF(¬A) at
+                // target_pos (where A→B was). The dispatcher looks up
+                // the matching Assume opener and records its dual
+                // position so body-side Assume leaves can close
+                // against it.
                 TRY_ASSIGN(r, intros::emit_implies_intro(
                     ictx, op, shadow, target_pos, out, norm_demand));
+                if (auto* one = std::get_if<intros::OnePremise>(&r)) {
+                    auto co = dcc.closer_to_opener.find(step.idx);
+                    if (co == dcc.closer_to_opener.end()) {
+                        return MAKE_ERROR
+                            << "translate_step: ImpliesIntro at #" << step.idx
+                            << " has no matching IMPLIES block opener";
+                    }
+                    // After emit_implies_intro, target_pos holds NNF(¬A).
+                    one->shadow.step_to_neg_idx[co->second] = target_pos;
+                }
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::IffIntro>) {
                 TRY_ASSIGN(r, intros::emit_iff_intro(
@@ -204,6 +243,26 @@ util::ResultStatus translate_step_impl(
             // ---- combining elims (Phase 5d) ------------------------
             else if constexpr (std::is_same_v<T, nd::ImpliesElim>) {
                 return emit_implies_elim_full(dcc, shadow, op, target_pos, out);
+            }
+
+            // ---- Assume leaf (Phase 5e.1) -------------------------
+            // Recursing on an Assume step means a downstream op
+            // references the assumption's formula. The enclosing
+            // IMPLIES/NOT/CLASSICAL_ABSURD intro placed NNF(¬A) at a
+            // position recorded in shadow.step_to_neg_idx. emit_close
+            // discharges via the dual at (target_pos, dual_pos).
+            else if constexpr (std::is_same_v<T, nd::Assume>) {
+                auto it = shadow.step_to_neg_idx.find(step.idx);
+                if (it == shadow.step_to_neg_idx.end()) {
+                    return MAKE_ERROR
+                        << "translate_step: Assume #" << step.idx
+                        << " has no recorded dual position — no "
+                           "enclosing IMPLIES/NOT/CLASSICAL_ABSURD intro "
+                           "placed it";
+                }
+                size_t dual_pos = it->second;
+                EmitCloseContext ecc{dcc.builder};
+                return emit_close(ecc, shadow, target_pos, dual_pos, out);
             }
 
             // ---- ForallIntro requires block_tree integration to find

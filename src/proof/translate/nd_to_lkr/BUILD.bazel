@@ -176,8 +176,10 @@ cc_library(
     hdrs = ["dispatcher.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":block_tree",
         ":combining",
         ":demand",
+        ":emit_close",
         ":intros",
         ":projections",
         ":sequent_shadow",
