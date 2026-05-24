@@ -128,6 +128,26 @@ cc_library(
     ],
 )
 
+# combining — Stage 2 Phase 3 emitters: combining-elim sites. The Cut
+# emission + structural closure (And, AxiomLits, second Cut for
+# implies_elim's ant) lives in Phase 5; Phase 3 only projects the op
+# into a descriptor.
+cc_library(
+    name = "combining",
+    srcs = ["combining.cpp"],
+    hdrs = ["combining.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs LKRVerifier on emitted programs. Translator is not
 # trusted; soundness rests on this gate.
 cc_library(

@@ -565,21 +565,61 @@ require Phase 1 retrofits + leaf-case (Assume/Fix) handling + a
 minimal dispatcher, which is most of Phase 5 in disguise. The cleaner
 boundary keeps Phase 2 thin and lets Phase 5 carry the integration.
 
-### 6.2 Phase 3 — combining elims (Cut sites)
+### 6.2 Phase 3 — combining elims (Cut sites, descriptor-only)
 
-ND `implies_elim(A→B, A) ⊢ B`. LKR:
+**Math.** Each combining elim emits Cut on its major premise; the LEFT
+branch proves the major (recurse on major-step); the RIGHT branch
+carries NNF(¬major) and closes the surrounding goal using the
+combining-elim's other operands. For implies_elim, the RIGHT branch
+involves a second Cut on the antecedent; for or_elim, the structure
+is yet more involved (three Cuts plus a nested ∧-split pattern).
+
+The full closure-emission math is non-trivial and lives at Phase 5 (where
+the dispatcher integrates Phases 1-4 and orchestrates the recursion).
+Phase 3's mathematical contribution is to identify the combining-elim
+structure and project each op into a descriptor naming its major +
+minor step references.
+
+**CombineSite descriptors** (one per combining-elim op type):
 
 ```
-  S, …, B, …    ↦    Cut(A→B):
-                       LEFT:  S, …, B, …, A→B   (prove A→B)
-                       RIGHT: S, …, B, …, ¬(A→B) = A_nnf ∧ ¬B_nnf
+ImpliesElimSite  { impl_step: StepRef, ant_step: StepRef, target_pos: size_t }
+OrElimSite       { or_formula_step: StepRef, ac_step: StepRef, bc_step: StepRef, target_pos: size_t }
+ExistsElimSite   { formula_step: StepRef, target_pos: size_t }
+                                       // scope handling integrates with Phase 4
 ```
 
-The RIGHT branch then ∧-splits to two subgoals: one with A_nnf adjacent
-to B (closes via A's prior derivation), one with ¬B_nnf adjacent to B
-(closes by AxiomLit).
+**NotElim is NOT in Phase 3** (per α policy: NotElim is no-emit, closer
+handled in Phase 4).
 
-To be specified in detail before Phase 3 opens.
+**Phase 3 contract.** Each emitter:
+
+```
+PRE:    op is the combining-elim ND op. shadow.entries[target_pos]
+        contains the combining elim's result formula NNF (= the
+        consumer's expected position).
+ACTION: emit ZERO LKR ops. (Cut + And + AxiomLit emission lives in
+        Phase 5.)
+POST:   return the appropriate CombineSite descriptor.
+```
+
+**Why data-only Phase 3.** Same rationale as Phase 2: the
+combining-elim's actual LKR realization requires the dispatcher (which
+recurses on the named major + minor steps with proper shadow threading)
+and demand-aware Phase 1 emitters. Putting that machinery in Phase 3
+would pull most of Phase 5 in. Cleaner: Phase 3 ships descriptors,
+Phase 5 integrates.
+
+**Phase 3 emitters** (in `combining.{h,cpp}`):
+
+```c++
+emit_implies_elim(op, shadow, target_pos) → ImpliesElimSite
+emit_or_elim(op, shadow, target_pos)      → OrElimSite
+emit_exists_elim(op, shadow, target_pos)  → ExistsElimSite
+```
+
+**Phase 3 tests.** Unit-level: descriptor field-mapping per op
+variant. End-to-end LKRVerifier acceptance at Phase 5.
 
 ### 6.3 Phase 4 — structural (assume, fix, ExistsElim, Qed, classical)
 
