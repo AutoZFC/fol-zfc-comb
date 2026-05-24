@@ -1,24 +1,21 @@
-// Stage 1 (nd_internalize) Phase 1 tests — compute_transitive_facts.
+// Stage 1 (nd_internalize) tests.
 //
-// Spec: src/proof/translate/theorem_facts.h
+// Phase 1 (theorem_facts.h):
+//   compute_transitive_facts on the typed IR
 //
-// Covers facts(P) computation on the typed IR:
-//   - direct_facts: Use(F).axiom.sentence for axiom and theorem cites
-//   - transitive closure via TheoremFactsMap
-//   - dedup
-//   - lex-sort by SentenceHandle.id() (deterministic order)
-//   - input-gate rejection of SchemaInst (Stage 1's schema macro runs
-//     upstream of this closure)
-//   - missing-theorem-in-map error (build-order bug surfacing)
+// Phase 2 (nd_internalize/schema_macro.h):
+//   replaces SchemaInst with Use(SH(φᵢ)), closed-instance only
 //
-// Phase 1 is shared component, not the Stage 1 pass itself; tests live
-// here so the Stage 1 test target owns its full surface as it grows.
+// Covers facts(P) computation, schema macro semantics, and the
+// soundness checks each phase commits to at its boundary.
 
 #include "src/core/formula.h"
 #include "src/parser/parser.h"
 #include "src/proof/nd/lowering.h"
 #include "src/proof/nd/ops.h"
+#include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
+#include "src/proof/translate/nd_internalize/schema_macro.h"
 #include "src/proof/translate/theorem_facts.h"
 #include "src/runtime/runtime.h"
 
@@ -32,6 +29,8 @@ using namespace logic;
 using namespace logic::proof;
 using logic::proof::translate::TheoremFactsMap;
 using logic::proof::translate::compute_transitive_facts;
+using logic::proof::translate::nd_internalize::SchemaMacroResult;
+using logic::proof::translate::nd_internalize::schema_macro;
 
 namespace {
 
@@ -414,9 +413,276 @@ void test_lex_sort_determinism() {
     }
 }
 
+// =========================================================================
+// Phase 2 — schema_macro
+// =========================================================================
+//
+// Each Phase 2 test loads a Runtime with the unary_self_impl schema:
+//
+//   schema unary_self_impl [P(1)]: forall x. (P(x) -> P(x))
+//
+// The schema is proven once, then per-test we lower a claim's proof
+// containing one or more SchemaInst ops and feed the lowered Program
+// through schema_macro.
+
+// Set up a Runtime with the unary_self_impl schema proven. Returns the
+// SchemaHandle; aborts on setup failure (test fixture, not test
+// content).
+SchemaHandle setup_unary_self_impl(Runtime& rt) {
+    auto parsed = rt.load_with_proofs(R"(
+        schema unary_self_impl [P(1)]: forall x. (P(x) -> P(x))
+
+        proof unary_self_impl:
+            fix x
+            h_assume = assume P(x)
+            h_impl = implies_intro h_assume
+            h_all = forall_intro h_impl
+            qed h_all
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "setup: parse fail: " << parsed.error().to_string() << "\n";
+        std::abort();
+    }
+    auto exec = rt.execute_all_proofs(parsed.value());
+    if (!exec.ok()) {
+        std::cerr << "setup: execute fail: " << exec.error().to_string() << "\n";
+        std::abort();
+    }
+    return rt.context().find_schema_handle("unary_self_impl").value();
+}
+
+// Count Use ops in a program (any AxiomRef target).
+size_t count_use(const Program<nd::Instr>& p) {
+    size_t n = 0;
+    for (const auto& instr : p.instrs)
+        if (std::holds_alternative<nd::Use>(instr)) ++n;
+    return n;
+}
+
+// Count SchemaInst ops in a program.
+size_t count_schema_inst(const Program<nd::Instr>& p) {
+    size_t n = 0;
+    for (const auto& instr : p.instrs)
+        if (std::holds_alternative<nd::SchemaInst>(instr)) ++n;
+    return n;
+}
+
+// =========================================================================
+// Phase 2 Test 1: program with no SchemaInst → identity pass-through.
+// =========================================================================
+void test_macro_no_schemainst() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim p_self: p -> p
+        proof p_self:
+            h = assume p
+            h2 = implies_intro h
+            qed h2
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(r.value().proof.instrs.size(), prog.instrs.size());
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_TRUE(r.value().synthetic_facts.empty());
+}
+
+// =========================================================================
+// Phase 2 Test 2: single closed SchemaInst → Use(SH(φᵢ)).
+//
+//   schema_inst unary_self_impl { P: \y. q(y) }
+//     resolves to:  forall x. (q(x) -> q(x))    (closed)
+// =========================================================================
+void test_macro_single_closed() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_inst: forall x. (q(x) -> q(x))
+        proof use_inst:
+            h = schema_inst unary_self_impl { P: \y. q(y) }
+            qed h
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    EXPECT_EQ(count_schema_inst(prog), size_t{1});
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) {
+        std::cerr << "schema_macro: " << r.error().to_string() << "\n";
+        return;
+    }
+
+    // SchemaInst replaced by Use; one synthetic fact registered.
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(count_use(r.value().proof), size_t{1});
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{1});
+
+    // The synthetic fact's formula must structurally equal the claim
+    // goal (instance forall x. (q(x) -> q(x))).
+    SentenceHandle sh = r.value().synthetic_facts[0];
+    auto claim = rt.context().find_claim("use_inst");
+    EXPECT_TRUE(claim.has_value());
+    if (claim.has_value()) {
+        EXPECT_EQ(sh, claim.value());
+    }
+
+    // Use op's AxiomRef.sentence == synthetic_facts[0].
+    bool found_use = false;
+    for (const auto& instr : r.value().proof.instrs) {
+        if (const auto* u = std::get_if<nd::Use>(&instr)) {
+            EXPECT_EQ(u->axiom.sentence, sh);
+            found_use = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_use);
+}
+
+// =========================================================================
+// Phase 2 Test 3: two SchemaInsts with structurally-equal instances →
+// FormulaRegistry interns to one SH; synthetic_facts has 1 entry but
+// proof has 2 Use ops.
+// =========================================================================
+void test_macro_two_same_instances_dedup() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_twice: (forall x. (q(x) -> q(x))) & (forall x. (q(x) -> q(x)))
+        proof use_twice:
+            h1 = schema_inst unary_self_impl { P: \y. q(y) }
+            h2 = schema_inst unary_self_impl { P: \y. q(y) }
+            h_and = and_intro h1, h2
+            qed h_and
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    EXPECT_EQ(count_schema_inst(prog), size_t{2});
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(count_use(r.value().proof), size_t{2});
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{1});      // dedup
+}
+
+// =========================================================================
+// Phase 2 Test 4: two SchemaInsts with structurally-distinct instances
+// → two synthetic facts.
+//
+//   { P: \y. q(y) } → forall x. (q(x) -> q(x))
+//   { P: \z. r(z) } → forall x. (r(x) -> r(x))      (distinct)
+// =========================================================================
+void test_macro_two_distinct_instances() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_two: (forall x. (q(x) -> q(x))) & (forall x. (r(x) -> r(x)))
+        proof use_two:
+            h1 = schema_inst unary_self_impl { P: \y. q(y) }
+            h2 = schema_inst unary_self_impl { P: \z. r(z) }
+            h_and = and_intro h1, h2
+            qed h_and
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    EXPECT_EQ(count_schema_inst(r.value().proof), size_t{0});
+    EXPECT_EQ(count_use(r.value().proof), size_t{2});
+    EXPECT_EQ(r.value().synthetic_facts.size(), size_t{2});
+    EXPECT_TRUE(r.value().synthetic_facts[0] != r.value().synthetic_facts[1]);
+}
+
+// =========================================================================
+// Phase 2 Test 5: SchemaInst with binding referencing an outer fix-var
+// → Phase 3 deferral error.
+//
+//   fix a                                          # a : Fixed(0)
+//   h = schema_inst unary_self_impl { P: \y. eq(y, a) }
+//         lambda body references 'a' → empty-name_table resolution fails.
+// =========================================================================
+void test_macro_open_instance_defers() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_open: forall a. (eq(a, a) -> eq(a, a))
+        proof use_open:
+            fix a
+            h = schema_inst unary_self_impl { P: \y. eq(y, a) }
+            h_all = forall_intro h
+            qed h_all
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    EXPECT_EQ(count_schema_inst(prog), size_t{1});
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_ERR(r);   // open instance — Phase 3 not implemented
+}
+
+// =========================================================================
+// Phase 2 Test 6: schema_macro's output passes NDVerifier against the
+// claim's goal — operational equivalence between SchemaInst and
+// Use(synthetic-instance) is preserved.
+// =========================================================================
+void test_macro_output_verifies() {
+    Runtime rt;
+    setup_unary_self_impl(rt);
+
+    auto parsed = rt.load_with_proofs(R"(
+        claim use_inst: forall x. (q(x) -> q(x))
+        proof use_inst:
+            h = schema_inst unary_self_impl { P: \y. q(y) }
+            qed h
+    )");
+    if (!parsed.ok()) { ++g_failed; return; }
+    Program<nd::Instr> prog = lower_or_die(parsed.value().proofs[0], rt.context());
+
+    auto r = schema_macro(rt.context(), prog);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return;
+
+    // Verify the macroed proof against the original claim goal.
+    auto claim = rt.context().find_claim("use_inst");
+    EXPECT_TRUE(claim.has_value());
+    if (!claim.has_value()) return;
+    FormulaHandle goal = claim.value().get().root();
+
+    nd::NDVerifier v;
+    Proof p{};
+    p.system = System::ND;
+    p.body   = r.value().proof;
+    auto vr = v.verify(rt.context(), goal, p);
+    EXPECT_TRUE(vr.ok());
+    if (!vr.ok()) {
+        std::cerr << "verify failed: " << vr.error().to_string() << "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
+    // Phase 1: compute_transitive_facts
     test_empty();
     test_single_axiom();
     test_two_axioms_sorted();
@@ -426,6 +692,14 @@ int main() {
     test_missing_theorem_errors();
     test_schema_inst_rejected();
     test_lex_sort_determinism();
+
+    // Phase 2: schema_macro (closed instances)
+    test_macro_no_schemainst();
+    test_macro_single_closed();
+    test_macro_two_same_instances_dedup();
+    test_macro_two_distinct_instances();
+    test_macro_open_instance_defers();
+    test_macro_output_verifies();
 
     std::cerr << "nd_internalize_test: " << g_passed
               << " passed, " << g_failed << " failed\n";

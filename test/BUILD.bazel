@@ -235,7 +235,9 @@ cc_test(
     ],
 )
 
-# Stage 1 (nd_internalize) Phase 1: compute_transitive_facts on the typed IR.
+# Stage 1 (nd_internalize) tests:
+#   Phase 1 — compute_transitive_facts on the typed IR
+#   Phase 2 — schema_macro (closed-instance replacement)
 cc_test(
     name = "nd_internalize_test",
     srcs = ["nd_internalize_test.cpp"],
@@ -245,7 +247,9 @@ cc_test(
         "//src/proof:proof_value",
         "//src/proof/nd:lowering",
         "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
         "//src/proof/translate:theorem_facts",
+        "//src/proof/translate/nd_internalize:schema_macro",
         "//src/runtime",
     ],
 )

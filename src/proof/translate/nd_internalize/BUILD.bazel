@@ -1,0 +1,20 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Stage 1 (ND→ND citation internalization) — Phase 2: schema macro.
+#
+# schema_macro replaces every SchemaInst(S, σ) op with Use(SH(φᵢ)) where
+# φᵢ is the resolved instance formula, registered as a Sentence in ctx.
+# Closed-instance only; open instances (free Fixed) are Phase 3.
+cc_library(
+    name = "schema_macro",
+    srcs = ["schema_macro.cpp"],
+    hdrs = ["schema_macro.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof:schema_resolve",
+        "//src/proof/nd:ops",
+        "//src/util:error",
+    ],
+)
