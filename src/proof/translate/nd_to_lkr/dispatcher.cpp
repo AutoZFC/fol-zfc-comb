@@ -8,7 +8,9 @@
 
 #include "src/core/formula.h"
 
+#include <algorithm>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -89,6 +91,72 @@ util::ResultStatus emit_implies_elim_full(
     size_t                     target_pos,
     std::vector<lkr::Instr>&   out);
 
+// Multiplicative And-split helper. Mirrors cut_spine's emit_and_split:
+// emits And{principal, left_partition} with left_partition computed as
+// (parent indices) - {principal} - right_needs. Returns LEFT and RIGHT
+// post-state shadows plus remaps from parent indices to child indices.
+struct AndSplitResult {
+    SequentShadow                        left;
+    SequentShadow                        right;
+    size_t                               left_phi_idx{0};
+    size_t                               right_theta_idx{0};
+    std::unordered_map<size_t, size_t>   left_remap;   // parent → LEFT child
+    std::unordered_map<size_t, size_t>   right_remap;  // parent → RIGHT child
+};
+
+util::Result<AndSplitResult> emit_and_split_local(
+    const SequentShadow&        parent,
+    size_t                      principal,
+    const std::vector<size_t>&  right_needs,
+    FormulaHandle               phi,
+    FormulaHandle               theta,
+    std::vector<lkr::Instr>&    out)
+{
+    std::unordered_set<size_t> right_set(
+        right_needs.begin(), right_needs.end());
+    if (right_set.count(principal)) {
+        return MAKE_ERROR
+            << "emit_and_split_local: principal #" << principal
+            << " appears in right_needs";
+    }
+
+    std::vector<size_t> left_partition;
+    left_partition.reserve(parent.entries.size());
+    for (size_t k = 0; k < parent.entries.size(); ++k) {
+        if (k == principal) continue;
+        if (right_set.count(k)) continue;
+        left_partition.push_back(k);
+    }
+
+    out.emplace_back(lkr::And{{}, principal, left_partition});
+
+    AndSplitResult s;
+    s.left.lkr_term_for     = parent.lkr_term_for;
+    s.left.step_to_neg_idx  = parent.step_to_neg_idx;
+    s.right.lkr_term_for    = parent.lkr_term_for;
+    s.right.step_to_neg_idx = parent.step_to_neg_idx;
+
+    std::vector<size_t> sorted_left = left_partition;
+    std::sort(sorted_left.begin(), sorted_left.end());
+    for (size_t i : sorted_left) {
+        s.left_remap[i] = s.left.entries.size();
+        s.left.entries.push_back(parent.entries[i]);
+    }
+    s.left_phi_idx = s.left.entries.size();
+    s.left.entries.push_back(phi);
+
+    for (size_t i = 0; i < parent.entries.size(); ++i) {
+        if (i == principal) continue;
+        if (!right_set.count(i)) continue;
+        s.right_remap[i] = s.right.entries.size();
+        s.right.entries.push_back(parent.entries[i]);
+    }
+    s.right_theta_idx = s.right.entries.size();
+    s.right.entries.push_back(theta);
+
+    return s;
+}
+
 // Closer family (Phase 5e.2): NOT / BottomElim / ClassicalAbsurd.
 // All three discharge a contradiction via the NotElim ghost at
 // `bottom`. The closer emits Cut(NNF(F_neg)) + Cut(NNF(F_formula))
@@ -102,6 +170,26 @@ util::ResultStatus emit_contradiction_close(
     uint32_t                 closer_step_idx,
     StepRef                  notelim_bottom,
     bool                     record_assume_dual,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out);
+
+// or_elim full emission (Phase 5e.4). 3 Cuts + Weakening{C} + outer
+// And on ¬or + two nested Ands on ¬ac and ¬bc + 4 AxiomLits.
+util::ResultStatus emit_or_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const nd::OrElim&        op,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out);
+
+// exists_elim full emission (Phase 5e.4). 1 Cut(∃x.φ) on the existential
+// formula step + Forall on the dualized ∀x.¬φ with eigen v + recurse on
+// the body's last step (the block's C-deriving step).
+util::ResultStatus emit_exists_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const nd::ExistsIntro&   op,
+    uint32_t                 closer_step_idx,
     size_t                   target_pos,
     std::vector<lkr::Instr>& out);
 
@@ -195,14 +283,14 @@ util::ResultStatus translate_step_impl(
                     ictx, op, shadow, target_pos, out, norm_demand));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ExistsIntro>) {
-                if (!op.witness.has_value()) {
-                    return MAKE_ERROR
-                        << "translate_step: ExistsIntro no-witness form "
-                           "(EXISTS_ELIM closer) requires Phase 5e";
+                if (op.witness.has_value()) {
+                    TRY_ASSIGN(r, intros::emit_exists_intro(
+                        ictx, op, shadow, target_pos, out, norm_demand));
+                    return handle_intro_result(dcc, std::move(r), out);
                 }
-                TRY_ASSIGN(r, intros::emit_exists_intro(
-                    ictx, op, shadow, target_pos, out, norm_demand));
-                return handle_intro_result(dcc, std::move(r), out);
+                // No-witness form = EXISTS_ELIM block closer (Phase 5e.4).
+                return emit_exists_elim_full(
+                    dcc, std::move(shadow), op, step.idx, target_pos, out);
             } else if constexpr (std::is_same_v<T, nd::ExcludedMiddle>) {
                 TRY_ASSIGN(r, intros::emit_excluded_middle(
                     ictx, op, shadow, target_pos, out, norm_demand));
@@ -256,9 +344,11 @@ util::ResultStatus translate_step_impl(
                        "ForallIntro/INSTANCE handling (Phase 5e)";
             }
 
-            // ---- combining elims (Phase 5d) ------------------------
+            // ---- combining elims (Phase 5d, 5e.4) ------------------
             else if constexpr (std::is_same_v<T, nd::ImpliesElim>) {
                 return emit_implies_elim_full(dcc, shadow, op, target_pos, out);
+            } else if constexpr (std::is_same_v<T, nd::OrElim>) {
+                return emit_or_elim_full(dcc, std::move(shadow), op, target_pos, out);
             }
 
             // ---- closer family (Phase 5e.2) -----------------------
@@ -276,20 +366,19 @@ util::ResultStatus translate_step_impl(
                     /*record_assume_dual=*/true, target_pos, out);
             }
 
-            // ---- Assume leaf (Phase 5e.1) -------------------------
-            // Recursing on an Assume step means a downstream op
-            // references the assumption's formula. The enclosing
-            // IMPLIES/NOT/CLASSICAL_ABSURD intro placed NNF(¬A) at a
-            // position recorded in shadow.step_to_neg_idx. emit_close
-            // discharges via the dual at (target_pos, dual_pos).
-            else if constexpr (std::is_same_v<T, nd::Assume>) {
+            // ---- Assume / ExistsElim leaf (Phase 5e.1 + 5e.4) -----
+            // Recursing on an Assume step (or ExistsElim opener) means
+            // a downstream op references the assumption / witness body.
+            // The enclosing intro / EXISTS_ELIM emission placed the
+            // dual at shadow.step_to_neg_idx[step.idx]; emit_close
+            // discharges via (target_pos, dual_pos).
+            else if constexpr (std::is_same_v<T, nd::Assume> ||
+                               std::is_same_v<T, nd::ExistsElim>) {
                 auto it = shadow.step_to_neg_idx.find(step.idx);
                 if (it == shadow.step_to_neg_idx.end()) {
                     return MAKE_ERROR
-                        << "translate_step: Assume #" << step.idx
-                        << " has no recorded dual position — no "
-                           "enclosing IMPLIES/NOT/CLASSICAL_ABSURD intro "
-                           "placed it";
+                        << "translate_step: leaf step #" << step.idx
+                        << " has no recorded dual position";
                 }
                 size_t dual_pos = it->second;
                 EmitCloseContext ecc{dcc.builder};
@@ -527,6 +616,281 @@ util::ResultStatus emit_contradiction_close(
     // outer_dual_pos and NNF(F_neg) at inner_dual_pos).
     EmitCloseContext ecc{dcc.builder};
     return emit_close(ecc, right_form, outer_dual_pos, inner_dual_pos, out);
+}
+
+// or_elim(or_formula: A∨B, ac: A→C, bc: B→C) ⊢ C.
+//
+// LK construction (cut-minimal):
+//   1. Cut(NNF(or_formula)): LEFT proves A∨B; RIGHT carries
+//      NNF(¬or) = ¬A ∧ ¬B.
+//   2. Cut(NNF(ac)): LEFT proves A→C; RIGHT carries NNF(¬ac) = A ∧ ¬C.
+//   3. Cut(NNF(bc)): LEFT proves B→C; RIGHT carries NNF(¬bc) = B ∧ ¬C.
+//   4. Weakening{NNF(C)} to duplicate the target (both outer And sides
+//      need a copy of C for the ¬C dual).
+//   5. Outer And on ¬or = ¬A ∧ ¬B:
+//        LEFT  inherits {¬ac, C(orig)}; phi = ¬A.
+//        RIGHT inherits {¬bc, C(dup)}; psi = ¬B.
+//   6a. LEFT outer: And on ¬ac = A ∧ ¬C:
+//        LEFT inner = [¬A, A]      — emit_close on the dual pair.
+//        RIGHT inner = [C, ¬C]     — emit_close on the dual pair.
+//   6b. RIGHT outer: And on ¬bc = B ∧ ¬C:
+//        LEFT inner = [¬B, B]      — emit_close.
+//        RIGHT inner = [C, ¬C]     — emit_close.
+//
+// Total: 3 Cuts + 1 Weakening + 3 Ands + 4 emit_closes, plus the
+// recursion on or_formula, ac, bc.
+util::ResultStatus emit_or_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const nd::OrElim&        op,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out)
+{
+    if (op.or_formula.idx >= dcc.trace.step_env.size() ||
+        op.ac.idx         >= dcc.trace.step_env.size() ||
+        op.bc.idx         >= dcc.trace.step_env.size()) {
+        return MAKE_ERROR
+            << "emit_or_elim_full: step refs out of trace range";
+    }
+    if (target_pos >= shadow.entries.size()) {
+        return MAKE_ERROR
+            << "emit_or_elim_full: target_pos out of range";
+    }
+
+    FormulaHandle or_f       = dcc.trace.step_env[op.or_formula.idx];
+    FormulaHandle ac_f       = dcc.trace.step_env[op.ac.idx];
+    FormulaHandle bc_f       = dcc.trace.step_env[op.bc.idx];
+    FormulaHandle or_nnf     = dcc.builder.to_nnf(or_f);
+    FormulaHandle ac_nnf     = dcc.builder.to_nnf(ac_f);
+    FormulaHandle bc_nnf     = dcc.builder.to_nnf(bc_f);
+    FormulaHandle neg_or_nnf = dcc.builder.to_nnf_neg(or_f);
+    FormulaHandle neg_ac_nnf = dcc.builder.to_nnf_neg(ac_f);
+    FormulaHandle neg_bc_nnf = dcc.builder.to_nnf_neg(bc_f);
+    FormulaHandle nnf_c      = shadow.entries[target_pos];
+
+    // Cut 1: or_formula.
+    out.emplace_back(lkr::Cut{{}, or_nnf});
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(or_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), op.or_formula, pos,
+            Demand{DemandNone{}}, out));
+    }
+    size_t i_or = shadow.entries.size();
+    shadow.entries.push_back(neg_or_nnf);
+
+    // Cut 2: ac.
+    out.emplace_back(lkr::Cut{{}, ac_nnf});
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(ac_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), op.ac, pos,
+            Demand{DemandNone{}}, out));
+    }
+    size_t i_ac = shadow.entries.size();
+    shadow.entries.push_back(neg_ac_nnf);
+
+    // Cut 3: bc.
+    out.emplace_back(lkr::Cut{{}, bc_nnf});
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(bc_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), op.bc, pos,
+            Demand{DemandNone{}}, out));
+    }
+    size_t i_bc = shadow.entries.size();
+    shadow.entries.push_back(neg_bc_nnf);
+
+    // Weakening: duplicate C.
+    out.emplace_back(lkr::Weakening{{}, nnf_c});
+    size_t i_c_dup = shadow.entries.size();
+    shadow.entries.push_back(nnf_c);
+
+    // Sanity: neg_or = ¬A ∧ ¬B (And-shaped).
+    if (!neg_or_nnf.get().is_compound() ||
+        neg_or_nnf.get().as_compound().op != Op::And) {
+        return MAKE_ERROR
+            << "emit_or_elim_full: NNF(¬or) is not And-compound";
+    }
+    FormulaHandle neg_a = neg_or_nnf.get().as_compound().left;
+    FormulaHandle neg_b = neg_or_nnf.get().as_compound().right;
+
+    // Outer And on i_or. RIGHT_needs = {i_bc, i_c_dup} (so RIGHT gets
+    // ¬bc and the duplicated C). LEFT gets {i_ac, target_pos (C)}.
+    TRY_ASSIGN(outer, emit_and_split_local(
+        shadow, i_or, {i_bc, i_c_dup}, neg_a, neg_b, out));
+
+    // LEFT outer subgoal: handles A-case via ¬ac.
+    {
+        FormulaHandle ac_entry =
+            outer.left.entries[outer.left_remap.at(i_ac)];
+        if (!ac_entry.get().is_compound() ||
+            ac_entry.get().as_compound().op != Op::And) {
+            return MAKE_ERROR
+                << "emit_or_elim_full: NNF(¬ac) is not And-compound";
+        }
+        FormulaHandle nnf_a   = ac_entry.get().as_compound().left;
+        FormulaHandle neg_c_l = ac_entry.get().as_compound().right;
+        size_t l_i_ac  = outer.left_remap.at(i_ac);
+        size_t l_neg_a = outer.left_phi_idx;
+        size_t l_c     = outer.left_remap.at(target_pos);
+
+        TRY_ASSIGN(inner, emit_and_split_local(
+            outer.left, l_i_ac, {l_c}, nnf_a, neg_c_l, out));
+        size_t in_l_neg_a = inner.left_remap.at(l_neg_a);
+        EmitCloseContext ecc{dcc.builder};
+        TRY(emit_close(ecc, inner.left, inner.left_phi_idx, in_l_neg_a, out));
+        size_t in_r_c = inner.right_remap.at(l_c);
+        TRY(emit_close(ecc, inner.right, inner.right_theta_idx, in_r_c, out));
+    }
+
+    // RIGHT outer subgoal: handles B-case via ¬bc (symmetric).
+    {
+        FormulaHandle bc_entry =
+            outer.right.entries[outer.right_remap.at(i_bc)];
+        if (!bc_entry.get().is_compound() ||
+            bc_entry.get().as_compound().op != Op::And) {
+            return MAKE_ERROR
+                << "emit_or_elim_full: NNF(¬bc) is not And-compound";
+        }
+        FormulaHandle nnf_b   = bc_entry.get().as_compound().left;
+        FormulaHandle neg_c_r = bc_entry.get().as_compound().right;
+        size_t r_i_bc    = outer.right_remap.at(i_bc);
+        size_t r_neg_b   = outer.right_theta_idx;
+        size_t r_c_dup   = outer.right_remap.at(i_c_dup);
+
+        TRY_ASSIGN(inner, emit_and_split_local(
+            outer.right, r_i_bc, {r_c_dup}, nnf_b, neg_c_r, out));
+        size_t in_l_neg_b = inner.left_remap.at(r_neg_b);
+        EmitCloseContext ecc{dcc.builder};
+        TRY(emit_close(ecc, inner.left, inner.left_phi_idx, in_l_neg_b, out));
+        size_t in_r_c_dup = inner.right_remap.at(r_c_dup);
+        return emit_close(ecc, inner.right, inner.right_theta_idx, in_r_c_dup, out);
+    }
+}
+
+// exists_elim translation (closer of EXISTS_ELIM block).
+//
+// LK construction:
+//   1. Find the EXISTS_ELIM opener (an `nd::ExistsElim` step) via
+//      closer_to_opener. Read its eigen from trace.term_env and its
+//      `formula` field (the ∃-deriving step).
+//   2. Cut(NNF(∃x.φ)): LEFT proves ∃x.φ via recursion on `formula`;
+//      RIGHT carries NNF(¬∃x.φ) = ∀x.NNF(¬φ) at cut_ex_idx.
+//   3. Forall{principal=cut_ex_idx, eigen=v}: replaces ∀x.¬φ with
+//      NNF(¬φ)[x:=v]. Now NNF(¬φ)[x:=v] is in scope at cut_ex_idx.
+//   4. Bind shadow.lkr_term_for[exists_elim_idx] = {lkr_ref=lkr_forall_idx,
+//      value=Term::fixed(v)} so body-side TermRef references to the
+//      witness resolve correctly. Also record
+//      step_to_neg_idx[exists_elim_idx] = cut_ex_idx for any body-
+//      side step-ref references.
+//   5. Recurse on the body's last step (op.body) with target_pos
+//      unchanged — body translates its proof of C, eventually closing
+//      via dualizations against ¬φ[x:=v] (if needed) and other
+//      in-scope assumptions.
+util::ResultStatus emit_exists_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const nd::ExistsIntro&   op,
+    uint32_t                 closer_step_idx,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out)
+{
+    auto co = dcc.closer_to_opener.find(closer_step_idx);
+    if (co == dcc.closer_to_opener.end()) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: closer #" << closer_step_idx
+            << " has no matching EXISTS_ELIM opener";
+    }
+    uint32_t exists_elim_idx = co->second;
+    if (exists_elim_idx >= dcc.prog.instrs.size()) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: opener #" << exists_elim_idx
+            << " out of program range";
+    }
+    const auto& opener_instr = dcc.prog.instrs[exists_elim_idx];
+    if (!std::holds_alternative<nd::ExistsElim>(opener_instr)) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: opener #" << exists_elim_idx
+            << " is not an ExistsElim";
+    }
+    const auto& opener = std::get<nd::ExistsElim>(opener_instr);
+
+    // Eigen from trace.term_env.
+    if (exists_elim_idx >= dcc.trace.term_env.size() ||
+        exists_elim_idx >= dcc.trace.term_present.size() ||
+        !dcc.trace.term_present[exists_elim_idx]) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: ExistsElim #" << exists_elim_idx
+            << " has no eigen in trace";
+    }
+    const Term& eigen_term = dcc.trace.term_env[exists_elim_idx];
+    if (!eigen_term.is_fixed()) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: ExistsElim's eigen is not a "
+               "fixed variable";
+    }
+    var_index eigen = eigen_term.as_variable();
+
+    // ∃x.φ formula from opener.formula.
+    if (opener.formula.idx >= dcc.trace.step_env.size()) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: ExistsElim.formula #"
+            << opener.formula.idx << " out of trace range";
+    }
+    FormulaHandle ex_f       = dcc.trace.step_env[opener.formula.idx];
+    FormulaHandle ex_nnf     = dcc.builder.to_nnf(ex_f);
+    FormulaHandle neg_ex_nnf = dcc.builder.to_nnf_neg(ex_f);
+
+    // Step 1: Cut(NNF(∃x.φ)).
+    out.emplace_back(lkr::Cut{{}, ex_nnf});
+
+    // LEFT: shadow + NNF(∃x.φ) at end. Recurse on opener.formula.
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(ex_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), opener.formula, pos,
+            Demand{DemandNone{}}, out));
+    }
+
+    // RIGHT: shadow + NNF(¬∃x.φ) = ∀x.NNF(¬φ) at cut_ex_idx.
+    size_t cut_ex_idx = shadow.entries.size();
+    shadow.entries.push_back(neg_ex_nnf);
+
+    // Step 2: Forall on cut_ex_idx with eigen.
+    size_t lkr_forall_idx = out.size();
+    out.emplace_back(lkr::Forall{{}, cut_ex_idx, eigen});
+
+    // Update shadow.entries[cut_ex_idx] to NNF(¬φ)[x:=v].
+    if (!neg_ex_nnf.get().is_quantified() ||
+        neg_ex_nnf.get().as_quantified().op != Op::Forall) {
+        return MAKE_ERROR
+            << "emit_exists_elim_full: NNF(¬∃x.φ) is not Forall";
+    }
+    FormulaHandle neg_body = neg_ex_nnf.get().as_quantified().body;
+    Term v = Term::fixed(eigen);
+    shadow.entries[cut_ex_idx] =
+        dcc.builder.instantiate_quantifier_body(neg_body, v);
+
+    // Step 3: bind shadow's term-mapping for the eigen.
+    SequentShadow::TermBinding binding;
+    binding.lkr_ref = TermRef{static_cast<uint32_t>(lkr_forall_idx)};
+    binding.value   = v;
+    shadow.lkr_term_for[exists_elim_idx] = binding;
+    shadow.step_to_neg_idx[exists_elim_idx] = cut_ex_idx;
+
+    // Step 4: recurse on body's last step.
+    return translate_step_impl(
+        dcc, std::move(shadow), op.body, target_pos,
+        Demand{DemandNone{}}, out);
 }
 
 }  // namespace

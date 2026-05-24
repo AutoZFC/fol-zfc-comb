@@ -314,6 +314,65 @@ void test_forall_elim_not_yet_supported() {
 // Goal: forall x. (P(x) -> P(x)). Body: fix x; assume P(x); implies_intro;
 // forall_intro. Exercises Fix opener + ForallIntro NONE integration.
 // =========================================================================
+// =========================================================================
+// Test 10 (5e.4): or_elim. Prove (A | A) -> A via or_elim with two trivial
+// A -> A implications. Exercises 3-Cut + Weakening + nested And pattern.
+// =========================================================================
+// =========================================================================
+// Test 11 (5e.4): exists_elim. Prove (exists x. P(x)) -> (exists x. P(x))
+// via exists_elim opening a witness scope and exists_intro using the
+// witness to re-derive the existential.
+// =========================================================================
+void test_exists_elim_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim ex_self: (exists x. P(x)) -> (exists x. P(x))
+        proof ex_self:
+            h_ex = assume exists x. P(x)
+            h_pw = exists_elim h_ex, w
+            h_again = exists_intro h_pw, w
+            h_close = exists_intro h_again
+            h_out = implies_intro h_close
+            qed h_out
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("ex_self");
+    if (!sh.has_value()) { std::cerr << "no ex_self claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "ex_self"));
+}
+
+void test_or_elim_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim or_self: (A | A) -> A
+        proof or_self:
+            h_or = assume A | A
+            h_ac_in = assume A
+            h_ac = implies_intro h_ac_in
+            h_bc_in = assume A
+            h_bc = implies_intro h_bc_in
+            h_c = or_elim h_or, h_ac, h_bc
+            h_out = implies_intro h_c
+            qed h_out
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("or_self");
+    if (!sh.has_value()) { std::cerr << "no or_self claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "or_self"));
+}
+
 void test_forall_intro_e2e() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -394,6 +453,8 @@ int main() {
     test_implies_intro_of_assume_e2e();
     test_not_intro_e2e();
     test_forall_intro_e2e();
+    test_or_elim_e2e();
+    test_exists_elim_e2e();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";
