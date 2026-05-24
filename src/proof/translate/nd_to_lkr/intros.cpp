@@ -154,18 +154,22 @@ util::Result<IntroResult> emit_forall_intro(
     std::vector<lkr::Instr>& out,
     Demand                   demand)
 {
-    if (std::holds_alternative<DemandInstance>(demand)) {
-        // Phase 5c will implement the INSTANCE short-circuit (eigen
-        // substitution via shadow.lkr_term_for rebinding). For now,
-        // reaching this is a translator routing bug.
-        return MAKE_ERROR
-            << "emit_forall_intro: DemandInstance handling not yet "
-               "implemented (reserved for Phase 5c)";
-    }
-    TRY(require_demand_none(demand, "emit_forall_intro"));
     if (f_k_idx >= shadow.entries.size()) {
         return MAKE_ERROR << "emit_forall_intro: f_k_idx out of range";
     }
+
+    // Demand-aware INSTANCE(t): substitute eigen→t in the body instead
+    // of emitting Forall. shadow.entries[f_k_idx] already holds
+    // NNF(φ[x:=t]) (the consumer placed it there). The body's
+    // recursion uses the substituted formula at f_k_idx; any TermRef
+    // references to this Fix's eigen resolve to t via the dispatcher's
+    // post-emit lkr_term_for binding (caller handles).
+    if (std::holds_alternative<DemandInstance>(demand)) {
+        // No LKR ops emitted. Return premise pointing at op.body.
+        return IntroResult{OnePremise{shadow, f_k_idx, op.body}};
+    }
+    TRY(require_demand_none(demand, "emit_forall_intro"));
+
     auto body = require_quantified(shadow.entries[f_k_idx], Op::Forall,
                                    "emit_forall_intro");
     if (!body.ok()) return body.error();

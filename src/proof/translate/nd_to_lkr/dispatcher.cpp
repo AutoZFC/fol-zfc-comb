@@ -336,12 +336,11 @@ util::ResultStatus translate_step_impl(
                     dcc, std::move(shadow), desc.producer,
                     desc.target_pos, desc.demand, out);
             } else if constexpr (std::is_same_v<T, nd::ForallElim>) {
-                // ForallElim promotes DemandInstance(t), which requires
-                // ForallIntro to substitute eigen → t. That depends on
-                // block_tree fix-step lookup, deferred to 5e.
-                return MAKE_ERROR
-                    << "translate_step: ForallElim requires "
-                       "ForallIntro/INSTANCE handling (Phase 5e)";
+                TRY_ASSIGN(desc, projections::emit_forall_elim(
+                    pctx, op, shadow, target_pos));
+                return translate_step_impl(
+                    dcc, std::move(shadow), desc.producer,
+                    desc.target_pos, desc.demand, out);
             }
 
             // ---- combining elims (Phase 5d, 5e.4) ------------------
@@ -366,12 +365,71 @@ util::ResultStatus translate_step_impl(
                     /*record_assume_dual=*/true, target_pos, out);
             }
 
-            // ---- Assume / ExistsElim leaf (Phase 5e.1 + 5e.4) -----
+            // ---- Use / SchemaInst (deprecated leaf; Stage 1 normally
+            // eliminates them, but kept for tests bypassing Stage 1).
+            // Cut-minimal: emit Cut(NNF(lemma)) so the lemma's NNF
+            // lands on LEFT (where CloseByLemma can match it), then
+            // close RIGHT via emit_close or demand-aware Exists.
+            else if constexpr (std::is_same_v<T, nd::Use> ||
+                               std::is_same_v<T, nd::SchemaInst>) {
+                FormulaHandle lemma_f       = dcc.trace.step_env[step.idx];
+                FormulaHandle lemma_nnf     = dcc.builder.to_nnf(lemma_f);
+                FormulaHandle neg_lemma_nnf = dcc.builder.to_nnf_neg(lemma_f);
+
+                out.emplace_back(lkr::Cut{{}, lemma_nnf});
+
+                // LEFT: lemma's NNF at end; CloseByLemma matches.
+                {
+                    lkr::CloseByLemma cb{};
+                    if constexpr (std::is_same_v<T, nd::Use>) {
+                        cb.target      = op.axiom;
+                        cb.source_name = op.source_name;
+                    } else {
+                        cb.target = op.data;
+                    }
+                    out.emplace_back(std::move(cb));
+                }
+
+                // RIGHT: ¬lemma's NNF appended. Demand-aware close.
+                size_t neg_pos = shadow.entries.size();
+                shadow.entries.push_back(neg_lemma_nnf);
+
+                if (auto* di = std::get_if<DemandInstance>(&norm_demand)) {
+                    if (!neg_lemma_nnf.get().is_quantified() ||
+                        neg_lemma_nnf.get().as_quantified().op != Op::Exists) {
+                        return MAKE_ERROR
+                            << "translate_step: Use/INSTANCE: NNF(¬lemma) "
+                               "is not Exists";
+                    }
+                    out.emplace_back(lkr::Exists{{}, neg_pos, di->lkr_ref});
+                    shadow.entries[neg_pos] =
+                        dcc.builder.instantiate_quantifier_body(
+                            neg_lemma_nnf.get().as_quantified().body, di->t);
+                }
+
+                EmitCloseContext ecc{dcc.builder};
+                return emit_close(ecc, shadow, target_pos, neg_pos, out);
+            }
+
+            // ---- Let — inert formula handle; never a recursion target
+            // in a well-formed proof, but if reached, emit nothing.
+            else if constexpr (std::is_same_v<T, nd::Let>) {
+                return util::Ok();
+            }
+
+            // ---- Assume / ExistsElim leaf (Phase 5e.1, 5e.4, 5e.5) -
             // Recursing on an Assume step (or ExistsElim opener) means
             // a downstream op references the assumption / witness body.
             // The enclosing intro / EXISTS_ELIM emission placed the
-            // dual at shadow.step_to_neg_idx[step.idx]; emit_close
-            // discharges via (target_pos, dual_pos).
+            // dual at shadow.step_to_neg_idx[step.idx].
+            //
+            // Under DemandNone: emit_close on (target_pos, dual_pos).
+            // Under DemandInstance(t, lkr_ref): the assumed formula is
+            //   ∀x.φ. Its dual at dual_pos is NNF(¬∀x.φ) = ∃x.NNF(¬φ).
+            //   Emit Exists{principal=dual_pos, witness=lkr_ref} to
+            //   instantiate the existential at t, leaving NNF(¬φ)[x:=t]
+            //   at dual_pos — the NNF-dual of target_pos's NNF(φ[x:=t]).
+            //   Then emit_close.
             else if constexpr (std::is_same_v<T, nd::Assume> ||
                                std::is_same_v<T, nd::ExistsElim>) {
                 auto it = shadow.step_to_neg_idx.find(step.idx);
@@ -381,17 +439,40 @@ util::ResultStatus translate_step_impl(
                         << " has no recorded dual position";
                 }
                 size_t dual_pos = it->second;
+
+                if (auto* di = std::get_if<DemandInstance>(&norm_demand)) {
+                    if (dual_pos >= shadow.entries.size()) {
+                        return MAKE_ERROR
+                            << "translate_step: leaf INSTANCE: dual_pos out of range";
+                    }
+                    FormulaHandle dual = shadow.entries[dual_pos];
+                    if (!dual.get().is_quantified() ||
+                        dual.get().as_quantified().op != Op::Exists) {
+                        return MAKE_ERROR
+                            << "translate_step: leaf INSTANCE: dual is not ∃-shaped";
+                    }
+                    out.emplace_back(lkr::Exists{{}, dual_pos, di->lkr_ref});
+                    shadow.entries[dual_pos] =
+                        dcc.builder.instantiate_quantifier_body(
+                            dual.get().as_quantified().body, di->t);
+                }
+
                 EmitCloseContext ecc{dcc.builder};
                 return emit_close(ecc, shadow, target_pos, dual_pos, out);
             }
 
-            // ---- ForallIntro (Phase 5e.3) -------------------------
+            // ---- ForallIntro (Phase 5e.3 + 5e.5) ------------------
             // Look up the matching FORALL-block opener (Fix step) via
             // closer_to_opener, then pull the eigen from trace.term_env.
-            // Pass to Phase 1's emit_forall_intro, then bind
-            // shadow.lkr_term_for[fix_idx] so body-side TermRefs (e.g.
-            // in nested Exists or recursive ForallElim) resolve to the
-            // LKR Forall instr just emitted.
+            //
+            // Under demand=NONE: pass eigen to Phase 1, emit LKR Forall,
+            // bind shadow.lkr_term_for[fix_idx] to the new Forall instr.
+            //
+            // Under demand=INSTANCE(t): Phase 1 short-circuits (no
+            // Forall emitted). Bind shadow.lkr_term_for[fix_idx] to
+            // demand.lkr_ref (the consumer's term binding) and set
+            // shadow.entries[target_pos] to NNF(φ[x:=t]) so the body's
+            // translation sees the instantiated formula.
             else if constexpr (std::is_same_v<T, nd::ForallIntro>) {
                 auto co = dcc.closer_to_opener.find(step.idx);
                 if (co == dcc.closer_to_opener.end()) {
@@ -415,15 +496,49 @@ util::ResultStatus translate_step_impl(
                 }
                 var_index eigen = fix_term.as_variable();
 
-                // emit_forall_intro emits the LKR Forall op; its instr
-                // index is out.size() at this point.
+                bool is_instance = std::holds_alternative<DemandInstance>(norm_demand);
+                Term inst_t;
+                TermRef inst_lkr_ref{};
+                if (is_instance) {
+                    const auto& di = std::get<DemandInstance>(norm_demand);
+                    inst_t       = di.t;
+                    inst_lkr_ref = di.lkr_ref;
+                    // Pre-substitute shadow.entries[target_pos] from
+                    // NNF(∀x.φ)[x:=v] (what NONE would produce) to the
+                    // demanded NNF(φ[x:=t]). We compute it from the
+                    // current shadow.entries[target_pos] which has
+                    // NNF(∀x.φ); instantiate its body at t.
+                    if (target_pos >= shadow.entries.size()) {
+                        return MAKE_ERROR
+                            << "translate_step: ForallIntro INSTANCE: "
+                               "target_pos out of range";
+                    }
+                    FormulaHandle outer = shadow.entries[target_pos];
+                    if (!outer.get().is_quantified() ||
+                        outer.get().as_quantified().op != Op::Forall) {
+                        return MAKE_ERROR
+                            << "translate_step: ForallIntro INSTANCE: "
+                               "target_pos entry is not Forall";
+                    }
+                    FormulaHandle body_f = outer.get().as_quantified().body;
+                    shadow.entries[target_pos] =
+                        dcc.builder.instantiate_quantifier_body(body_f, inst_t);
+                }
+
+                // emit_forall_intro emits the LKR Forall op (only under
+                // NONE); its instr index is out.size() at this point.
                 size_t lkr_forall_idx = out.size();
                 TRY_ASSIGN(r, intros::emit_forall_intro(
                     ictx, op, eigen, shadow, target_pos, out, norm_demand));
                 if (auto* one = std::get_if<intros::OnePremise>(&r)) {
                     SequentShadow::TermBinding binding;
-                    binding.lkr_ref = TermRef{static_cast<uint32_t>(lkr_forall_idx)};
-                    binding.value   = fix_term;
+                    if (is_instance) {
+                        binding.lkr_ref = inst_lkr_ref;
+                        binding.value   = inst_t;
+                    } else {
+                        binding.lkr_ref = TermRef{static_cast<uint32_t>(lkr_forall_idx)};
+                        binding.value   = fix_term;
+                    }
                     one->shadow.lkr_term_for[fix_idx] = binding;
                 }
                 return handle_intro_result(dcc, std::move(r), out);

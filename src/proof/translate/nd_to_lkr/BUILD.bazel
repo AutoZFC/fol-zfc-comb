@@ -209,7 +209,10 @@ cc_library(
     ],
 )
 
-# NDtoLKR — top-level Pass. Skeleton only (phases 4-9 pending).
+# NDtoLKR — top-level Pass. Cut-spine production path; cut-minimal
+# dispatcher exists alongside (see dispatcher.{h,cpp}) and is exercised
+# by test/cut_minimal_dispatcher_test. Pass wiring + hard cutover
+# pending demand-stack refactor.
 cc_library(
     name = "nd_to_lkr",
     srcs = ["nd_to_lkr.cpp"],

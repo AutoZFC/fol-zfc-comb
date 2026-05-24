@@ -34,11 +34,15 @@ struct DemandIffLeft {};                            // ↞ iff_elim_l: forward A
 struct DemandIffRight {};                           // ↞ iff_elim_r: reverse B→A.
 struct DemandDoubleNeg {};                          // ↞ double_neg_elim: strip ¬¬.
 
-// INSTANCE(t): ↞ forall_elim. The producer's ∀x.φ is instantiated at
-// the term `t`. Phase 1's demand-aware ForallIntro substitutes eigen→t
-// in the body when it sees this demand.
+// INSTANCE(t, lkr_ref): ↞ forall_elim. The producer's ∀x.φ is
+// instantiated at the term `t`. Phase 1's demand-aware ForallIntro
+// substitutes eigen→t in the body when it sees this demand;
+// shadow.lkr_term_for[fix_idx] is updated to {lkr_ref, t} so body-
+// side LKR-TermRef references (e.g. nested Exists witness) resolve
+// to the original LKR binding instr for t.
 struct DemandInstance {
-    Term t{};
+    Term    t{};
+    TermRef lkr_ref{};
 };
 
 using Demand = std::variant<

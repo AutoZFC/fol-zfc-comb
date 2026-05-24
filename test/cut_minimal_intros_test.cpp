@@ -559,20 +559,30 @@ void test_or_intro_l_rejects_demand() {
     CHECK(!r.ok());
 }
 
-void test_forall_intro_instance_reserved() {
+// ForallIntro under DemandInstance (Phase 5e.5): no LKR ops, routes
+// to op.body with shadow unchanged. The dispatcher pre-substitutes
+// shadow.entries[f_k_idx] and binds lkr_term_for; the emitter just
+// short-circuits.
+void test_forall_intro_demand_instance() {
     TestFixture f;
     SequentShadow shadow;
-    shadow.entries.push_back(parse_root(f.ctx(), "forall x. P(x)"));
+    // Under INSTANCE the dispatcher has already substituted the
+    // shadow entry to NNF(φ[x:=t]). Use any atomic stand-in.
+    shadow.entries.push_back(parse_root(f.ctx(), "A"));
     Ctx cc = f.make_ctx();
     nd::ForallIntro op{};
+    op.body = StepRef{77};
     std::vector<lkr::Instr> emitted;
-    // DemandInstance handling is reserved for Phase 5c.
     using logic::proof::translate::nd_to_lkr::DemandInstance;
     auto r = emit_forall_intro(
         cc, op, /*eigen=*/var_index{0},
         shadow, 0, emitted,
-        Demand{DemandInstance{Term::fixed(var_index{1})}});
-    CHECK(!r.ok());
+        Demand{DemandInstance{Term::fixed(var_index{1}), TermRef{42}}});
+    CHECK(r.ok());
+    if (!r.ok()) return;
+    CHECK(emitted.empty());
+    CHECK(std::holds_alternative<OnePremise>(r.value()));
+    CHECK(std::get<OnePremise>(r.value()).premise_step.idx == 77);
 }
 
 // Existing emitters fill StepRef fields under DemandNone.
@@ -635,7 +645,7 @@ int main() {
     test_iff_intro_demand_left();
     test_iff_intro_demand_right();
     test_or_intro_l_rejects_demand();
-    test_forall_intro_instance_reserved();
+    test_forall_intro_demand_instance();
     test_implies_intro_step_ref();
     test_and_intro_step_refs();
 

@@ -85,7 +85,7 @@ util::Result<RecurseDescriptor> emit_forall_elim(
     return RecurseDescriptor{
         op.formula,
         f_k_idx,
-        Demand{DemandInstance{t_it->second.value}}};
+        Demand{DemandInstance{t_it->second.value, t_it->second.lkr_ref}}};
 }
 
 }  // namespace logic::proof::translate::nd_to_lkr::projections

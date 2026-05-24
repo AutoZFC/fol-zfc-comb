@@ -323,6 +323,35 @@ void test_forall_elim_not_yet_supported() {
 // via exists_elim opening a witness scope and exists_intro using the
 // witness to re-derive the existential.
 // =========================================================================
+// =========================================================================
+// Test 12 (5e.5): ForallElim under DemandInstance. Prove
+// (forall x. P(x)) -> (forall y. P(y)) via forall_elim of the assumed
+// ∀x.P(x) at the fix y, then forall_intro to re-quantify.
+// =========================================================================
+void test_forall_elim_e2e() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim fa_inst: (forall x. P(x)) -> (forall y. P(y))
+        proof fa_inst:
+            h_ap = assume forall x. P(x)
+            fix y
+            h_py = forall_elim h_ap, y
+            h_fa = forall_intro h_py
+            h_out = implies_intro h_fa
+            qed h_out
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "parse: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto prog = lower_or_die(parsed.value().proofs[0], rt.context());
+    auto sh = rt.context().find_claim("fa_inst");
+    if (!sh.has_value()) { std::cerr << "no fa_inst claim\n"; ++g_failed; return; }
+    FormulaHandle goal = sh->get().root();
+
+    CHECK_OK(translate_and_verify(rt, prog, goal, "fa_inst"));
+}
+
 void test_exists_elim_e2e() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
@@ -455,6 +484,7 @@ int main() {
     test_forall_intro_e2e();
     test_or_elim_e2e();
     test_exists_elim_e2e();
+    test_forall_elim_e2e();
 
     std::cerr << "\nResults: " << g_passed << " passed, "
               << g_failed << " failed\n";

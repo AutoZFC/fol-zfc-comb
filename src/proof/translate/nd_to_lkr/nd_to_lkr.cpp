@@ -9,6 +9,16 @@
 
 namespace logic::proof::translate::nd_to_lkr {
 
+// NOTE (Phase 5e.5, 2026-05-24): the production Pass still uses the
+// cut_spine model. The new cut-minimal dispatcher (dispatcher.{h,cpp})
+// is implemented and validated by test/cut_minimal_dispatcher_test
+// against intro / projection-elim / combining-elim / closer / leaf
+// paths, but it does not yet compose demands across forall_elim +
+// projection_elim chains (e.g., (forall x. P∧Q) → P via forall_elim +
+// and_elim_l). Composing demands requires a Demand-stack refactor
+// that's deferred to a follow-up. Until then, the legacy
+// cut_spine-based translator remains the production translator —
+// it handles every input the test suite exercises.
 util::Result<Program<lkr::Instr>> NDtoLKR::apply(
     const Program<nd::Instr>& in)
 {
