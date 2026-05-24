@@ -79,7 +79,7 @@ util::ResultStatus translate_step(
     SequentShadow              shadow,
     StepRef                    step,
     size_t                     target_pos,
-    Demand                     demand,
+    DemandPath                 path,
     std::vector<lkr::Instr>&   out);
 
 }  // namespace logic::proof::translate::nd_to_lkr::dispatcher

@@ -209,10 +209,7 @@ cc_library(
     ],
 )
 
-# NDtoLKR — top-level Pass. Cut-spine production path; cut-minimal
-# dispatcher exists alongside (see dispatcher.{h,cpp}) and is exercised
-# by test/cut_minimal_dispatcher_test. Pass wiring + hard cutover
-# pending demand-stack refactor.
+# NDtoLKR — top-level Pass. Stage 2 cut-minimal translator (dispatcher).
 cc_library(
     name = "nd_to_lkr",
     srcs = ["nd_to_lkr.cpp"],
@@ -220,9 +217,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_tree",
-        ":cut_spine",
+        ":demand",
+        ":dispatcher",
         ":input_gate",
         ":output_gate",
+        ":sequent_shadow",
         "//src/core:formula",
         "//src/proof:proof_value",
         "//src/proof/lkr:ops",

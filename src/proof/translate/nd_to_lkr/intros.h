@@ -67,11 +67,14 @@ struct ZeroPremise {};
 // a demand-aware short-circuit (AndIntro under AND_LEFT/RIGHT,
 // IffIntro under IFF_LEFT/RIGHT). The post-state `shadow` has the
 // decomposed structure; the dispatcher recurses on `premise_step`
-// (explicit ND step ref) against (shadow, premise_pos).
+// (explicit ND step ref) against (shadow, premise_pos), passing
+// `remaining_path` (the demand-chain tail left after the emitter
+// popped its own demand).
 struct OnePremise {
     SequentShadow shadow{};
     size_t        premise_pos{0};
     StepRef       premise_step{};
+    DemandPath    remaining_path{};
 };
 
 // TwoPremise: branching right rule (And, IffIntro under NONE). Each
@@ -118,7 +121,7 @@ util::Result<IntroResult> emit_and_intro(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // OrIntroL(a, b_formula) — ∨R; left disjunct is derived.
 util::Result<IntroResult> emit_or_intro_l(
@@ -127,7 +130,7 @@ util::Result<IntroResult> emit_or_intro_l(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // OrIntroR(a_formula, b) — ∨R; right disjunct is derived.
 util::Result<IntroResult> emit_or_intro_r(
@@ -136,7 +139,7 @@ util::Result<IntroResult> emit_or_intro_r(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // ImpliesIntro(conclusion) — NNF(A→B) = NNF(¬A) ∨ NNF(B).
 util::Result<IntroResult> emit_implies_intro(
@@ -145,7 +148,7 @@ util::Result<IntroResult> emit_implies_intro(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // IffIntro(ab, ba) — NNF(A↔B) = (NNF(¬A)∨NNF(B)) ∧ (NNF(¬B)∨NNF(A)).
 //   Under DemandNone: And split + Weakenings. TwoPremise.
@@ -157,7 +160,7 @@ util::Result<IntroResult> emit_iff_intro(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // ForallIntro(body) with eigen — ∀R.
 util::Result<IntroResult> emit_forall_intro(
@@ -167,7 +170,7 @@ util::Result<IntroResult> emit_forall_intro(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // ExistsIntro(body, witness=t) — ∃R with explicit witness.
 util::Result<IntroResult> emit_exists_intro(
@@ -176,7 +179,7 @@ util::Result<IntroResult> emit_exists_intro(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // ExcludedMiddle(formula_let) — fixed cut-free skeleton.
 util::Result<IntroResult> emit_excluded_middle(
@@ -185,7 +188,7 @@ util::Result<IntroResult> emit_excluded_middle(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 // Peirce(a_let, b_let) — fixed cut-free skeleton for Peirce's law.
 util::Result<IntroResult> emit_peirce(
@@ -194,6 +197,6 @@ util::Result<IntroResult> emit_peirce(
     const SequentShadow&       shadow,
     size_t                     f_k_idx,
     std::vector<lkr::Instr>&   out,
-    Demand                     demand = Demand{DemandNone{}});
+    DemandPath                 path = {});
 
 }  // namespace logic::proof::translate::nd_to_lkr::intros

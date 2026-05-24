@@ -16,6 +16,7 @@
 #include "src/proof/ir.h"
 
 #include <variant>
+#include <vector>
 
 namespace logic::proof::translate::nd_to_lkr {
 
@@ -54,22 +55,45 @@ using Demand = std::variant<
 >;
 
 // =========================================================================
+// DemandPath — ordered chain of projection demands.
+// =========================================================================
+//
+// Projection elims compose. For a consumer chain like
+//   forall_elim(h_ax: ∀x.(p∧q), t) → (p∧q)(t)
+//   and_elim_l(_)                  → p(t)
+// the demand at the lemma h_ax must encode BOTH projections in order:
+// "INSTANCE(t) first (peels ∀), then AND_LEFT (peels ∧)."
+//
+// Chain semantics:
+//   path[0]   = first projection to apply (= lemma's outermost shape)
+//   path[N-1] = last projection (= deepest nested shape)
+//
+// Composition rule: each projection elim PREPENDS its demand to the
+// incoming chain. The dispatcher's recursion at a projection elim
+// step transforms the incoming chain into {its_demand} ++ incoming.
+//
+// At leaves (Use, SchemaInst, Assume, ExistsElim), the chain is
+// applied in order: Cut(lemma_full) + structural decomposition (Exists
+// for INSTANCE, Or for AND_LEFT/RIGHT, ...) + emit_close.
+//
+// Empty path == DemandNone (no projection applied).
+
+using DemandPath = std::vector<Demand>;
+
+// =========================================================================
 // RecurseDescriptor — Phase 2 emitter output.
 // =========================================================================
 //
 // A projection elim's emitter returns one of these. The dispatcher
 // (Phase 5) follows the descriptor: it visits `producer_step_idx`,
-// passing `demand` to the producer's emitter, with `target_pos` as
-// where the result should land.
-//
-// Phase 2 emitters emit ZERO LKR ops; their entire contribution is the
-// descriptor. The math (demand consumption) lives in Phase 5 +
-// demand-aware Phase 1.
+// passing the composed chain (PREPEND descriptor's demand to incoming
+// chain) to the producer's recursion, with `target_pos` as where the
+// result should land.
 
 struct RecurseDescriptor {
-    StepRef producer{};      // the ND step whose derivation we recurse into
-    size_t  target_pos{0};   // sequent position where the result lands
-    Demand  demand{DemandNone{}};
+    StepRef producer{};                 // the ND step to recurse into
+    size_t  target_pos{0};               // sequent position where result lands
+    Demand  demand{DemandNone{}};        // the projection's own demand
 };
 
 }  // namespace logic::proof::translate::nd_to_lkr

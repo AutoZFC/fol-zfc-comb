@@ -34,6 +34,7 @@
 using namespace logic;
 using namespace logic::proof;
 using logic::proof::translate::nd_to_lkr::Demand;
+using logic::proof::translate::nd_to_lkr::DemandPath;
 using logic::proof::translate::nd_to_lkr::DemandNone;
 using logic::proof::translate::nd_to_lkr::SequentShadow;
 using logic::proof::translate::nd_to_lkr::decompose_blocks;
@@ -117,7 +118,7 @@ util::ResultStatus translate_and_verify(
     std::vector<lkr::Instr> emitted;
     auto disp_r = translate_step(
         dcc, std::move(shadow), qed_derived,
-        /*target_pos=*/0, Demand{DemandNone{}}, emitted);
+        /*target_pos=*/0, DemandPath{}, emitted);
     if (!disp_r.ok()) return disp_r.error();
 
     // Wrap in an LKR program and verify.

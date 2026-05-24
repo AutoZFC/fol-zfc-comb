@@ -46,8 +46,90 @@ util::ResultStatus translate_step_impl(
     SequentShadow            shadow,
     StepRef                  step,
     size_t                   target_pos,
-    Demand                   demand,
+    DemandPath               path,
     std::vector<lkr::Instr>& out);
+
+// prepend(d, path): returns {d} ++ path.
+DemandPath prepend(Demand d, const DemandPath& path) {
+    DemandPath out;
+    out.reserve(path.size() + 1);
+    out.push_back(std::move(d));
+    for (const auto& x : path) out.push_back(x);
+    return out;
+}
+
+// apply_path_and_close: applies the DemandPath at a leaf (Use,
+// SchemaInst, Assume, ExistsElim) by structurally decomposing
+// `neg_pos` so it ends up holding the NNF-dual of `target_pos`. Each
+// demand in the chain is processed in order:
+//
+//   DemandNone, DemandDoubleNeg: no-op (NNF erases double-neg).
+//   DemandInstance(t, lkr_ref): NNF(¬∀x.φ) = ∃x.¬φ — Exists{neg_pos,
+//     witness=lkr_ref} replaces neg_pos with NNF(¬φ)[x:=t].
+//   DemandAndLeft / DemandAndRight: NNF(¬(A∧B)) = ¬A∨¬B — Or{neg_pos}
+//     splits the disjuncts; AND_LEFT keeps neg_pos (= ¬A); AND_RIGHT
+//     updates neg_pos to the new end (= ¬B).
+//   DemandIffLeft / DemandIffRight: not yet implemented.
+//
+// After the chain is applied, emits emit_close on (target_pos, neg_pos).
+util::ResultStatus apply_path_and_close(
+    Ctx&                     dcc,
+    SequentShadow&           shadow,
+    size_t                   target_pos,
+    size_t                   neg_pos,
+    const DemandPath&        path,
+    std::vector<lkr::Instr>& out)
+{
+    for (const auto& d : path) {
+        if (std::holds_alternative<DemandNone>(d) ||
+            std::holds_alternative<DemandDoubleNeg>(d)) {
+            continue;
+        }
+        if (neg_pos >= shadow.entries.size()) {
+            return MAKE_ERROR
+                << "apply_path_and_close: neg_pos out of range";
+        }
+        FormulaHandle entry = shadow.entries[neg_pos];
+
+        if (auto* di = std::get_if<DemandInstance>(&d)) {
+            if (!entry.get().is_quantified() ||
+                entry.get().as_quantified().op != Op::Exists) {
+                return MAKE_ERROR
+                    << "apply_path_and_close: INSTANCE on non-∃ at neg_pos";
+            }
+            out.emplace_back(lkr::Exists{{}, neg_pos, di->lkr_ref});
+            shadow.entries[neg_pos] =
+                dcc.builder.instantiate_quantifier_body(
+                    entry.get().as_quantified().body, di->t);
+        } else if (std::holds_alternative<DemandAndLeft>(d) ||
+                   std::holds_alternative<DemandAndRight>(d) ||
+                   std::holds_alternative<DemandIffLeft>(d) ||
+                   std::holds_alternative<DemandIffRight>(d)) {
+            // NNF(¬(A∧B)) = ¬A∨¬B; NNF(¬(A↔B)) = (A∧¬B)∨(¬A∧B). Both
+            // are Or-shaped at neg_pos. Or{neg_pos} splits into LEFT
+            // (kept at neg_pos) and RIGHT (appended at end). AND_LEFT
+            // and IFF_LEFT pick LEFT; AND_RIGHT and IFF_RIGHT pick
+            // RIGHT (update neg_pos to the new end).
+            if (!entry.get().is_compound() ||
+                entry.get().as_compound().op != Op::Or) {
+                return MAKE_ERROR
+                    << "apply_path_and_close: AND/IFF projection on non-∨ at neg_pos";
+            }
+            FormulaHandle left  = entry.get().as_compound().left;
+            FormulaHandle right = entry.get().as_compound().right;
+            out.emplace_back(lkr::Or{{}, neg_pos});
+            shadow.entries[neg_pos] = left;
+            size_t end_pos = shadow.entries.size();
+            shadow.entries.push_back(right);
+            if (std::holds_alternative<DemandAndRight>(d) ||
+                std::holds_alternative<DemandIffRight>(d)) {
+                neg_pos = end_pos;
+            }
+        }
+    }
+    EmitCloseContext ecc{dcc.builder};
+    return emit_close(ecc, shadow, target_pos, neg_pos, out);
+}
 
 intros::Ctx make_intros_ctx(Ctx& dcc) {
     return intros::Ctx{dcc.ctx, dcc.builder, dcc.prog, dcc.trace};
@@ -58,12 +140,15 @@ projections::Ctx make_projections_ctx(Ctx& dcc) {
 }
 
 // DemandDoubleNeg is a no-op at the NNF level — NNF(¬¬A) = A. The
-// dispatcher normalizes it to DemandNone before passing to Phase 1.
-Demand normalize_demand(const Demand& d) {
-    if (std::holds_alternative<DemandDoubleNeg>(d)) {
-        return Demand{DemandNone{}};
+// dispatcher elides it from a chain before passing to Phase 1 / leaves.
+DemandPath normalize_path(const DemandPath& path) {
+    DemandPath out;
+    out.reserve(path.size());
+    for (const auto& d : path) {
+        if (std::holds_alternative<DemandDoubleNeg>(d)) continue;
+        out.push_back(d);
     }
-    return d;
+    return out;
 }
 
 // =========================================================================
@@ -193,6 +278,19 @@ util::ResultStatus emit_exists_elim_full(
     size_t                   target_pos,
     std::vector<lkr::Instr>& out);
 
+// iff_elim_l/r full emission (combining-elim-like). 2 Cuts (on iff and
+// on the a/b operand) + Or-decompose of NNF(¬iff) + And on the
+// relevant disjunct + emit_closes on the duals. Structurally similar
+// to cut_spine's close_iff_elim_*.
+template <typename IffElimOp>
+util::ResultStatus emit_iff_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const IffElimOp&         op,
+    bool                     is_left,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out);
+
 }  // namespace
 
 // Forward-declared above for use inside translate_step_impl's visitor.
@@ -209,17 +307,18 @@ util::ResultStatus handle_intro_result(
     if (auto* one = std::get_if<intros::OnePremise>(&result)) {
         return translate_step_impl(
             dcc, std::move(one->shadow), one->premise_step,
-            one->premise_pos, Demand{DemandNone{}}, out);
+            one->premise_pos, std::move(one->remaining_path), out);
     }
     if (auto* two = std::get_if<intros::TwoPremise>(&result)) {
         // LKR's And/Cut push LEFT on top — recurse on LEFT first so
         // its emitted ops follow the branching op in the linear stream.
+        // TwoPremise only fires under empty path → recurse with empty.
         TRY(translate_step_impl(
             dcc, std::move(two->left_shadow), two->left_step,
-            two->left_pos, Demand{DemandNone{}}, out));
+            two->left_pos, DemandPath{}, out));
         return translate_step_impl(
             dcc, std::move(two->right_shadow), two->right_step,
-            two->right_pos, Demand{DemandNone{}}, out);
+            two->right_pos, DemandPath{}, out);
     }
     return MAKE_ERROR << "handle_intro_result: unexpected IntroResult variant";
 }
@@ -229,7 +328,7 @@ util::ResultStatus translate_step_impl(
     SequentShadow            shadow,
     StepRef                  step,
     size_t                   target_pos,
-    Demand                   demand,
+    DemandPath               path,
     std::vector<lkr::Instr>& out)
 {
     if (step.idx >= dcc.prog.instrs.size()) {
@@ -240,7 +339,7 @@ util::ResultStatus translate_step_impl(
     const auto& instr = dcc.prog.instrs[step.idx];
     intros::Ctx ictx = make_intros_ctx(dcc);
     projections::Ctx pctx = make_projections_ctx(dcc);
-    Demand norm_demand = normalize_demand(demand);
+    DemandPath norm_path = normalize_path(path);
 
     return std::visit(
         [&](const auto& op) -> util::ResultStatus {
@@ -249,15 +348,15 @@ util::ResultStatus translate_step_impl(
             // ---- intros family (Phase 1) ---------------------------
             if constexpr (std::is_same_v<T, nd::AndIntro>) {
                 TRY_ASSIGN(r, intros::emit_and_intro(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::OrIntroL>) {
                 TRY_ASSIGN(r, intros::emit_or_intro_l(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::OrIntroR>) {
                 TRY_ASSIGN(r, intros::emit_or_intro_r(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ImpliesIntro>) {
                 // emit_implies_intro emits Or which places NNF(¬A) at
@@ -266,7 +365,7 @@ util::ResultStatus translate_step_impl(
                 // position so body-side Assume leaves can close
                 // against it.
                 TRY_ASSIGN(r, intros::emit_implies_intro(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 if (auto* one = std::get_if<intros::OnePremise>(&r)) {
                     auto co = dcc.closer_to_opener.find(step.idx);
                     if (co == dcc.closer_to_opener.end()) {
@@ -280,12 +379,12 @@ util::ResultStatus translate_step_impl(
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::IffIntro>) {
                 TRY_ASSIGN(r, intros::emit_iff_intro(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::ExistsIntro>) {
                 if (op.witness.has_value()) {
                     TRY_ASSIGN(r, intros::emit_exists_intro(
-                        ictx, op, shadow, target_pos, out, norm_demand));
+                        ictx, op, shadow, target_pos, out, norm_path));
                     return handle_intro_result(dcc, std::move(r), out);
                 }
                 // No-witness form = EXISTS_ELIM block closer (Phase 5e.4).
@@ -293,11 +392,11 @@ util::ResultStatus translate_step_impl(
                     dcc, std::move(shadow), op, step.idx, target_pos, out);
             } else if constexpr (std::is_same_v<T, nd::ExcludedMiddle>) {
                 TRY_ASSIGN(r, intros::emit_excluded_middle(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             } else if constexpr (std::is_same_v<T, nd::Peirce>) {
                 TRY_ASSIGN(r, intros::emit_peirce(
-                    ictx, op, shadow, target_pos, out, norm_demand));
+                    ictx, op, shadow, target_pos, out, norm_path));
                 return handle_intro_result(dcc, std::move(r), out);
             }
 
@@ -307,25 +406,23 @@ util::ResultStatus translate_step_impl(
                     pctx, op, shadow, target_pos));
                 return translate_step_impl(
                     dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                    desc.target_pos, prepend(desc.demand, norm_path), out);
             } else if constexpr (std::is_same_v<T, nd::AndElimR>) {
                 TRY_ASSIGN(desc, projections::emit_and_elim_r(
                     pctx, op, shadow, target_pos));
                 return translate_step_impl(
                     dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                    desc.target_pos, prepend(desc.demand, norm_path), out);
             } else if constexpr (std::is_same_v<T, nd::IffElimL>) {
-                TRY_ASSIGN(desc, projections::emit_iff_elim_l(
-                    pctx, op, shadow, target_pos));
-                return translate_step_impl(
-                    dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                // IffElim is combining-elim-like (uses iff + a operands
+                // jointly). Not pure projection — handled with Cuts.
+                return emit_iff_elim_full(
+                    dcc, std::move(shadow), op,
+                    /*is_left=*/true, target_pos, out);
             } else if constexpr (std::is_same_v<T, nd::IffElimR>) {
-                TRY_ASSIGN(desc, projections::emit_iff_elim_r(
-                    pctx, op, shadow, target_pos));
-                return translate_step_impl(
-                    dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                return emit_iff_elim_full(
+                    dcc, std::move(shadow), op,
+                    /*is_left=*/false, target_pos, out);
             } else if constexpr (std::is_same_v<T, nd::DoubleNegElim>) {
                 TRY_ASSIGN(desc, projections::emit_double_neg_elim(
                     pctx, op, shadow, target_pos));
@@ -334,13 +431,13 @@ util::ResultStatus translate_step_impl(
                 // normalize_demand() at recursion entry.
                 return translate_step_impl(
                     dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                    desc.target_pos, prepend(desc.demand, norm_path), out);
             } else if constexpr (std::is_same_v<T, nd::ForallElim>) {
                 TRY_ASSIGN(desc, projections::emit_forall_elim(
                     pctx, op, shadow, target_pos));
                 return translate_step_impl(
                     dcc, std::move(shadow), desc.producer,
-                    desc.target_pos, desc.demand, out);
+                    desc.target_pos, prepend(desc.demand, norm_path), out);
             }
 
             // ---- combining elims (Phase 5d, 5e.4) ------------------
@@ -390,25 +487,13 @@ util::ResultStatus translate_step_impl(
                     out.emplace_back(std::move(cb));
                 }
 
-                // RIGHT: ¬lemma's NNF appended. Demand-aware close.
+                // RIGHT: ¬lemma's NNF appended. Apply the demand path
+                // via Exists / Or / ... to reduce to the demanded
+                // sub-formula's NNF, then emit_close.
                 size_t neg_pos = shadow.entries.size();
                 shadow.entries.push_back(neg_lemma_nnf);
-
-                if (auto* di = std::get_if<DemandInstance>(&norm_demand)) {
-                    if (!neg_lemma_nnf.get().is_quantified() ||
-                        neg_lemma_nnf.get().as_quantified().op != Op::Exists) {
-                        return MAKE_ERROR
-                            << "translate_step: Use/INSTANCE: NNF(¬lemma) "
-                               "is not Exists";
-                    }
-                    out.emplace_back(lkr::Exists{{}, neg_pos, di->lkr_ref});
-                    shadow.entries[neg_pos] =
-                        dcc.builder.instantiate_quantifier_body(
-                            neg_lemma_nnf.get().as_quantified().body, di->t);
-                }
-
-                EmitCloseContext ecc{dcc.builder};
-                return emit_close(ecc, shadow, target_pos, neg_pos, out);
+                return apply_path_and_close(
+                    dcc, shadow, target_pos, neg_pos, norm_path, out);
             }
 
             // ---- Let — inert formula handle; never a recursion target
@@ -440,25 +525,8 @@ util::ResultStatus translate_step_impl(
                 }
                 size_t dual_pos = it->second;
 
-                if (auto* di = std::get_if<DemandInstance>(&norm_demand)) {
-                    if (dual_pos >= shadow.entries.size()) {
-                        return MAKE_ERROR
-                            << "translate_step: leaf INSTANCE: dual_pos out of range";
-                    }
-                    FormulaHandle dual = shadow.entries[dual_pos];
-                    if (!dual.get().is_quantified() ||
-                        dual.get().as_quantified().op != Op::Exists) {
-                        return MAKE_ERROR
-                            << "translate_step: leaf INSTANCE: dual is not ∃-shaped";
-                    }
-                    out.emplace_back(lkr::Exists{{}, dual_pos, di->lkr_ref});
-                    shadow.entries[dual_pos] =
-                        dcc.builder.instantiate_quantifier_body(
-                            dual.get().as_quantified().body, di->t);
-                }
-
-                EmitCloseContext ecc{dcc.builder};
-                return emit_close(ecc, shadow, target_pos, dual_pos, out);
+                return apply_path_and_close(
+                    dcc, shadow, target_pos, dual_pos, norm_path, out);
             }
 
             // ---- ForallIntro (Phase 5e.3 + 5e.5) ------------------
@@ -496,11 +564,13 @@ util::ResultStatus translate_step_impl(
                 }
                 var_index eigen = fix_term.as_variable();
 
-                bool is_instance = std::holds_alternative<DemandInstance>(norm_demand);
+                bool is_instance =
+                    !norm_path.empty() &&
+                    std::holds_alternative<DemandInstance>(norm_path[0]);
                 Term inst_t;
                 TermRef inst_lkr_ref{};
                 if (is_instance) {
-                    const auto& di = std::get<DemandInstance>(norm_demand);
+                    const auto& di = std::get<DemandInstance>(norm_path[0]);
                     inst_t       = di.t;
                     inst_lkr_ref = di.lkr_ref;
                     // Pre-substitute shadow.entries[target_pos] from
@@ -529,7 +599,7 @@ util::ResultStatus translate_step_impl(
                 // NONE); its instr index is out.size() at this point.
                 size_t lkr_forall_idx = out.size();
                 TRY_ASSIGN(r, intros::emit_forall_intro(
-                    ictx, op, eigen, shadow, target_pos, out, norm_demand));
+                    ictx, op, eigen, shadow, target_pos, out, norm_path));
                 if (auto* one = std::get_if<intros::OnePremise>(&r)) {
                     SequentShadow::TermBinding binding;
                     if (is_instance) {
@@ -565,11 +635,11 @@ util::ResultStatus translate_step(
     SequentShadow            shadow,
     StepRef                  step,
     size_t                   target_pos,
-    Demand                   demand,
+    DemandPath               path,
     std::vector<lkr::Instr>& out)
 {
     return translate_step_impl(
-        dcc, std::move(shadow), step, target_pos, demand, out);
+        dcc, std::move(shadow), step, target_pos, std::move(path), out);
 }
 
 namespace {
@@ -613,7 +683,7 @@ util::ResultStatus emit_implies_elim_full(
     left_impl.entries.push_back(impl_nnf);
     TRY(translate_step_impl(
         dcc, std::move(left_impl), op.impl,
-        left_impl_pos, Demand{DemandNone{}}, out));
+        left_impl_pos, DemandPath{}, out));
 
     // RIGHT-of-Cut(impl): NNF(¬impl) appended at cut_impl_idx.
     SequentShadow right_impl = shadow;
@@ -628,7 +698,7 @@ util::ResultStatus emit_implies_elim_full(
     left_ant.entries.push_back(ant_nnf);
     TRY(translate_step_impl(
         dcc, std::move(left_ant), op.ant,
-        left_ant_pos, Demand{DemandNone{}}, out));
+        left_ant_pos, DemandPath{}, out));
 
     // RIGHT-of-Cut(ant): NNF(¬ant) appended at cut_ant_idx.
     SequentShadow right_ant = right_impl;
@@ -704,7 +774,7 @@ util::ResultStatus emit_contradiction_close(
     left_neg.entries.push_back(f_neg_nnf);
     TRY(translate_step_impl(
         dcc, std::move(left_neg), ne.negation,
-        left_neg_pos, Demand{DemandNone{}}, out));
+        left_neg_pos, DemandPath{}, out));
 
     // RIGHT: shadow + NNF(¬F_neg) (= NNF(F_formula) in NNF semantics).
     SequentShadow right_neg = shadow;
@@ -720,7 +790,7 @@ util::ResultStatus emit_contradiction_close(
     left_form.entries.push_back(f_form_nnf);
     TRY(translate_step_impl(
         dcc, std::move(left_form), ne.formula,
-        left_form_pos, Demand{DemandNone{}}, out));
+        left_form_pos, DemandPath{}, out));
 
     // RIGHT: right_neg + NNF(¬F_formula) (= NNF(F_neg)).
     SequentShadow right_form = right_neg;
@@ -791,7 +861,7 @@ util::ResultStatus emit_or_elim_full(
         left.entries.push_back(or_nnf);
         TRY(translate_step_impl(
             dcc, std::move(left), op.or_formula, pos,
-            Demand{DemandNone{}}, out));
+            DemandPath{}, out));
     }
     size_t i_or = shadow.entries.size();
     shadow.entries.push_back(neg_or_nnf);
@@ -804,7 +874,7 @@ util::ResultStatus emit_or_elim_full(
         left.entries.push_back(ac_nnf);
         TRY(translate_step_impl(
             dcc, std::move(left), op.ac, pos,
-            Demand{DemandNone{}}, out));
+            DemandPath{}, out));
     }
     size_t i_ac = shadow.entries.size();
     shadow.entries.push_back(neg_ac_nnf);
@@ -817,7 +887,7 @@ util::ResultStatus emit_or_elim_full(
         left.entries.push_back(bc_nnf);
         TRY(translate_step_impl(
             dcc, std::move(left), op.bc, pos,
-            Demand{DemandNone{}}, out));
+            DemandPath{}, out));
     }
     size_t i_bc = shadow.entries.size();
     shadow.entries.push_back(neg_bc_nnf);
@@ -973,7 +1043,7 @@ util::ResultStatus emit_exists_elim_full(
         left.entries.push_back(ex_nnf);
         TRY(translate_step_impl(
             dcc, std::move(left), opener.formula, pos,
-            Demand{DemandNone{}}, out));
+            DemandPath{}, out));
     }
 
     // RIGHT: shadow + NNF(¬∃x.φ) = ∀x.NNF(¬φ) at cut_ex_idx.
@@ -1005,7 +1075,174 @@ util::ResultStatus emit_exists_elim_full(
     // Step 4: recurse on body's last step.
     return translate_step_impl(
         dcc, std::move(shadow), op.body, target_pos,
-        Demand{DemandNone{}}, out);
+        DemandPath{}, out);
+}
+
+// iff_elim_l(iff: A↔B, a: A) ⊢ B  /  iff_elim_r(iff, b: B) ⊢ A.
+//
+// Mirrors cut_spine's close_iff_elim_*:
+//   1. Cut(NNF(iff)): LEFT proves A↔B; RIGHT has NNF(¬(A↔B)) =
+//      (A∧¬B)∨(¬A∧B) at cut_iff_idx.
+//   2. Cut(NNF(a) or NNF(b)): LEFT proves the operand; RIGHT has
+//      NNF(¬A) or NNF(¬B) at cut_op_idx.
+//   3. Or{cut_iff_idx}: splits the disjunction into the FIRST clause
+//      (kept at cut_iff_idx) and the SECOND clause (appended at end).
+//   4. emit_and_split on the FIRST clause with partition={target_pos}:
+//      LEFT-of-And gets {pre-Or context including ¬operand}, phi
+//      (= first clause's left, i.e. A for IFF_L or B for IFF_R).
+//      RIGHT-of-And gets target_pos, psi (= first clause's right,
+//      i.e. ¬B for IFF_L or ¬A for IFF_R).
+//   5. emit_close LEFT: phi vs ¬operand (atomic duals).
+//   6. emit_close RIGHT: psi vs target (atomic duals).
+// Helper: extract op.a or op.b depending on IffElim variant.
+template <typename IffElimOp>
+StepRef iff_elim_operand(const IffElimOp& op) {
+    if constexpr (std::is_same_v<IffElimOp, nd::IffElimL>) return op.a;
+    else return op.b;
+}
+
+template <typename IffElimOp>
+util::ResultStatus emit_iff_elim_full(
+    Ctx&                     dcc,
+    SequentShadow            shadow,
+    const IffElimOp&         op,
+    bool                     is_left,
+    size_t                   target_pos,
+    std::vector<lkr::Instr>& out)
+{
+    StepRef iff_step = op.iff;
+    StepRef op_step  = iff_elim_operand(op);
+
+    if (iff_step.idx >= dcc.trace.step_env.size() ||
+        op_step.idx  >= dcc.trace.step_env.size()) {
+        return MAKE_ERROR
+            << "emit_iff_elim_full: step refs out of trace range";
+    }
+    if (target_pos >= shadow.entries.size()) {
+        return MAKE_ERROR
+            << "emit_iff_elim_full: target_pos out of range";
+    }
+
+    FormulaHandle iff_f       = dcc.trace.step_env[iff_step.idx];
+    FormulaHandle iff_nnf     = dcc.builder.to_nnf(iff_f);
+    FormulaHandle neg_iff_nnf = dcc.builder.to_nnf_neg(iff_f);
+    FormulaHandle op_f        = dcc.trace.step_env[op_step.idx];
+    FormulaHandle op_nnf      = dcc.builder.to_nnf(op_f);
+    FormulaHandle neg_op_nnf  = dcc.builder.to_nnf_neg(op_f);
+
+    // Step 1: Cut(NNF(iff)).
+    out.emplace_back(lkr::Cut{{}, iff_nnf});
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(iff_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), iff_step, pos,
+            DemandPath{}, out));
+    }
+    size_t cut_iff_idx = shadow.entries.size();
+    shadow.entries.push_back(neg_iff_nnf);
+
+    // Step 2: Cut(NNF(a/b)).
+    out.emplace_back(lkr::Cut{{}, op_nnf});
+    {
+        SequentShadow left = shadow;
+        size_t pos = left.entries.size();
+        left.entries.push_back(op_nnf);
+        TRY(translate_step_impl(
+            dcc, std::move(left), op_step, pos,
+            DemandPath{}, out));
+    }
+    size_t cut_op_idx = shadow.entries.size();
+    shadow.entries.push_back(neg_op_nnf);
+
+    // shadow now: [..., target B (or A), ..., (A∧¬B)∨(¬A∧B) at cut_iff_idx,
+    //              ..., ¬A (or ¬B) at cut_op_idx].
+
+    // Step 3: Or{cut_iff_idx} to decompose ¬(A↔B).
+    if (!neg_iff_nnf.get().is_compound() ||
+        neg_iff_nnf.get().as_compound().op != Op::Or) {
+        return MAKE_ERROR
+            << "emit_iff_elim_full: NNF(¬iff) is not Or-shape";
+    }
+    FormulaHandle first_clause  = neg_iff_nnf.get().as_compound().left;
+    FormulaHandle second_clause = neg_iff_nnf.get().as_compound().right;
+    out.emplace_back(lkr::Or{{}, cut_iff_idx});
+    shadow.entries[cut_iff_idx] = first_clause;
+    shadow.entries.push_back(second_clause);
+
+    // Step 4: And-split the first_clause with right_needs=[target_pos].
+    // first_clause = A∧¬B (IFF_L) or B∧¬A (IFF_R)... wait, let me think.
+    // NNF(¬(A↔B)) = (A∧¬B)∨(¬A∧B). first_clause = A∧¬B always.
+    // For IFF_L (op.a = A): LEFT-of-And pairs A vs ¬A (= neg_op_nnf).
+    //   RIGHT-of-And pairs ¬B vs target=B.
+    // For IFF_R (op.b = B): LEFT-of-And pairs A vs ??? We don't have ¬A
+    //   in scope. We have ¬B (neg_op_nnf) instead. So IFF_R needs to
+    //   pair against the SECOND clause (¬A∧B): LEFT-of-And pairs ¬A vs
+    //   ??? — still missing.
+    //
+    // Hmm. For IFF_R, the correct match: use the SECOND clause (¬A∧B).
+    // Decompose: ¬A pairs with A (which we'd need), and B pairs with
+    // target=A (target=A under IFF_R). The pairings don't match
+    // straightforwardly. Need a different structure.
+    //
+    // The cut_spine code uses first_clause directly (A∧¬B) for IFF_L:
+    //   LEFT-of-And: A (phi) + ¬A (in scope, from cut_op_idx). Close.
+    //   RIGHT-of-And: ¬B (psi) + target=B. Close.
+    // For IFF_R (need to derive A from iff and B):
+    //   Should use the SECOND clause (¬A∧B):
+    //     LEFT-of-And: ¬A (phi) + target=A. Close.
+    //     RIGHT-of-And: B (psi) + ¬B (in scope, from cut_op_idx). Close.
+
+    if (!first_clause.get().is_compound() ||
+        first_clause.get().as_compound().op != Op::And ||
+        !second_clause.get().is_compound() ||
+        second_clause.get().as_compound().op != Op::And) {
+        return MAKE_ERROR
+            << "emit_iff_elim_full: NNF(¬iff) clauses are not And-shape";
+    }
+
+    size_t second_clause_idx = shadow.entries.size() - 1;
+    size_t and_principal_idx = is_left ? cut_iff_idx : second_clause_idx;
+    FormulaHandle clause = is_left ? first_clause : second_clause;
+    FormulaHandle phi = clause.get().as_compound().left;
+    FormulaHandle psi = clause.get().as_compound().right;
+
+    // Partition: choose which side of And gets target_pos vs cut_op_idx.
+    //   IFF_L: phi=A; LEFT needs ¬A (= cut_op); RIGHT needs B (= target).
+    //          → right_needs = {target_pos}.
+    //   IFF_R: phi=¬A; LEFT needs A (= target); RIGHT needs B (= cut_op
+    //          for IFF_R since neg_op = ¬B).
+    //          → right_needs = {cut_op_idx}.
+    std::vector<size_t> right_needs;
+    if (is_left) {
+        right_needs.push_back(target_pos);
+    } else {
+        right_needs.push_back(cut_op_idx);
+    }
+    TRY_ASSIGN(split, emit_and_split_local(
+        shadow, and_principal_idx, right_needs, phi, psi, out));
+
+    // Step 5: LEFT-of-And close phi vs its dual.
+    //   IFF_L: phi=A, dual at cut_op_idx (= ¬A).
+    //   IFF_R: phi=¬A, dual at target_pos (= A).
+    {
+        size_t l_dual = is_left
+            ? split.left_remap.at(cut_op_idx)
+            : split.left_remap.at(target_pos);
+        EmitCloseContext ecc{dcc.builder};
+        TRY(emit_close(ecc, split.left, split.left_phi_idx, l_dual, out));
+    }
+    // Step 6: RIGHT-of-And close psi vs its dual.
+    //   IFF_L: psi=¬B, dual at target_pos (= B).
+    //   IFF_R: psi=B, dual at cut_op_idx (= ¬B).
+    {
+        size_t r_dual = is_left
+            ? split.right_remap.at(target_pos)
+            : split.right_remap.at(cut_op_idx);
+        EmitCloseContext ecc{dcc.builder};
+        return emit_close(ecc, split.right, split.right_theta_idx, r_dual, out);
+    }
 }
 
 }  // namespace

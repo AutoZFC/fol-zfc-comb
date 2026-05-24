@@ -31,6 +31,7 @@
 using namespace logic;
 using namespace logic::proof;
 using logic::proof::translate::nd_to_lkr::Demand;
+using logic::proof::translate::nd_to_lkr::DemandPath;
 using logic::proof::translate::nd_to_lkr::DemandAndLeft;
 using logic::proof::translate::nd_to_lkr::DemandAndRight;
 using logic::proof::translate::nd_to_lkr::DemandDoubleNeg;
@@ -469,7 +470,7 @@ void test_and_intro_demand_left() {
 
     std::vector<lkr::Instr> emitted;
     auto r = emit_and_intro(cc, op, shadow, /*f_k_idx=*/0, emitted,
-                            Demand{DemandAndLeft{}});
+                            DemandPath{Demand{DemandAndLeft{}}});
     CHECK(r.ok());
     if (!r.ok()) return;
 
@@ -493,7 +494,7 @@ void test_and_intro_demand_right() {
 
     std::vector<lkr::Instr> emitted;
     auto r = emit_and_intro(cc, op, shadow, 0, emitted,
-                            Demand{DemandAndRight{}});
+                            DemandPath{Demand{DemandAndRight{}}});
     CHECK(r.ok());
     if (!r.ok()) return;
 
@@ -515,7 +516,7 @@ void test_iff_intro_demand_left() {
 
     std::vector<lkr::Instr> emitted;
     auto r = emit_iff_intro(cc, op, shadow, 0, emitted,
-                            Demand{DemandIffLeft{}});
+                            DemandPath{Demand{DemandIffLeft{}}});
     CHECK(r.ok());
     if (!r.ok()) return;
 
@@ -537,7 +538,7 @@ void test_iff_intro_demand_right() {
 
     std::vector<lkr::Instr> emitted;
     auto r = emit_iff_intro(cc, op, shadow, 0, emitted,
-                            Demand{DemandIffRight{}});
+                            DemandPath{Demand{DemandIffRight{}}});
     CHECK(r.ok());
     if (!r.ok()) return;
 
@@ -555,7 +556,7 @@ void test_or_intro_l_rejects_demand() {
     nd::OrIntroL op{};
     std::vector<lkr::Instr> emitted;
     auto r = emit_or_intro_l(cc, op, shadow, 0, emitted,
-                             Demand{DemandAndLeft{}});
+                             DemandPath{Demand{DemandAndLeft{}}});
     CHECK(!r.ok());
 }
 
@@ -577,7 +578,7 @@ void test_forall_intro_demand_instance() {
     auto r = emit_forall_intro(
         cc, op, /*eigen=*/var_index{0},
         shadow, 0, emitted,
-        Demand{DemandInstance{Term::fixed(var_index{1}), TermRef{42}}});
+        DemandPath{Demand{DemandInstance{Term::fixed(var_index{1}), TermRef{42}}}});
     CHECK(r.ok());
     if (!r.ok()) return;
     CHECK(emitted.empty());
