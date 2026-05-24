@@ -97,6 +97,37 @@ cc_library(
     ],
 )
 
+# demand — Demand variant + RecurseDescriptor shared by Phase 2
+# (projections) and Phase 5 (dispatcher).
+cc_library(
+    name = "demand",
+    hdrs = ["demand.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:ir",
+    ],
+)
+
+# projections — Stage 2 Phase 2 emitters: demand-driven projection elims.
+# No LKR ops emitted at this phase; descriptors only.
+cc_library(
+    name = "projections",
+    srcs = ["projections.cpp"],
+    hdrs = ["projections.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":demand",
+        ":sequent_shadow",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/util:error",
+    ],
+)
+
 # OutputGate — runs LKRVerifier on emitted programs. Translator is not
 # trusted; soundness rests on this gate.
 cc_library(

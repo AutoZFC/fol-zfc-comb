@@ -495,16 +495,75 @@ position for downstream consumers.
 
 ## 6. Phases 2–5 (stubs, filled in per-phase)
 
-### 6.1 Phase 2 — projection elims
+### 6.1 Phase 2 — projection elims (demand-driven, descriptor-only)
 
-Open math question: Prawitz's correspondence makes projection elims
-cut-free by **demand-driven translation** — when an `and_elim_l` asks
-its producer for the A out of A∧B, the producer's translation is
-parameterized so it exposes A directly rather than producing A∧B and
-then cutting. This may require a two-pass strategy (data-flow analysis,
-then emission) rather than the current one-pass block-tree walk.
+**Math.** Per Prawitz, projection elims are absorbed into the producer's
+translation: when `and_elim_l(h_ab)` asks for A, the dispatcher recurses
+on `h_ab` with the **demand** "give me your A out of A∧B." If h_ab is
+`and_intro(h_a, h_b)`, the demand short-circuits to recursing on h_a
+(the and_intro contributes nothing). If h_ab is another projection elim,
+the demand promotes transitively. If h_ab bottoms out at Stage 1's
+prelude `Assume(F)`, the demand pinpoints which sub-formula of F closes
+against which assumed dual. If h_ab is a combining elim, the demand
+propagates into each branch.
 
-To be specified before Phase 2 opens.
+**Demand variant** (six cases):
+
+```
+Demand =
+  | NONE                       // default — produce the full F_k
+  | AND_LEFT                   // and_elim_l: give me the left conjunct of F_k
+  | AND_RIGHT                  // and_elim_r: give me the right conjunct
+  | IFF_LEFT                   // iff_elim_l: give me the forward direction A→B
+  | IFF_RIGHT                  // iff_elim_r: give me the reverse direction B→A
+  | DOUBLE_NEG                 // double_neg_elim: strip ¬¬, give me the inner
+  | INSTANCE(t)                // forall_elim with witness term t
+```
+
+**Phase 2 contract.** Each projection-elim emitter:
+
+```
+PRE:    op is the projection elim ND op.
+        shadow.entries[f_k_idx] = NNF(F_k), where F_k is the elim's
+        result (= the sub-formula of the producer's full formula).
+ACTION: emit ZERO LKR ops. (The math lives in demand consumption,
+        which is Phase 5's dispatcher + demand-aware Phase 1.)
+POST:   return a RecurseDescriptor{
+            producer_step_idx: the elim's `of` (or `formula` for
+                               forall_elim, or `iff`+side for iff_elim),
+            target_pos:        f_k_idx (where F_k still lives),
+            demand:            the projection's Demand variant
+        }.
+```
+
+Phase 5 consumes the descriptor: when the dispatcher follows the
+recurse target, it passes `demand` to the producer's emitter. Demand-
+aware Phase 1 emitters then short-circuit (or substitute, for
+INSTANCE(t)) accordingly.
+
+**Phase 2 emitters** (in `projections.{h,cpp}`):
+
+```c++
+emit_and_elim_l(...)      → demand = AND_LEFT
+emit_and_elim_r(...)      → demand = AND_RIGHT
+emit_iff_elim_l(...)      → demand = IFF_LEFT
+emit_iff_elim_r(...)      → demand = IFF_RIGHT
+emit_double_neg_elim(...) → demand = DOUBLE_NEG
+emit_forall_elim(...)     → demand = INSTANCE(t)  // t resolved from op
+```
+
+**Phase 2 tests.** Unit-level assertions on the returned
+RecurseDescriptor's fields. End-to-end LKRVerifier acceptance is
+exercised at Phase 5 (when demand consumption lands). The descriptor
+tests catch API errors but not semantic correctness — the latter is
+witnessed by Phase 5's integration tests.
+
+**Why "data-only" Phase 2 is the right cut.** The math says projection
+elims contribute *nothing* to the LK proof — they're annotations that
+re-shape the recursion. Putting demand-consumption math here would
+require Phase 1 retrofits + leaf-case (Assume/Fix) handling + a
+minimal dispatcher, which is most of Phase 5 in disguise. The cleaner
+boundary keeps Phase 2 thin and lets Phase 5 carry the integration.
 
 ### 6.2 Phase 3 — combining elims (Cut sites)
 

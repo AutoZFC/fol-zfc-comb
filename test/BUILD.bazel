@@ -82,6 +82,22 @@ cc_test(
 )
 
 cc_test(
+    name = "cut_minimal_projections_test",
+    srcs = ["cut_minimal_projections_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/nd:ops",
+        "//src/proof/nd:verifier",
+        "//src/proof/translate/nd_to_lkr:demand",
+        "//src/proof/translate/nd_to_lkr:projections",
+        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "cut_minimal_intros_test",
     srcs = ["cut_minimal_intros_test.cpp"],
     deps = [
@@ -262,6 +278,8 @@ test_suite(
         ":nd_internalize_test",
         ":comb_test",
         ":core_test",
+        ":cut_minimal_intros_test",
+        ":cut_minimal_projections_test",
         ":deriv_test",
         ":iota_translator_test",
         ":ks1_checker_test",
