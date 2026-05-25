@@ -156,26 +156,73 @@ DerivPtr substitute_in_deriv(ReduceCtx& cc, const Deriv& d,
 //   base.conclusion.size() >= to_add.size()
 //   for i in 0..to_add.size():
 //     base.conclusion[base.conclusion.size()-to_add.size()+i] == to_add[i]
-// mcut: multiplicative cut on cut-free dl (at position pl) and dr (at
-// position pr). The cut formula at dl.conclusion[pl] must be the NNF
-// dual of dr.conclusion[pr]. Returns a cut-free derivation whose
-// conclusion equals `remove(dl.conclusion, pl) ++ remove(dr.conclusion, pr)`
-// in canonical order, or nullptr if no case is implemented (caller
-// preserves the surrounding cut).
+// mcut: see header. Internal implementation walks dl.rule first, then
+// dr.rule symmetrically.
 //
-// Subtlety: building a derivation whose conclusion is BIGGER than its
-// children's via Weakening requires the verifier's W direction (parent
-// smaller, child bigger). The simpler additive form (try_dead_cut_W
-// in B1) sidesteps this by reusing the W's underlying child directly —
-// additive cut's conclusion IS Γ_L. That's kept and still wins in
-// reduce_cut.
+// mcut(Ax non-principal): when dl.rule = RAx with positions not in
+// {ax.a, ax.b}, the Ax closes a Γ-internal dual pair. The cut formula
+// at pl is "weakened in" by Ax+W convention. The mcut result conclusion
+// = Γ_L (minus pl) ++ Γ_R (minus pr) still contains that dual pair (at
+// positions adjusted for pl's removal). Emit RAx on those positions.
 //
-// mcut is the future home of B2 (∧/∨) and B3 (∀/∃) principal cases,
-// which genuinely need the multiplicative form to express sub-cuts
-// over disjoint contexts. For now: skeleton + a TODO marker.
-[[maybe_unused]] DerivPtr mcut(const Deriv& /*dl*/, size_t /*pl*/,
-                                const Deriv& /*dr*/, size_t /*pr*/) {
-    return nullptr;  // no case implemented yet — caller falls through.
+// `side_is_left` parameter: when this fires on the LEFT (dl), result
+// preserves canonical order `dl_minus_pl ++ dr_minus_pr`. When fired
+// SYMMETRICALLY on the RIGHT (dr), we'd need to compute the dr-side
+// positions (just adjust analogously) — handled by the caller swapping
+// sides and noting the result ordering.
+DerivPtr try_mcut_ax_nonprincipal(const Deriv& ax_side, size_t pl,
+                                   const Deriv& other_side, size_t pr,
+                                   bool ax_on_left)
+{
+    const RAx* ax = std::get_if<RAx>(&ax_side.rule);
+    if (!ax) return nullptr;
+    if (ax->a == pl || ax->b == pl) return nullptr;  // principal
+    if (ax->a >= ax_side.conclusion.size() ||
+        ax->b >= ax_side.conclusion.size()) return nullptr;
+
+    auto adjust = [pl](size_t p) { return p < pl ? p : p - 1; };
+    size_t a_new = adjust(ax->a);
+    size_t b_new = adjust(ax->b);
+
+    auto out = std::make_unique<Deriv>();
+    out->conclusion.reserve(
+        ax_side.conclusion.size() - 1 + other_side.conclusion.size() - 1);
+
+    if (ax_on_left) {
+        // Canonical order: ax_minus_pl ++ other_minus_pr.
+        for (size_t i = 0; i < ax_side.conclusion.size(); ++i) {
+            if (i != pl) out->conclusion.push_back(ax_side.conclusion[i]);
+        }
+        for (size_t i = 0; i < other_side.conclusion.size(); ++i) {
+            if (i != pr) out->conclusion.push_back(other_side.conclusion[i]);
+        }
+        out->rule = RAx{a_new, b_new};
+    } else {
+        // Symmetric: other_minus_pr ++ ax_minus_pl. Ax positions shift
+        // by (other.size - 1) since the other side's entries come first.
+        size_t offset = other_side.conclusion.size() - 1;
+        for (size_t i = 0; i < other_side.conclusion.size(); ++i) {
+            if (i != pr) out->conclusion.push_back(other_side.conclusion[i]);
+        }
+        for (size_t i = 0; i < ax_side.conclusion.size(); ++i) {
+            if (i != pl) out->conclusion.push_back(ax_side.conclusion[i]);
+        }
+        out->rule = RAx{a_new + offset, b_new + offset};
+    }
+    return out;
+}
+
+DerivPtr mcut_impl(FormulaBuilder& /*builder*/,
+                    const Deriv& dl, size_t pl,
+                    const Deriv& dr, size_t pr)
+{
+    // Try dl.rule first.
+    if (auto out = try_mcut_ax_nonprincipal(dl, pl, dr, pr, /*ax_on_left=*/true))
+        return out;
+    // Try dr.rule symmetrically.
+    if (auto out = try_mcut_ax_nonprincipal(dr, pr, dl, pl, /*ax_on_left=*/false))
+        return out;
+    return nullptr;
 }
 
 // ---- §5.5 W (dead-cut) -----------------------------------------------------
@@ -493,6 +540,13 @@ util::Result<DerivPtr> reduce(ReduceCtx& cc, const Deriv& d) {
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
     ReduceCtx cc{builder};
     return reduce(cc, root);
+}
+
+DerivPtr mcut(FormulaBuilder& builder,
+              const Deriv& dl, std::size_t pl,
+              const Deriv& dr, std::size_t pr)
+{
+    return mcut_impl(builder, dl, pl, dr, pr);
 }
 
 DerivPtr wrap_with_weakenings(

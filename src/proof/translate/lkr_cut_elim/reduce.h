@@ -42,6 +42,31 @@ namespace logic::proof::translate::lkr_cut_elim {
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root);
 
 // =========================================================================
+// B0 helper: mcut (multiplicative cut).
+//
+// Performs a multiplicative cut on cut-free derivations `dl` and `dr`
+// at positions `pl` (in dl.conclusion) and `pr` (in dr.conclusion).
+// The cut formula at dl.conclusion[pl] must be the NNF dual of
+// dr.conclusion[pr]. Returns a cut-free derivation whose conclusion =
+// `remove(dl.conclusion, pl) ++ remove(dr.conclusion, pr)` in
+// canonical order, or nullptr if no case is currently implemented.
+//
+// Implemented cases:
+//   - dl.rule = RAx with pl NOT in {ax.a, ax.b} (non-principal axiom
+//     on the left). The Ax closes within dl's Γ_L, ignoring the cut
+//     formula at pl. Result = RAx with positions adjusted for pl's
+//     removal, on the wider mcut conclusion.
+//   - Symmetric: dr.rule = RAx with pr non-principal.
+//
+// Future cases: axiom principal (Cut against Ax pair), W dead-cut,
+// permutation, ∧/∨ principal, ∀/∃ principal. Most require either
+// constructing extended derivations with shifted positions or the
+// Weakening bridge for additive-cut integration.
+DerivPtr mcut(FormulaBuilder& builder,
+              const Deriv& dl, std::size_t pl,
+              const Deriv& dr, std::size_t pr);
+
+// =========================================================================
 // B0 helper: Weakening bridge.
 //
 // Wraps `base` with |to_add| RWeaken layers. Result's outermost node has

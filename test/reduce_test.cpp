@@ -436,6 +436,90 @@ void test_axiom_cut_principal() {
 }
 
 // =========================================================================
+// P9 — mcut, axiom non-principal case (B0 expansion).
+//
+// Direct unit test of the `mcut` helper (not yet wired into reduce_cut
+// for additive cuts — that requires the W-bridge for context doubling).
+//
+// Setup:
+//   dl = RAx{0, 1} on [¬R, R, U]      (Ax closes (¬R, R), U is side)
+//   dr = some derivation of [¬Q, Q, ¬U]
+//   pl = 2 (cut formula = U), pr = 2 (dual = ¬U).
+//
+// Expected mcut result conclusion = (dl - 2) ++ (dr - 2) = [¬R, R] ++ [¬Q, Q]
+//                                  = [¬R, R, ¬Q, Q].
+// Result rule = RAx on the new positions of the (¬R, R) pair, which
+// are still (0, 1) since pl=2 is past them.
+//
+// To verify the result, embed it in a goal and check LKRVerifier
+// accepts the emitted program. Goal = ⊢ (¬R ∨ R) — but we need a goal
+// whose NNF matches the mcut result's "main statement". For test
+// purposes, we wrap with Or(0) on a goal whose NNF starts the same
+// way; the unused entries (¬Q, Q) are weakened-in context that the
+// AxiomLit ignores.
+// =========================================================================
+void test_mcut_ax_nonprincipal() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle r_sent = parse_root(ctx, "R -> R");
+    FormulaHandle r_nnf  = builder.to_nnf(r_sent);  // ¬R ∨ R
+    FormulaHandle notR   = r_nnf.get().as_compound().left;
+    FormulaHandle R      = r_nnf.get().as_compound().right;
+
+    FormulaHandle q_sent = parse_root(ctx, "Q -> Q");
+    FormulaHandle q_nnf  = builder.to_nnf(q_sent);
+    FormulaHandle notQ   = q_nnf.get().as_compound().left;
+    FormulaHandle Q      = q_nnf.get().as_compound().right;
+
+    FormulaHandle u_sent = parse_root(ctx, "U -> U");
+    FormulaHandle u_nnf  = builder.to_nnf(u_sent);
+    FormulaHandle U      = u_nnf.get().as_compound().right;
+    FormulaHandle notU   = builder.to_nnf(builder.make_not(U));
+
+    // dl = Ax(0, 1) on [¬R, R, U].
+    Deriv dl;
+    dl.conclusion = {notR, R, U};
+    dl.rule = RAx{0, 1};
+
+    // dr = Ax(0, 1) on [¬Q, Q, ¬U].
+    Deriv dr;
+    dr.conclusion = {notQ, Q, notU};
+    dr.rule = RAx{0, 1};
+
+    // Call mcut directly.
+    DerivPtr result = mcut(builder, dl, /*pl=*/2, dr, /*pr=*/2);
+    if (!result) {
+        std::cerr << "FAIL: mcut returned nullptr\n"; ++g_failed; return;
+    }
+    // Check conclusion.
+    CHECK(result->conclusion.size() == 4);
+    CHECK(result->conclusion[0] == notR);
+    CHECK(result->conclusion[1] == R);
+    CHECK(result->conclusion[2] == notQ);
+    CHECK(result->conclusion[3] == Q);
+
+    // Check rule is RAx with positions adjusted (dl's (0,1) stay at (0,1)
+    // since pl=2 was past them).
+    auto* ax = std::get_if<RAx>(&result->rule);
+    if (!ax) { std::cerr << "FAIL: mcut result rule is not RAx\n"; ++g_failed; return; }
+    CHECK(ax->a == 0);
+    CHECK(ax->b == 1);
+
+    // Round-trip: emit the result as a stand-alone proof of ⊢ ¬R ∨ R
+    // by wrapping with Or(0). The (¬Q, Q) entries become a wider goal
+    // context — we'd need the Or'd ¬R ∨ R as the goal, with ¬Q, Q as
+    // "extra context" entries already present at start. For test, we
+    // wrap the result with Or(0) targeting ¬R ∨ R, but the verifier
+    // starts at a 1-entry goal — so we need a richer scaffold. Skip
+    // the emit-round-trip for this unit test; just check structural
+    // properties.
+}
+
+// =========================================================================
 // P7 — §5.3 ∀/∃ principal cut.
 //
 // Cut(∀x.P(x)) where:
@@ -643,6 +727,7 @@ int main() {
     test_wrap_with_weakenings();
     test_forall_exists_principal();
     test_exchange_permutation();
+    test_mcut_ax_nonprincipal();
     std::cout << "reduce_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }
