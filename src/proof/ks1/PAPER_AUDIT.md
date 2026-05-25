@@ -162,20 +162,28 @@ replaying Φ1. Required input form for the K4/K5 bridge.
   in a path that callers always skip; an unreachable defensive fallback, not
   a correctness concern.
 
-## Closed in 2026-05-23 (commit `0bb6091`)
+## Closed in 2026-05-23 / 2026-05-25 (commits `0bb6091`, `4fa8e35`)
 
-- **MIN — context navigation into Not.** `is_navigable_binary` rejects
-  Left/Right into `Compound{Not,·}`/`Compound{Bottom,·}` so the hole stays in
-  atom position (paper §V). Tested by
-  `ks1_checker_test::test_context_no_descent_into_not`.
-- **MOD — `is_atom_literal` excluded units.** Extended to match HSW's atom
-  grammar `a ::= t | f | p | p̄`. Tested by `test_ai_on_top`, `test_ai_on_bot`,
-  `test_ac_on_top`.
-- **STY — `swap_in_term`'s dead description branch.** Replaced with
-  `assert(!t.is_description())` documenting the precondition.
-- **MIN — per-resource-rule fibration coverage in `ks1_to_comb`.** Added unit
-  tests for `w∀, c∀, m∀, m∃, m`, and a `≡`-in-Φ2 fibration test
-  (`test_eqv_in_phi2_fibration`).
+Code fixes landed in `0bb6091` (2026-05-23); the audit reconciliation and
+additional tests landed in `4fa8e35` (2026-05-25). The per-item attribution:
+
+- **MIN — context navigation into Not** *(code: `0bb6091`; test: `0bb6091`)*.
+  `is_navigable_binary` rejects Left/Right into `Compound{Not,·}` /
+  `Compound{Bottom,·}` so the hole stays in atom position (paper §V). Tested
+  by `ks1_checker_test::test_context_no_descent_into_not`.
+- **MOD — `is_atom_literal` excluded units** *(code: `0bb6091`; tests:
+  `0bb6091` + `4fa8e35`)*. Extended to match HSW's atom grammar
+  `a ::= t | f | p | p̄`. Tested by `test_ai_on_top`, `test_ac_on_top` (added
+  in `0bb6091`) and `test_ai_on_bot` (added in `4fa8e35`).
+- **STY — `swap_in_term`'s dead description branch** *(code: `0bb6091`)*.
+  Replaced with `assert(!t.is_description())` documenting the precondition.
+- **MIN — per-resource-rule fibration coverage in `ks1_to_comb`** *(tests
+  split across both commits)*. `w∀, c∀, m, m∀, m∃` and `ac` (end-to-end)
+  added in `0bb6091`; a single `CommOr` ≡-in-Φ2 fibration test
+  (`test_eqv_in_phi2_fibration`) added in `4fa8e35`. The other seven eq-(2)
+  equations rely on the shared `apply_res::Eqv` machinery (structurally
+  identical to `read_fonet`'s, fully tested in `ks1_checker_test`); broaden
+  if you want per-equation bridge-level assurance.
 
 ## Soundness & completeness verdict (2026-05-23)
 
@@ -232,7 +240,7 @@ unjustified gaps.
 | `ks1_validation_test`         | end-to-end decomposed derivations exercising each phase     | 4  |
 | `ks1_decompose_test`          | Thm 17 form check + split (Φ1, A', Φ2)                      | 26 |
 | `ks1_read_fonet_test`         | bridge K4 — fonet read-off, CombVerifier-validated          | 10 |
-| `ks1_bridge_test`             | bridge K5 — full CombProof end-to-end + per-resource-rule fibration (`w, w∀, ac, c∀, m, m∀, m∃, ≡`) | 40 |
+| `ks1_bridge_test`             | bridge K5 — full CombProof end-to-end + per-resource-rule fibration (`w, w∀, ac, c∀, m, m∀, m∃`, and one `≡` instance via `CommOr`) | 40 |
 
 The bridge tests close the loop: a decomposed KS1 derivation translates to a
 CombProof that passes the independent `CombVerifier` (all four phases).
