@@ -1,7 +1,77 @@
 # Stage 3 reset plan
 
-**Status:** proposal, awaiting approval.
+**Status:** Steps 0–3 SHIPPED; Step 4 PARTIAL (B1 non-principal axiom +
+ROne only); Steps 4 remainder + 5 PENDING.
 **Companion to:** `CUT_ELIM_DESIGN.md` (the math — unchanged by this plan).
+
+## Progress log
+
+| Step | What | Status | Commits |
+|------|------|--------|---------|
+| 0 | Delete reduce.{h,cpp}, reduce_test.cpp, BUILD entries | ✅ shipped | `b2e2557` |
+| 1 | `Deriv::validate` — per-rule structural invariants, wired into `build()` | ✅ shipped | `a3db47a` |
+| 2 | `additive_to_multiplicative` — B0 as a real pre-pass | ✅ shipped | `8ac3dd1` |
+| 3 | `eliminate_cuts` worklist driver on (degree, topmost) | ✅ shipped | `5df5ca1` |
+| 4 — B1 non-principal | RAx / ROne where cut formula isn't an axiom literal | ✅ shipped | `b4068a5` |
+| 4 — B1 principal | RAx / ROne where cut formula IS an axiom literal | ⏳ blocked* |
+| 4 — B2 principal logical | ∧ vs ∨, ∀ vs ∃ | ⏳ blocked* |
+| 4 — B3 capture-avoiding subst | needed by B2's ∀/∃ case | ⏳ pending |
+| 4 — B4 permutation | cut not principal in one premise | ⏳ pending |
+| 4 — B5 structural | W dead-cut, C duplication, X | ⏳ blocked* |
+| 5 — Stage A | RLemma inlining | ⏳ pending |
+
+\* "Blocked" = the reduction needs careful re-derivation against the IR's
+verifier-direction conventions. The original engine got these wrong (the
+05-27 audit). I am not landing them until the math is worked out
+case-by-case against the IR convention — not the standard sequent-calc
+convention the spec uses.
+
+## The remaining design question (per case)
+
+The IR is verifier-directed: `node.concl` is the verifier's top BEFORE
+the rule fires; `child.concl` is the top AFTER. Different rules go
+different directions relative to standard sequent calc:
+
+- **Or** in IR: node has fewer entries (with disjunction); child has more
+  (decomposed). Matches standard reading "node = conclusion, child =
+  premise."
+- **W** in IR: node has fewer entries; child has more (with added).
+  REVERSED from standard W reading. In our IR, W going down *grows* the
+  sequent.
+
+Consequence: a reduction like dead-cut-W ("discard the other premise and
+weaken") needs reframing in our IR. The standard reading puts W *below*
+the cut in the proof tree (W's conclusion is the cut's premise side);
+our IR reverses this. The old code's `try_dead_cut_W` got this wrong
+(05-27 audit) by looking at `cut.left`'s top rule rather than walking
+deeper into `left`'s subtree to find the W whose `added` IS the cut
+formula at the principal slot.
+
+Each remaining §5 case needs the same care: write down the reduction in
+the IR's convention before coding it; do not transliterate from the
+spec's standard-calc presentation. The case files (e.g., a future `b1.cpp`,
+`b5.cpp`) should each open with that re-derivation as a comment so
+future authors don't repeat the conversion in their head.
+
+## Suggested next session
+
+1. Pick ONE case to re-derive end-to-end (B1 principal axiom is the
+   smallest non-trivial). Write the re-derivation as comments in
+   `b1_principal.cpp`. Test (hand-built + a syllogism that surfaces the
+   case after B0).
+2. Then B5 W dead-cut (find the W deep in the cut-side subtree whose
+   added is the cut formula at the cut slot; use its child as the base
+   for the reduced subtree).
+3. Then B5 contraction (the spec's duplication move — also needs care).
+4. Then B2 (which needs B3 — capture-avoiding subst is a substantial
+   sub-pass on its own).
+5. Then B4 (permutation past unary/binary rules).
+6. Then Stage A (lemma inlining).
+
+Each case ships as its own commit per the math-first discipline:
+spec-paragraph-as-comment → test → impl → green → commit.
+
+
 
 ## 1. Diagnosis (short)
 
