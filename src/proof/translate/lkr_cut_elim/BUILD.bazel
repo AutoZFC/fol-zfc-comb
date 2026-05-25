@@ -16,16 +16,5 @@ cc_library(
     ],
 )
 
-# Cut-elimination engine over Deriv (CUT_ELIM_DESIGN.md §5).
-cc_library(
-    name = "reduce",
-    srcs = ["reduce.cpp"],
-    hdrs = ["reduce.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":deriv",
-        "//src/core:formula",
-        "//src/proof/lkr:literal",
-        "//src/util:error",
-    ],
-)
+# Cut-elimination engine over Deriv: see STAGE3_RESET_PLAN.md.
+# Deleted in the Stage 3 reset; rebuild lands in Steps 1–5 of the plan.

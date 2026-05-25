@@ -269,21 +269,6 @@ cc_test(
 )
 
 cc_test(
-    name = "reduce_test",
-    srcs = ["reduce_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/lkr:verifier",
-        "//src/proof/translate/lkr_cut_elim:deriv",
-        "//src/proof/translate/lkr_cut_elim:reduce",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
     name = "weak_elim_test",
     srcs = ["weak_elim_test.cpp"],
     deps = [
@@ -396,7 +381,6 @@ test_suite(
         ":cut_minimal_projections_test",
         ":cut_minimal_structural_test",
         ":deriv_test",
-        ":reduce_test",
         ":weak_elim_test",
         ":iota_translator_test",
         ":ks1_checker_test",
