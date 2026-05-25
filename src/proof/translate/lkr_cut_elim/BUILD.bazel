@@ -1,0 +1,31 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Explicit sequent-carrying derivation IR for LKR (build/emit round-trip).
+# Foundation for the rigorous Gentzen cut-elimination (CUT_ELIM_DESIGN.md).
+cc_library(
+    name = "deriv",
+    srcs = ["deriv.cpp"],
+    hdrs = ["deriv.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:literal",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# Cut-elimination engine over Deriv (CUT_ELIM_DESIGN.md §5).
+cc_library(
+    name = "reduce",
+    srcs = ["reduce.cpp"],
+    hdrs = ["reduce.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":deriv",
+        "//src/core:formula",
+        "//src/proof/lkr:literal",
+        "//src/util:error",
+    ],
+)
