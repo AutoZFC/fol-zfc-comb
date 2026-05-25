@@ -18,5 +18,20 @@ cc_library(
     ],
 )
 
+# B0 — additive→multiplicative cut pre-pass (STAGE3_RESET_PLAN.md Step 2).
+# Walks the Deriv once, rewriting every additive RCut to (|Γ| RWeakens) +
+# (multiplicative RCut). Post-condition: every RCut in output is mult.
+cc_library(
+    name = "b0",
+    srcs = ["b0.cpp"],
+    hdrs = ["b0.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":deriv",
+        "//src/core:formula",
+        "//src/util:error",
+    ],
+)
+
 # Cut-elimination engine over Deriv: see STAGE3_RESET_PLAN.md.
 # Deleted in the Stage 3 reset; rebuild lands in Steps 1–5 of the plan.

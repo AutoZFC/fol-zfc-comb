@@ -211,26 +211,46 @@ struct Validator {
                     return MAKE_ERROR << path << ": RCut has null child";
                 const Seq& lc = r.left->conclusion;
                 const Seq& rc = r.right->conclusion;
-                if (lc.size() != concl.size() + 1)
-                    return MAKE_ERROR << path << ": RCut left.size " << lc.size()
-                                      << " != node.size + 1 = " << concl.size() + 1
-                                      << " (additive convention)";
-                if (rc.size() != concl.size() + 1)
-                    return MAKE_ERROR << path << ": RCut right.size " << rc.size()
-                                      << " != node.size + 1 = " << concl.size() + 1;
-                for (size_t k = 0; k < concl.size(); ++k) {
-                    if (lc[k] != concl[k])
-                        return MAKE_ERROR << path << ": RCut left[" << k
-                                          << "] != node[" << k << "]";
-                    if (rc[k] != concl[k])
-                        return MAKE_ERROR << path << ": RCut right[" << k
-                                          << "] != node[" << k << "]";
-                }
+                if (lc.empty() || rc.empty())
+                    return MAKE_ERROR << path << ": RCut child has empty conclusion";
                 if (lc.back() != r.cut_formula)
                     return MAKE_ERROR << path << ": RCut left.back() != cut_formula";
-                // right.back() is the NNF dual of cut_formula; equality check
-                // requires a FormulaBuilder (NNF normalization). Deferred to
-                // LKRVerifier on emit.
+
+                const size_t gl = lc.size() - 1;
+                const size_t gr = rc.size() - 1;
+                // Two valid shapes for node.concl:
+                //   - Additive:       |node| = gl = gr and Γ_L = Γ_R = node.
+                //   - Multiplicative: |node| = gl + gr and node = Γ_L ++ Γ_R.
+                // For empty Γ (gl == gr == 0), the two shapes coincide; either
+                // check passes vacuously.
+                if (concl.size() == gl && gl == gr) {
+                    for (size_t k = 0; k < concl.size(); ++k) {
+                        if (lc[k] != concl[k] || rc[k] != concl[k])
+                            return MAKE_ERROR << path
+                                << ": RCut additive: left[" << k
+                                << "] or right[" << k << "] != node[" << k << "]";
+                    }
+                } else if (concl.size() == gl + gr) {
+                    for (size_t k = 0; k < gl; ++k) {
+                        if (concl[k] != lc[k])
+                            return MAKE_ERROR << path
+                                << ": RCut mult: node[" << k
+                                << "] != left[" << k << "]";
+                    }
+                    for (size_t k = 0; k < gr; ++k) {
+                        if (concl[gl + k] != rc[k])
+                            return MAKE_ERROR << path
+                                << ": RCut mult: node[" << (gl + k)
+                                << "] != right[" << k << "]";
+                    }
+                } else {
+                    return MAKE_ERROR << path
+                        << ": RCut shape neither additive nor multiplicative ("
+                        << "node=" << concl.size() << ", |Γ_L|=" << gl
+                        << ", |Γ_R|=" << gr << ")";
+                }
+                // right.back() is the NNF dual of cut_formula; equality
+                // check requires FormulaBuilder. Deferred to LKRVerifier.
                 TRY(walk(*r.left,  path + ".CutL"));
                 return walk(*r.right, path + ".CutR");
             }
