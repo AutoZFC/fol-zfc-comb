@@ -280,6 +280,77 @@ DerivPtr try_axiom_cut_principal(const RCut& cut) {
     return nullptr;
 }
 
+// ---- §5.4 permutation (cut not principal in R) -----------------------------
+//
+// When dl's top rule R does not act on the cut formula's position, we
+// can permute the Cut above R. Most rules (Or, W, C, Forall on a non-
+// last principal, …) shift Γ's contents in ways that turn the
+// additive cut into a multiplicative one — those cases need `mcut` to
+// handle disjoint contexts, deferred to a phase that ships mcut.
+//
+// The ONE clean additive case: RExchange where the swap doesn't touch
+// the cut formula's slot. Permute by mirroring the swap on dr (an
+// added Exchange op above dr is cheap) and wrap with the original
+// Exchange.
+DerivPtr try_permute_exchange(const RCut& cut) {
+    auto try_side = [&](const Deriv& side_with_exchange,
+                        const Deriv& other_side,
+                        bool side_is_left) -> DerivPtr {
+        const RExchange* ex = std::get_if<RExchange>(&side_with_exchange.rule);
+        if (!ex) return nullptr;
+        size_t last = side_with_exchange.conclusion.size() - 1;
+        if (ex->i == last || ex->j == last) {
+            // The Exchange touches the cut formula's slot — would need
+            // re-indexing of the inner cut's pl. Defer.
+            return nullptr;
+        }
+        if (ex->i >= side_with_exchange.conclusion.size() ||
+            ex->j >= side_with_exchange.conclusion.size()) {
+            return nullptr;
+        }
+
+        // Build dr_swapped: a Deriv whose conclusion = other_side.conclusion
+        // with (ex->i, ex->j) swapped, achieved by wrapping other_side in
+        // an RExchange. Per IR convention, RExchange's node.conclusion =
+        // pre-Exchange (= our target swapped state); child = post-Exchange
+        // (= original other_side.conclusion).
+        std::vector<FormulaHandle> other_swapped = other_side.conclusion;
+        std::swap(other_swapped[ex->i], other_swapped[ex->j]);
+        auto other_wrapped = std::make_unique<Deriv>();
+        other_wrapped->conclusion = other_swapped;
+        other_wrapped->rule = RExchange{ex->i, ex->j, clone(other_side)};
+
+        // Build the inner Cut: shared Γ_swapped at both premises.
+        auto inner_cut = std::make_unique<Deriv>();
+        inner_cut->conclusion.assign(
+            other_swapped.begin(),
+            other_swapped.end() - 1);
+        DerivPtr L_inner = clone(*ex->child);
+        DerivPtr R_inner = std::move(other_wrapped);
+        if (side_is_left) {
+            inner_cut->rule = RCut{
+                cut.cut_formula, std::move(L_inner), std::move(R_inner)};
+        } else {
+            inner_cut->rule = RCut{
+                cut.cut_formula, std::move(R_inner), std::move(L_inner)};
+        }
+
+        // Wrap with the outer Exchange to recover the original Γ.
+        auto outer = std::make_unique<Deriv>();
+        outer->conclusion.assign(
+            side_with_exchange.conclusion.begin(),
+            side_with_exchange.conclusion.end() - 1);
+        outer->rule = RExchange{ex->i, ex->j, std::move(inner_cut)};
+        return outer;
+    };
+
+    if (auto out = try_side(*cut.left,  *cut.right, /*side_is_left=*/true))
+        return out;
+    if (auto out = try_side(*cut.right, *cut.left,  /*side_is_left=*/false))
+        return out;
+    return nullptr;
+}
+
 // ---- §5.3 ∀/∃ principal cut ------------------------------------------------
 //
 // Cut(∀x.β) where LEFT ends in Forall(eigen=a) and RIGHT ends in
@@ -349,6 +420,12 @@ util::Result<DerivPtr> reduce_cut(ReduceCtx& cc, const RCut& cut,
         // The reduction produced a NEW (smaller) cut. Recursively
         // reduce it so the new cut gets eliminated too (by degree
         // induction).
+        return reduce(cc, *out);
+    }
+    if (auto out = try_permute_exchange(cut)) {
+        // Permutation moved the cut deeper; recursively reduce so
+        // the new cut (possibly with a now-principal shape) lands
+        // in another case.
         return reduce(cc, *out);
     }
     // No case fired — preserve the cut.

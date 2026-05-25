@@ -514,6 +514,83 @@ void test_forall_exists_principal() {
 }
 
 // =========================================================================
+// P8 — §5.4 Exchange permutation.
+//
+// Build a Cut(α) where LEFT's top rule is RExchange that swaps two
+// Γ-internal positions (not touching the cut formula's slot at last).
+// eliminate_cuts should permute: outer Exchange wrapping an inner cut
+// on the swapped premises. The inner cut then triggers a B1 reduction
+// (axiom non-principal) and disappears.
+//
+// Construction:
+//   Goal: ⊢ R → R (NNF ¬R ∨ R), reach [¬R, R] via Or(0).
+//   Then Cut(Q):
+//     LEFT  = RExchange{0, 1, child=RAx(0,1) on [R, ¬R, Q]}.
+//           LEFT.conclusion = [¬R, R, Q] (Exchange's pre-op = swapped
+//           back). RAx on [R, ¬R, Q] closes via (R, ¬R) duality.
+//     RIGHT = RAx(0, 1) on [¬R, R, ¬Q]. Closes via (¬R, R) duality.
+//
+//   Permutation: outer = RExchange{0, 1, inner_cut} where inner_cut =
+//     Cut(Q, LEFT.child = RAx on [R, ¬R, Q],
+//             RIGHT_wrapped = RExchange{0, 1, RIGHT} so its conclusion
+//             = [R, ¬R, ¬Q]).
+//   Inner cut is then non-principal axiom (RAx on [R, ¬R, Q] closes on
+//   positions 0, 1 < last=2). B1 reduces to RAx(0, 1) on [R, ¬R].
+//   Outer Exchange wraps it: conclusion = [¬R, R].
+// =========================================================================
+void test_exchange_permutation() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "R -> R");
+    FormulaBuilder builder(ctx);
+    FormulaHandle goal_nnf = builder.to_nnf(goal);  // ¬R ∨ R
+    FormulaHandle notR = goal_nnf.get().as_compound().left;
+    FormulaHandle R    = goal_nnf.get().as_compound().right;
+
+    FormulaHandle q_sent = parse_root(ctx, "Q -> Q");
+    FormulaHandle q_nnf  = builder.to_nnf(q_sent);
+    FormulaHandle Q      = q_nnf.get().as_compound().right;
+    FormulaHandle notQ   = builder.to_nnf(builder.make_not(Q));
+
+    // LEFT side: RExchange{0, 1} over an Ax. Pre-Exchange conclusion =
+    // [¬R, R, Q]. Post-Exchange (child) conclusion = [R, ¬R, Q]. The
+    // Ax closes (R, ¬R) at positions 0, 1.
+    auto ax_L_inner = std::make_unique<Deriv>();
+    ax_L_inner->conclusion = {R, notR, Q};
+    ax_L_inner->rule = RAx{0, 1};
+
+    auto exchange_L = std::make_unique<Deriv>();
+    exchange_L->conclusion = {notR, R, Q};
+    exchange_L->rule = RExchange{0, 1, std::move(ax_L_inner)};
+
+    // RIGHT: plain Ax(0, 1) on [¬R, R, ¬Q].
+    auto ax_R = std::make_unique<Deriv>();
+    ax_R->conclusion = {notR, R, notQ};
+    ax_R->rule = RAx{0, 1};
+
+    // Cut(Q) on [¬R, R].
+    auto cut_node = std::make_unique<Deriv>();
+    cut_node->conclusion = {notR, R};
+    cut_node->rule = RCut{Q, std::move(exchange_L), std::move(ax_R)};
+
+    // Wrap with Or to reach the goal.
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(cut_node)};
+
+    CHECK(count_cuts(*root) == 1);
+    auto reduced = eliminate_cuts(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*reduced.value()) == 0);  // Exchange permutation + B1
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value(), "exchange_permutation"));
+}
+
+// =========================================================================
 // P6 — B0 framework: wrap_with_weakenings helper.
 //
 // Build a Deriv that proves [¬P, P, Q] via AxiomLit(0, 1). Wrap with
@@ -565,6 +642,7 @@ int main() {
     test_axiom_cut_principal();
     test_wrap_with_weakenings();
     test_forall_exists_principal();
+    test_exchange_permutation();
     std::cout << "reduce_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }
