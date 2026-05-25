@@ -224,12 +224,358 @@ void test_W_absorb_at_one() {
     CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
 }
 
+// =========================================================================
+// W2.6 — §4.2.6 W stacked over W, bottom child is a leaf.
+//
+// Driver post-order already handles this for free: the inner W absorbs
+// at the leaf first (W1), then the outer W's child becomes a leaf and
+// absorbs too.
+//
+// Build: RWeaken{φ_outer, RWeaken{φ_inner, RAx{0,1}}}
+// Reduce: both W's gone, RAx{0,1} on the outer conclusion.
+// =========================================================================
+void test_W_over_W_stacked() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaBuilder builder(ctx);
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    FormulaHandle notP = goal_nnf.get().as_compound().left;
+    FormulaHandle P    = goal_nnf.get().as_compound().right;
+
+    FormulaHandle Q  = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                              .get().as_compound().right;
+    FormulaHandle R  = builder.to_nnf(parse_root(ctx, "R -> R"))
+                              .get().as_compound().right;
+
+    // RAx{0,1} on [¬P, P, Q, R]: positions 0,1 non-principal in Q@2 and R@3.
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {notP, P, Q, R};
+    leaf->rule = RAx{0, 1};
+
+    // Inner W (R) over leaf: conclusion = [¬P, P, Q], child = [¬P, P, Q, R].
+    auto w_inner = std::make_unique<Deriv>();
+    w_inner->conclusion = {notP, P, Q};
+    w_inner->rule = RWeaken{R, std::move(leaf)};
+
+    // Outer W (Q) over inner: conclusion = [¬P, P], child = [¬P, P, Q].
+    auto w_outer = std::make_unique<Deriv>();
+    w_outer->conclusion = {notP, P};
+    w_outer->rule = RWeaken{Q, std::move(w_inner)};
+
+    // Or on outer: conclusion = [¬P∨P].
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(w_outer)};
+
+    CHECK(count_weakenings(*root) == 2);
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
+// =========================================================================
+// W2.4 — §4.2.4 W above RExchange (i, j < |Γ|).
+//
+// Permute W past Exchange when the swap doesn't involve the W'd slot.
+// Build:
+//   Outer:  conclusion [¬P∨P]
+//   Or(0): conclusion [¬P, P]
+//   W(Q):   conclusion [¬P, P, Q] — but wait, RExchange child has to
+//   make sense. Let's structure differently.
+//
+// Use:
+//   leaf:  RAx{1, 0} on [P, ¬P, Q]   — atomic dual pair at 1,0; Q@2.
+//   exch:  RExchange{0, 1, leaf} on [¬P, P, Q] → swap to [P, ¬P, Q].
+//   W:     RWeaken{Q, exch} on [¬P, P] → after W: [¬P, P, Q].
+//   Or:    ROr{0, W} on [¬P∨P].
+//
+// Reduce: permute W past Exchange, then absorb at leaf.
+// =========================================================================
+void test_W_over_Exchange() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaBuilder builder(ctx);
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    FormulaHandle notP = goal_nnf.get().as_compound().left;
+    FormulaHandle P    = goal_nnf.get().as_compound().right;
+    FormulaHandle Q    = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                                .get().as_compound().right;
+
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {P, notP, Q};      // post-Exchange
+    leaf->rule = RAx{1, 0};
+
+    auto exch = std::make_unique<Deriv>();
+    exch->conclusion = {notP, P, Q};      // pre-Exchange
+    exch->rule = RExchange{0, 1, std::move(leaf)};
+
+    auto w = std::make_unique<Deriv>();
+    w->conclusion = {notP, P};            // pre-W
+    w->rule = RWeaken{Q, std::move(exch)};
+
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(w)};
+
+    CHECK(count_weakenings(*root) == 1);
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
+// =========================================================================
+// W2.5 — §4.2.5 W above RContract (i, j < |Γ|).
+//
+// Permute W past Contraction when the merge doesn't involve the W'd slot.
+//
+// Goal: P | (~P | ~P). NNF: P ∨ (¬P ∨ ¬P).
+// Verifier sequence:
+//   1. Or(0) on [P∨(¬P∨¬P)]            → [P, ¬P∨¬P]
+//   2. Or(1) on [P, ¬P∨¬P]             → [P, ¬P, ¬P]
+//   3. W(Q):                            → [P, ¬P, ¬P, Q]
+//   4. Contract(1, 2):                  → [P, ¬P, Q]    (erase entry 2)
+//   5. Ax(0, 1):                        ✓ (P / ¬P dual)
+//
+// W is above Contract; Contract's i=1, j=2 are both < |Γ|=3 (the W's
+// outer node has Γ = [P, ¬P, ¬P] of size 3). Non-W-involving.
+// =========================================================================
+void test_W_over_Contract() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle goal = parse_root(ctx, "P | (~P | ~P)");
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    // goal_nnf = P ∨ (¬P ∨ ¬P). Extract pieces.
+    const auto& g_cmp = goal_nnf.get().as_compound();
+    FormulaHandle P = g_cmp.left;
+    FormulaHandle inner_or = g_cmp.right;   // (¬P ∨ ¬P)
+    const auto& in_cmp = inner_or.get().as_compound();
+    FormulaHandle nP = in_cmp.left;
+    // inner_or.right is also ¬P; by interning should equal nP.
+    assert(in_cmp.right == nP);
+
+    FormulaHandle Q  = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                              .get().as_compound().right;
+
+    // Leaf: [P, ¬P, Q] (post-Contract). Ax{0, 1}: P / ¬P dual pair.
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {P, nP, Q};
+    leaf->rule = RAx{0, 1};
+
+    // Contract{1, 2} on [P, ¬P, ¬P, Q] → erase entry 2 → [P, ¬P, Q].
+    auto ctr = std::make_unique<Deriv>();
+    ctr->conclusion = {P, nP, nP, Q};
+    ctr->rule = RContract{1, 2, std::move(leaf)};
+
+    // W(Q) on [P, ¬P, ¬P] → [P, ¬P, ¬P, Q]. i=1,j=2 < |Γ|=3.
+    auto w = std::make_unique<Deriv>();
+    w->conclusion = {P, nP, nP};
+    w->rule = RWeaken{Q, std::move(ctr)};
+
+    // Or(1) on [P, ¬P∨¬P] → [P, ¬P, ¬P].
+    auto or_inner = std::make_unique<Deriv>();
+    or_inner->conclusion = {P, inner_or};
+    or_inner->rule = ROr{1, std::move(w)};
+
+    // Or(0) on [goal_nnf] → [P, ¬P∨¬P].
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(or_inner)};
+
+    CHECK(count_weakenings(*root) == 1);
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
+// =========================================================================
+// W2.2 — §4.2.2 W above RForall (p < |Γ|, principal in Γ not in φ).
+//
+// Goal: forall x. (P(x) -> P(x)).  NNF: forall x. (¬P(x) ∨ P(x)).
+//
+// Direct derivation:
+//   Forall(0, eigen=v0): instantiate. Sequent: [¬P(v0) ∨ P(v0)].
+//   Or(0): expand. Sequent: [¬P(v0), P(v0)].
+//   Ax(0,1): close.
+//
+// Add a W(Q) somewhere above the Forall:
+//   Original:  Outer Forall on Γ then ... NO, we want W ABOVE Forall
+//   in the LK sense = the W's child IS the Forall.
+//   In IR: W's node.conclusion = Γ, W's child is the Forall whose
+//   conclusion = Γ+φ. So we need a Forall at sequent [..., ∀x.body, φ].
+//
+// Concretely:
+//   leaf: Ax{0,1} on [¬P(v0), P(v0), Q]
+//   Or(0): conclusion [¬P(v0) ∨ P(v0), Q]
+//   Forall(0, v0): conclusion [forall x. (...), Q]
+//   W(Q): conclusion [forall x. (...)] (= goal_nnf)
+//
+// This DOESN'T have W above Forall in the spec-rewrite sense — W is the
+// outermost rule here. To exercise the spec's permutation case, we need
+// W somewhere INSIDE a tree above a Forall. Restructure: put the W
+// INSIDE the Forall's child.
+// =========================================================================
+void test_W_over_Forall() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    // Goal: forall x. P(x) -> P(x).  NNF: ∀x. (¬P(x) ∨ P(x)).
+    FormulaHandle goal = parse_root(ctx, "forall x. (P(x) -> P(x))");
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+
+    // Extract substructure.
+    const auto& fall = goal_nnf.get().as_quantified();
+    var_index v = 100;    // any fresh fixed-var index
+    FormulaHandle body_inst =
+        builder.instantiate_quantifier_body(fall.body, Term::fixed(v));
+    // body_inst = ¬P(v) ∨ P(v)
+    FormulaHandle nPv = body_inst.get().as_compound().left;
+    FormulaHandle Pv  = body_inst.get().as_compound().right;
+    FormulaHandle Q   = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                                .get().as_compound().right;
+
+    // Verifier semantics: Or(p) replaces entries[p] with phi, appends psi.
+    // Pre-Or: [body_inst, Q] (size 2). Or(0): [¬P(v), Q, P(v)] (size 3).
+    // Q ends up at the middle, P(v) at the tail.
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {nPv, Q, Pv};
+    leaf->rule = RAx{0, 2};
+
+    // Or(0): conclusion = [body_inst, Q]; child = [nPv, Q, Pv].
+    auto orn = std::make_unique<Deriv>();
+    orn->conclusion = {body_inst, Q};
+    orn->rule = ROr{0, std::move(leaf)};
+
+    // Forall(p=0, v): conclusion = [forall x. body, Q]; child = [body_inst, Q].
+    auto forall_n = std::make_unique<Deriv>();
+    forall_n->conclusion = {goal_nnf, Q};
+    forall_n->rule = RForall{0, v, std::move(orn)};
+
+    // W(Q): conclusion = [forall x. body]; child = [forall x. body, Q].
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = RWeaken{Q, std::move(forall_n)};
+
+    CHECK(count_weakenings(*root) == 1);
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
+// =========================================================================
+// W2.1 — §4.2.1 W above ROr (p < |Γ|, principal in Γ not in φ).
+//
+// Goal: (P → P) ∨ Q. NNF: (¬P ∨ P) ∨ Q.
+//
+// Structure:
+//   leaf: Ax{0, 1} on [¬P, P, Q]
+//   Or(0): conclusion = [¬P∨P, Q]; child = [¬P, P, Q]
+//   W(Q): conclusion = [¬P∨P]; child = [¬P∨P, Q]
+//
+// W is over Or — but Or has already fired below the W (the Or's
+// conclusion contains Q, which the W introduces). Wait — Or fires on
+// the W'd sequent (post-W). The W's child IS the Or; Or's conclusion =
+// W's child.conclusion = [¬P∨P, Q]. The Or's p=0 references ¬P∨P (in
+// the W'd sequent, position 0). That's < |Γ| = 1 (W's outer node has
+// Γ = [¬P∨P] of size 1, φ = Q at position 1). So p=0 < |Γ|. ✓
+//
+// After permute: Or fires on [¬P∨P] → [¬P, P]. Then W(Q) on [¬P, P]
+// → [¬P, P, Q]. Note: the original child of Or was [¬P, P, Q] (= same
+// as post-W in permuted). But the ORDER of the tail: original had
+// [¬P, P, Q] (Q was already there pre-Or, then Or appended P → Q ended
+// up at the MIDDLE: [¬P, Q, P]?). Hmm let me re-trace.
+//
+// Verifier semantics: Or(p) replaces entries[p] with φ, then APPENDS ψ.
+// Original sequence:
+//   1. W(Q): [¬P∨P] → [¬P∨P, Q].
+//   2. Or(0): replace entry 0 with ¬P, append P → [¬P, Q, P].
+//   ∴ original Or-child.conclusion = [¬P, Q, P], not [¬P, P, Q]!
+//
+// Need to rebuild the test accordingly.
+// =========================================================================
+void test_W_over_Or() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    FormulaHandle notP = goal_nnf.get().as_compound().left;
+    FormulaHandle P    = goal_nnf.get().as_compound().right;
+    FormulaHandle Q    = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                                .get().as_compound().right;
+
+    // Or's principal entry at position 0 is goal_nnf. After Or(0):
+    // [¬P, Q, P] (Q at position 1 because it was in [¬P∨P, Q] before Or).
+    // Leaf: Ax{0, 2} on [¬P, Q, P].
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {notP, Q, P};
+    leaf->rule = RAx{0, 2};
+
+    auto orn = std::make_unique<Deriv>();
+    orn->conclusion = {goal_nnf, Q};
+    orn->rule = ROr{0, std::move(leaf)};
+
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = RWeaken{Q, std::move(orn)};
+
+    CHECK(count_weakenings(*root) == 1);
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
 }  // namespace
 
 int main() {
     test_smoke_weakening_free();
     test_W_absorb_at_ax_nonprincipal();
     test_W_absorb_at_one();
+    test_W_over_W_stacked();
+    test_W_over_Exchange();
+    test_W_over_Contract();
+    test_W_over_Forall();
+    test_W_over_Or();
     std::cout << "weak_elim_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

@@ -111,6 +111,167 @@ DerivPtr try_absorb_at_leaf(const Deriv& w) {
     return nullptr;
 }
 
+// ---- §4.2 unary permutation -------------------------------------------------
+//
+// W above a unary rule R where R's principal/positional fields all refer
+// to positions in Γ (NOT the W'd slot at |Γ|). Permute so R fires first,
+// then W. For ROr, an additional inner RExchange is needed to restore
+// the original child's [..., φ, ψ] tail order (§4.2.1).
+//
+// Precondition (caller): w.rule is RWeaken{φ, child=C}, w.conclusion = Γ,
+// C.conclusion = Γ + φ' where φ' is at position |Γ| (= the W'd slot).
+//
+// Returns nullptr if the case doesn't apply (W-principal or out-of-frag).
+DerivPtr try_permute_unary(const Deriv& w) {
+    const auto* w_rule = std::get_if<RWeaken>(&w.rule);
+    if (!w_rule) return nullptr;
+    const Deriv& inner = *w_rule->child;
+    const std::size_t gamma_size = w.conclusion.size();
+    const FormulaHandle& phi = w_rule->added;
+
+    auto make_inner_w_from_orig_child =
+        [&](const Deriv& orig_child) -> DerivPtr {
+            // The new inner W's child is a clone of the original
+            // inner-rule's child; its conclusion is unchanged. The W
+            // node's conclusion = child's conclusion minus the last
+            // entry (= φ at the tail).
+            auto wn = std::make_unique<Deriv>();
+            wn->conclusion = orig_child.conclusion;
+            if (wn->conclusion.empty()) return nullptr;
+            wn->conclusion.pop_back();
+            wn->rule = RWeaken{phi, clone(orig_child)};
+            return wn;
+        };
+
+    // --- ROr (§4.2.1) ---
+    if (const auto* o = std::get_if<ROr>(&inner.rule)) {
+        if (o->principal >= gamma_size) return nullptr;  // W-principal: §4.3.1
+        // The Or's child `c` was built expecting tail [..., φ@|Γ|, ψ@|Γ|+1].
+        // After permutation, the new tail at this depth is [..., ψ@|Γ|, φ@|Γ|+1].
+        // Two realizations (spec §4.2.1):
+        //   (a) Insert RExchange{|Γ|, |Γ|+1, c} to fix the tail. But this
+        //       creates an Exchange touching the W'd slot, which the
+        //       subsequent W-elim recursion can't permute past (edge
+        //       case in §4.2.4) — the W gets stuck.
+        //   (b) Rewrite c's position references for the swap. Simpler
+        //       when c is a leaf (just remap the RAx/ROne positions);
+        //       general subtree rewrite gets tangled with downstream
+        //       rule semantics. We do (b) for leaves and fall back to
+        //       (a) otherwise — the (a) tree is still sound; just not
+        //       fully W-free.
+        const Deriv& c = *o->child;
+        if (c.conclusion.size() < 2) return nullptr;
+
+        auto swap_in_leaf = [&](const Deriv& leaf) -> DerivPtr {
+            // Build a new leaf with positions gamma_size and gamma_size+1
+            // swapped in both the conclusion entries and the rule fields.
+            std::size_t lo = gamma_size, hi = gamma_size + 1;
+            auto remap = [&](std::size_t p) -> std::size_t {
+                return p == lo ? hi : (p == hi ? lo : p);
+            };
+            auto out_leaf = std::make_unique<Deriv>();
+            out_leaf->conclusion = leaf.conclusion;
+            std::swap(out_leaf->conclusion[lo], out_leaf->conclusion[hi]);
+            if (const auto* ax = std::get_if<RAx>(&leaf.rule)) {
+                out_leaf->rule = RAx{remap(ax->a), remap(ax->b)};
+            } else if (const auto* one = std::get_if<ROne>(&leaf.rule)) {
+                out_leaf->rule = ROne{remap(one->idx)};
+            } else if (const auto* lem = std::get_if<RLemma>(&leaf.rule)) {
+                // RLemma doesn't reference positions; the lemma's NNF
+                // is matched against the sequent. Swapping entries
+                // doesn't change membership; just clone the rule.
+                out_leaf->rule = *lem;
+            } else {
+                return nullptr;
+            }
+            return out_leaf;
+        };
+
+        DerivPtr new_w_child;  // becomes the new RWeaken's child.
+        if (std::holds_alternative<RAx>(c.rule) ||
+            std::holds_alternative<ROne>(c.rule) ||
+            std::holds_alternative<RLemma>(c.rule)) {
+            // Realization (b): leaf with swapped positions.
+            new_w_child = swap_in_leaf(c);
+            if (!new_w_child) return nullptr;
+        } else {
+            // Realization (a): insert RExchange to fix tail order.
+            // The W will then be stuck above the Exchange (out of
+            // fragment for W2). Sound but not fully reducing.
+            auto exch = std::make_unique<Deriv>();
+            exch->conclusion = c.conclusion;
+            std::swap(exch->conclusion[gamma_size],
+                      exch->conclusion[gamma_size + 1]);
+            exch->rule = RExchange{gamma_size, gamma_size + 1, clone(c)};
+            new_w_child = std::move(exch);
+        }
+
+        // new_inner_w.conclusion = (Γ' + ψ). The W's child conclusion
+        // (= new_w_child.conclusion) has φ at the tail.
+        auto new_w = std::make_unique<Deriv>();
+        new_w->conclusion = new_w_child->conclusion;
+        new_w->conclusion.pop_back();
+        new_w->rule = RWeaken{phi, std::move(new_w_child)};
+
+        auto out = std::make_unique<Deriv>();
+        out->conclusion = w.conclusion;        // = Γ
+        out->rule = ROr{o->principal, std::move(new_w)};
+        return out;
+    }
+
+    // --- RForall (§4.2.2) ---
+    if (const auto* f = std::get_if<RForall>(&inner.rule)) {
+        if (f->principal >= gamma_size) return nullptr;  // W-principal: §4.3.2
+        auto new_w = make_inner_w_from_orig_child(*f->child);
+        if (!new_w) return nullptr;
+        auto out = std::make_unique<Deriv>();
+        out->conclusion = w.conclusion;
+        out->rule = RForall{f->principal, f->eigen, std::move(new_w)};
+        return out;
+    }
+
+    // --- RExists (§4.2.3) ---
+    if (const auto* e = std::get_if<RExists>(&inner.rule)) {
+        if (e->principal >= gamma_size) return nullptr;  // W-principal: §4.3.3
+        auto new_w = make_inner_w_from_orig_child(*e->child);
+        if (!new_w) return nullptr;
+        auto out = std::make_unique<Deriv>();
+        out->conclusion = w.conclusion;
+        out->rule = RExists{e->principal, e->witness, std::move(new_w)};
+        return out;
+    }
+
+    // --- RExchange (§4.2.4) ---
+    if (const auto* x = std::get_if<RExchange>(&inner.rule)) {
+        if (x->i >= gamma_size || x->j >= gamma_size) return nullptr;  // edge
+        auto new_w = make_inner_w_from_orig_child(*x->child);
+        if (!new_w) return nullptr;
+        auto out = std::make_unique<Deriv>();
+        out->conclusion = w.conclusion;
+        out->rule = RExchange{x->i, x->j, std::move(new_w)};
+        return out;
+    }
+
+    // --- RContract (§4.2.5) ---
+    if (const auto* k = std::get_if<RContract>(&inner.rule)) {
+        if (k->i >= gamma_size || k->j >= gamma_size) return nullptr;  // edge
+        auto new_w = make_inner_w_from_orig_child(*k->child);
+        if (!new_w) return nullptr;
+        auto out = std::make_unique<Deriv>();
+        out->conclusion = w.conclusion;
+        out->rule = RContract{k->i, k->j, std::move(new_w)};
+        return out;
+    }
+
+    // --- RWeaken over RWeaken (§4.2.6) ---
+    // Handled by the driver's post-order: the inner W reduces first
+    // (potentially absorbing at a leaf), then the outer W's child
+    // becomes the inner W's reduction. If the inner W couldn't reduce,
+    // we leave the outer W in place too (out-of-fragment for W2).
+
+    return nullptr;
+}
+
 // =========================================================================
 // Driver: recursively reduce a Deriv. Post-order — children first, then
 // attempt the per-rule reduction at this node.
@@ -148,13 +309,18 @@ DerivPtr reduce(const Deriv& d) {
 
     // 2. Per-node reduction. Currently only RWeaken targets.
     if (std::holds_alternative<RWeaken>(rebuilt->rule)) {
-        // Try §4.1 leaf absorption.
+        // Try §4.1 leaf absorption first (drops the W entirely).
         if (auto out = try_absorb_at_leaf(*rebuilt)) {
-            // The result might still contain Ws above (callers handle
-            // recursion); but for now the result is W-free for §4.1.
             return out;
         }
-        // No reduction applies; pass through.
+        // Try §4.2 unary permutation. The result still contains the
+        // same W (moved deeper); recurse so the displaced W can
+        // continue reducing at its new position (potentially landing
+        // at a leaf for §4.1 absorption).
+        if (auto out = try_permute_unary(*rebuilt)) {
+            return reduce(*out);
+        }
+        // No reduction applies; pass through (out-of-fragment for now).
     }
     return rebuilt;
 }
