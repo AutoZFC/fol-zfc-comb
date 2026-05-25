@@ -207,7 +207,7 @@ void process_proof_file(
             }
         }
         if (stage4_diag != "ok") {
-            // Stage 4 is permutation-only and best-effort; report
+            // Stage 4 is permutation-only and best-effort; report a
             // diagnostic when the cleaned program can't be built/
             // emitted/re-verified, but fall through with the original
             // LKR (sound — leaves remaining W's for I-2 to flag).

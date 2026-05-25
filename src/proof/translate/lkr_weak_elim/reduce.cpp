@@ -18,6 +18,10 @@ namespace {
 
 // Deep-clone a Deriv (a Deriv→Deriv pass returns a fresh tree;
 // no in-place mutation).
+// Forward declarations.
+DerivPtr swap_subtree_positions(const Deriv& d,
+                                std::size_t lo, std::size_t hi);
+
 DerivPtr clone(const Deriv& d) {
     auto out = std::make_unique<Deriv>();
     out->conclusion = d.conclusion;
@@ -146,68 +150,21 @@ DerivPtr try_permute_unary(const Deriv& w) {
     // --- ROr (§4.2.1) ---
     if (const auto* o = std::get_if<ROr>(&inner.rule)) {
         if (o->principal >= gamma_size) return nullptr;  // W-principal: §4.3.1
-        // The Or's child `c` was built expecting tail [..., φ@|Γ|, ψ@|Γ|+1].
-        // After permutation, the new tail at this depth is [..., ψ@|Γ|, φ@|Γ|+1].
-        // Two realizations (spec §4.2.1):
-        //   (a) Insert RExchange{|Γ|, |Γ|+1, c} to fix the tail. But this
-        //       creates an Exchange touching the W'd slot, which the
-        //       subsequent W-elim recursion can't permute past (edge
-        //       case in §4.2.4) — the W gets stuck.
-        //   (b) Rewrite c's position references for the swap. Simpler
-        //       when c is a leaf (just remap the RAx/ROne positions);
-        //       general subtree rewrite gets tangled with downstream
-        //       rule semantics. We do (b) for leaves and fall back to
-        //       (a) otherwise — the (a) tree is still sound; just not
-        //       fully W-free.
+        // Or's child `c` was built expecting tail [..., φ@|Γ|, ψ@|Γ|+1].
+        // After permutation, the new tail is [..., ψ@|Γ|, φ@|Γ|+1]. We
+        // rewrite c with a (|Γ|, |Γ|+1) swap via swap_subtree_positions,
+        // covering leaf-like c and rules that propagate the swap
+        // cleanly (ROr/RForall/RExists/RAnd-with-both-in-side).
+        //
+        // The alternative (insert RExchange to fix tail order) produced
+        // structures the W couldn't permute past in the subsequent
+        // recursion — strictly worse. Bail if swap fails; the W stays
+        // and a different reduction order may catch it.
         const Deriv& c = *o->child;
         if (c.conclusion.size() < 2) return nullptr;
+        auto new_w_child = swap_subtree_positions(c, gamma_size, gamma_size + 1);
+        if (!new_w_child) return nullptr;
 
-        auto swap_in_leaf = [&](const Deriv& leaf) -> DerivPtr {
-            // Build a new leaf with positions gamma_size and gamma_size+1
-            // swapped in both the conclusion entries and the rule fields.
-            std::size_t lo = gamma_size, hi = gamma_size + 1;
-            auto remap = [&](std::size_t p) -> std::size_t {
-                return p == lo ? hi : (p == hi ? lo : p);
-            };
-            auto out_leaf = std::make_unique<Deriv>();
-            out_leaf->conclusion = leaf.conclusion;
-            std::swap(out_leaf->conclusion[lo], out_leaf->conclusion[hi]);
-            if (const auto* ax = std::get_if<RAx>(&leaf.rule)) {
-                out_leaf->rule = RAx{remap(ax->a), remap(ax->b)};
-            } else if (const auto* one = std::get_if<ROne>(&leaf.rule)) {
-                out_leaf->rule = ROne{remap(one->idx)};
-            } else if (const auto* lem = std::get_if<RLemma>(&leaf.rule)) {
-                // RLemma doesn't reference positions; the lemma's NNF
-                // is matched against the sequent. Swapping entries
-                // doesn't change membership; just clone the rule.
-                out_leaf->rule = *lem;
-            } else {
-                return nullptr;
-            }
-            return out_leaf;
-        };
-
-        DerivPtr new_w_child;  // becomes the new RWeaken's child.
-        if (std::holds_alternative<RAx>(c.rule) ||
-            std::holds_alternative<ROne>(c.rule) ||
-            std::holds_alternative<RLemma>(c.rule)) {
-            // Realization (b): leaf with swapped positions.
-            new_w_child = swap_in_leaf(c);
-            if (!new_w_child) return nullptr;
-        } else {
-            // Realization (a): insert RExchange to fix tail order.
-            // The W will then be stuck above the Exchange (out of
-            // fragment for W2). Sound but not fully reducing.
-            auto exch = std::make_unique<Deriv>();
-            exch->conclusion = c.conclusion;
-            std::swap(exch->conclusion[gamma_size],
-                      exch->conclusion[gamma_size + 1]);
-            exch->rule = RExchange{gamma_size, gamma_size + 1, clone(c)};
-            new_w_child = std::move(exch);
-        }
-
-        // new_inner_w.conclusion = (Γ' + ψ). The W's child conclusion
-        // (= new_w_child.conclusion) has φ at the tail.
         auto new_w = std::make_unique<Deriv>();
         new_w->conclusion = new_w_child->conclusion;
         new_w->conclusion.pop_back();
@@ -330,7 +287,76 @@ DerivPtr swap_subtree_positions(const Deriv& d,
                             std::move(new_child)};
         return out;
     }
-    // RExchange/RContract/RAnd/RCut/RWeaken: out of fragment.
+    if (const auto* a = std::get_if<RAnd>(&d.rule)) {
+        // Don't permute the swap if either lo or hi is the principal
+        // (or both); the principal-shift case is sound but the partition
+        // and child-routing math gets gnarly. Bail; W3 caller falls
+        // through and the W stays.
+        if (lo == a->principal || hi == a->principal) return nullptr;
+
+        auto in_partition = [&](std::size_t k) {
+            for (std::size_t p : a->left_partition) if (p == k) return true;
+            return false;
+        };
+        bool lo_in_part = in_partition(lo);
+        bool hi_in_part = in_partition(hi);
+
+        // Compute new_partition by remapping each entry. As a multiset
+        // {lo↔hi} is identity, but if exactly one of lo, hi is in the
+        // partition, the swap reshapes sorted(partition).
+        std::vector<std::size_t> new_partition;
+        new_partition.reserve(a->left_partition.size());
+        for (std::size_t p : a->left_partition) {
+            new_partition.push_back(remap(p));
+        }
+
+        // CASE A: both in partition. sorted(partition) order may change
+        // numerically; LEFT child sees swap at (idx_lo, idx_hi).
+        if (lo_in_part && hi_in_part) {
+            std::vector<std::size_t> sp(a->left_partition.begin(),
+                                       a->left_partition.end());
+            std::sort(sp.begin(), sp.end());
+            std::size_t lo_idx = 0, hi_idx = 0;
+            for (std::size_t i = 0; i < sp.size(); ++i) {
+                if (sp[i] == lo) lo_idx = i;
+                if (sp[i] == hi) hi_idx = i;
+            }
+            auto new_left = swap_subtree_positions(*a->left, lo_idx, hi_idx);
+            if (!new_left) return nullptr;
+            out->rule = RAnd{a->principal, new_partition,
+                             std::move(new_left), clone(*a->right)};
+            return out;
+        }
+
+        // CASE B: both in complement (not in partition, not principal).
+        if (!lo_in_part && !hi_in_part) {
+            std::vector<std::size_t> compl_set;
+            for (std::size_t k = 0; k < d.conclusion.size(); ++k) {
+                if (k != a->principal && !in_partition(k)) {
+                    compl_set.push_back(k);
+                }
+            }
+            std::sort(compl_set.begin(), compl_set.end());
+            std::size_t lo_idx = 0, hi_idx = 0;
+            for (std::size_t i = 0; i < compl_set.size(); ++i) {
+                if (compl_set[i] == lo) lo_idx = i;
+                if (compl_set[i] == hi) hi_idx = i;
+            }
+            auto new_right = swap_subtree_positions(*a->right, lo_idx, hi_idx);
+            if (!new_right) return nullptr;
+            out->rule = RAnd{a->principal, new_partition,
+                             clone(*a->left), std::move(new_right)};
+            return out;
+        }
+
+        // CASE C: lo and hi straddle the partition/complement split.
+        // The LEFT and RIGHT children's sequents both reshape; need to
+        // carefully recompute the position remapping inside each. Defer
+        // (more invasive math; the simpler partition-uniform cases above
+        // already capture the common shape we hit).
+        return nullptr;
+    }
+    // RExchange/RContract/RCut/RWeaken: out of fragment.
     return nullptr;
 }
 
