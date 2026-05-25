@@ -1,0 +1,15 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Weakening-elimination engine over Deriv (WEAKENING_ELIM_DESIGN.md).
+# Stage 4 of the pipeline; runs after lkr_cut_elim and before lkr_to_comb.
+cc_library(
+    name = "reduce",
+    srcs = ["reduce.cpp"],
+    hdrs = ["reduce.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/translate/lkr_cut_elim:deriv",
+        "//src/util:error",
+    ],
+)
