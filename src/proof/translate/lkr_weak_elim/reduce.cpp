@@ -272,6 +272,108 @@ DerivPtr try_permute_unary(const Deriv& w) {
     return nullptr;
 }
 
+// Swap positions `lo` and `hi` in a LEAF rule's positional fields, and
+// in the leaf's conclusion entries. Returns nullptr if `d` is not a
+// closing rule (the position-rewrite for non-leaves needs to track
+// each rule's effect on positions through the subtree — out of fragment
+// for the initial impl).
+DerivPtr swap_leaf_positions(const Deriv& d, std::size_t lo, std::size_t hi) {
+    auto remap = [&](std::size_t p) -> std::size_t {
+        return p == lo ? hi : (p == hi ? lo : p);
+    };
+    auto out = std::make_unique<Deriv>();
+    out->conclusion = d.conclusion;
+    if (lo >= out->conclusion.size() || hi >= out->conclusion.size()) {
+        return nullptr;
+    }
+    std::swap(out->conclusion[lo], out->conclusion[hi]);
+    if (const auto* ax = std::get_if<RAx>(&d.rule)) {
+        out->rule = RAx{remap(ax->a), remap(ax->b)};
+    } else if (const auto* one = std::get_if<ROne>(&d.rule)) {
+        out->rule = ROne{remap(one->idx)};
+    } else if (const auto* lem = std::get_if<RLemma>(&d.rule)) {
+        out->rule = RLemma{lem->target, lem->source_name};
+    } else {
+        return nullptr;
+    }
+    return out;
+}
+
+// ---- §4.4.1 W above RAnd (binary split) -------------------------------------
+//
+// W above RAnd where the And's principal is in Γ (NOT the W'd slot at
+// |Γ| — that case is §4.3.4, out of scope). The W'd entry at position
+// |Γ| in `inner.conclusion` (= Γ+φ) is EITHER in `left_partition`
+// (→ goes to LEFT) OR in the complement (→ goes to RIGHT).
+//
+// Permuted form:
+//   new_partition = left_partition with |Γ| removed (if present).
+//   The side that originally held the W'd entry gets a fresh RWeaken
+//   on top; the other side is cloned unchanged.
+//
+// The affected side's subtree expected a tail order [..., φ, side_aux]
+// (where side_aux is LEFT_phi or RIGHT_psi); in the permuted form the
+// tail becomes [..., side_aux, φ] (φ at end because W appends). We
+// rewrite the leaf's positions for this swap. Non-leaf cases on the
+// affected side fall back to nullptr (out of fragment for the initial
+// impl; see swap_leaf_positions).
+DerivPtr try_permute_and(const Deriv& w) {
+    const auto* w_rule = std::get_if<RWeaken>(&w.rule);
+    if (!w_rule) return nullptr;
+    const Deriv& inner = *w_rule->child;
+    const auto* a = std::get_if<RAnd>(&inner.rule);
+    if (!a) return nullptr;
+
+    const std::size_t gamma_size = w.conclusion.size();
+    const FormulaHandle& phi = w_rule->added;
+
+    if (a->principal >= gamma_size) return nullptr;  // W-principal: §4.3.4
+
+    bool in_left = false;
+    for (std::size_t p : a->left_partition) {
+        if (p == gamma_size) { in_left = true; break; }
+    }
+
+    std::vector<std::size_t> new_partition;
+    new_partition.reserve(a->left_partition.size());
+    for (std::size_t p : a->left_partition) {
+        if (p != gamma_size) new_partition.push_back(p);
+    }
+
+    auto build_W_side = [&](const Deriv& orig_side) -> DerivPtr {
+        // orig_side.conclusion's tail is [..., φ, side_aux]. After
+        // permutation we want post-W = [..., side_aux, φ]. Swap the
+        // last two positions in the leaf.
+        if (orig_side.conclusion.size() < 2) return nullptr;
+        std::size_t lo = orig_side.conclusion.size() - 2;
+        std::size_t hi = orig_side.conclusion.size() - 1;
+        auto rewritten = swap_leaf_positions(orig_side, lo, hi);
+        if (!rewritten) return nullptr;
+        auto wn = std::make_unique<Deriv>();
+        wn->conclusion = rewritten->conclusion;
+        wn->conclusion.pop_back();                  // strip φ
+        wn->rule = RWeaken{phi, std::move(rewritten)};
+        return wn;
+    };
+
+    DerivPtr new_left, new_right;
+    if (in_left) {
+        new_left = build_W_side(*a->left);
+        if (!new_left) return nullptr;
+        new_right = clone(*a->right);
+    } else {
+        new_right = build_W_side(*a->right);
+        if (!new_right) return nullptr;
+        new_left = clone(*a->left);
+    }
+
+    auto out = std::make_unique<Deriv>();
+    out->conclusion = w.conclusion;     // = Γ
+    out->rule = RAnd{a->principal, new_partition,
+                     std::move(new_left), std::move(new_right)};
+    return out;
+}
+
 // =========================================================================
 // Driver: recursively reduce a Deriv. Post-order — children first, then
 // attempt the per-rule reduction at this node.
@@ -318,6 +420,12 @@ DerivPtr reduce(const Deriv& d) {
         // continue reducing at its new position (potentially landing
         // at a leaf for §4.1 absorption).
         if (auto out = try_permute_unary(*rebuilt)) {
+            return reduce(*out);
+        }
+        // Try §4.4.1 RAnd permutation. The W moves into one side of the
+        // And (the side that originally held the W'd entry); recurse so
+        // the displaced W can continue reducing.
+        if (auto out = try_permute_and(*rebuilt)) {
             return reduce(*out);
         }
         // No reduction applies; pass through (out-of-fragment for now).

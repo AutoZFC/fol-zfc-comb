@@ -565,6 +565,169 @@ void test_W_over_Or() {
     CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
 }
 
+// =========================================================================
+// W3 — §4.4.1 W above RAnd (binary split). The corpus-failure case.
+//
+// Goal: (A ∧ B) ∨ (¬A ∨ ¬B). NNF same. Tautology (= A∧B ∨ ¬(A∧B)).
+//
+// LKR derivation (with W):
+//   1. Or(0) outer:  [(A ∧ B) ∨ (¬A ∨ ¬B)]   →  [A ∧ B, ¬A ∨ ¬B]
+//   2. Or(1):        [A ∧ B, ¬A ∨ ¬B]        →  [A ∧ B, ¬A, ¬B]
+//   3. W(Q):         [A ∧ B, ¬A, ¬B]         →  [A ∧ B, ¬A, ¬B, Q]
+//   4. And(0, [1,3]):  split
+//        LEFT  = sorted([1,3]) entries (¬A, Q) + LEFT_phi=A → [¬A, Q, A]
+//                Ax{0, 2}: ¬A dual A. ✓
+//        RIGHT = complement {2} entry (¬B) + RIGHT_psi=B → [¬B, B]
+//                Ax{0, 1}: ¬B dual B. ✓
+//
+// The W'd Q is in left_partition (position 3 in Γ+φ). I-2 in
+// lkr_to_comb would reject this as load-bearing. But Q is NOT
+// principal in LEFT's Ax (Ax uses ¬A/A, not Q). After W3 permutation:
+// W moves into LEFT; LEFT's rewritten leaf doesn't use Q; W1 absorbs.
+// =========================================================================
+void test_W_above_And() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle goal = parse_root(ctx, "(A & B) | (~A | ~B)");
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    // goal_nnf = (A ∧ B) ∨ (¬A ∨ ¬B). Extract.
+    const auto& g_cmp = goal_nnf.get().as_compound();
+    FormulaHandle and_AB = g_cmp.left;            // A ∧ B
+    FormulaHandle or_nAnB = g_cmp.right;          // ¬A ∨ ¬B
+    const auto& ab_cmp = and_AB.get().as_compound();
+    FormulaHandle A = ab_cmp.left;
+    FormulaHandle B = ab_cmp.right;
+    const auto& nor_cmp = or_nAnB.get().as_compound();
+    FormulaHandle nA = nor_cmp.left;
+    FormulaHandle nB = nor_cmp.right;
+
+    FormulaHandle Q = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                              .get().as_compound().right;
+
+    // LEFT subtree: leaf RAx{0, 2} on [¬A, Q, A].
+    auto left_leaf = std::make_unique<Deriv>();
+    left_leaf->conclusion = {nA, Q, A};
+    left_leaf->rule = RAx{0, 2};
+
+    // RIGHT subtree: leaf RAx{0, 1} on [¬B, B].
+    auto right_leaf = std::make_unique<Deriv>();
+    right_leaf->conclusion = {nB, B};
+    right_leaf->rule = RAx{0, 1};
+
+    // And: principal=0 (A∧B), partition=[1, 3]. Pre-And: [A∧B, ¬A, ¬B, Q].
+    auto and_node = std::make_unique<Deriv>();
+    and_node->conclusion = {and_AB, nA, nB, Q};
+    and_node->rule = RAnd{0, {1, 3},
+                          std::move(left_leaf), std::move(right_leaf)};
+
+    // W(Q): Pre-W [A∧B, ¬A, ¬B], post-W [A∧B, ¬A, ¬B, Q].
+    auto w_node = std::make_unique<Deriv>();
+    w_node->conclusion = {and_AB, nA, nB};
+    w_node->rule = RWeaken{Q, std::move(and_node)};
+
+    // Or(1) on [A∧B, ¬A∨¬B] → [A∧B, ¬A, ¬B].
+    auto or_inner = std::make_unique<Deriv>();
+    or_inner->conclusion = {and_AB, or_nAnB};
+    or_inner->rule = ROr{1, std::move(w_node)};
+
+    // Or(0) on [goal_nnf] → [A∧B, ¬A∨¬B].
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(or_inner)};
+
+    CHECK(count_weakenings(*root) == 1);
+    CHECK_OK(emit_and_verify(ctx, goal, *root));  // sanity: original verifies.
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
+// =========================================================================
+// W3.2 — §4.4.1 W above RAnd, W'd entry in complement (goes to RIGHT).
+//
+// Same goal as W3.1, but partition excludes the W'd slot — so the W'd
+// entry ends up in the complement and is routed to RIGHT.
+//
+// Sequence:
+//   1. Or(0) outer:  [(A ∧ B) ∨ (¬A ∨ ¬B)]   →  [A ∧ B, ¬A ∨ ¬B]
+//   2. Or(1):        [A ∧ B, ¬A ∨ ¬B]        →  [A ∧ B, ¬A, ¬B]
+//   3. W(Q):                                  →  [A ∧ B, ¬A, ¬B, Q]
+//   4. And(0, [1]):  partition = [¬A only]. W'd Q goes to complement.
+//        LEFT  = [¬A, A].          Ax{0, 1}.
+//        RIGHT = sorted([2, 3])    = [¬B, Q]; + RIGHT_psi=B → [¬B, Q, B]
+//                Ax{0, 2}: ¬B dual B.
+// =========================================================================
+void test_W_above_And_right_side() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle goal = parse_root(ctx, "(A & B) | (~A | ~B)");
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    const auto& g_cmp = goal_nnf.get().as_compound();
+    FormulaHandle and_AB = g_cmp.left;
+    FormulaHandle or_nAnB = g_cmp.right;
+    const auto& ab_cmp = and_AB.get().as_compound();
+    FormulaHandle A = ab_cmp.left;
+    FormulaHandle B = ab_cmp.right;
+    const auto& nor_cmp = or_nAnB.get().as_compound();
+    FormulaHandle nA = nor_cmp.left;
+    FormulaHandle nB = nor_cmp.right;
+
+    FormulaHandle Q = builder.to_nnf(parse_root(ctx, "Q -> Q"))
+                              .get().as_compound().right;
+
+    // LEFT subtree: leaf RAx{0, 1} on [¬A, A].
+    auto left_leaf = std::make_unique<Deriv>();
+    left_leaf->conclusion = {nA, A};
+    left_leaf->rule = RAx{0, 1};
+
+    // RIGHT subtree: leaf RAx{0, 2} on [¬B, Q, B] (Q in partition-routing).
+    auto right_leaf = std::make_unique<Deriv>();
+    right_leaf->conclusion = {nB, Q, B};
+    right_leaf->rule = RAx{0, 2};
+
+    // And: principal=0 (A∧B), partition=[1].
+    auto and_node = std::make_unique<Deriv>();
+    and_node->conclusion = {and_AB, nA, nB, Q};
+    and_node->rule = RAnd{0, {1},
+                          std::move(left_leaf), std::move(right_leaf)};
+
+    auto w_node = std::make_unique<Deriv>();
+    w_node->conclusion = {and_AB, nA, nB};
+    w_node->rule = RWeaken{Q, std::move(and_node)};
+
+    auto or_inner = std::make_unique<Deriv>();
+    or_inner->conclusion = {and_AB, or_nAnB};
+    or_inner->rule = ROr{1, std::move(w_node)};
+
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(or_inner)};
+
+    CHECK(count_weakenings(*root) == 1);
+    CHECK_OK(emit_and_verify(ctx, goal, *root));
+
+    auto reduced = we::eliminate_weakenings(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_weakenings(*reduced.value()) == 0);
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value()));
+}
+
 }  // namespace
 
 int main() {
@@ -576,6 +739,8 @@ int main() {
     test_W_over_Contract();
     test_W_over_Forall();
     test_W_over_Or();
+    test_W_above_And();
+    test_W_above_And_right_side();
     std::cout << "weak_elim_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
