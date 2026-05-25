@@ -435,6 +435,48 @@ void test_axiom_cut_principal() {
     CHECK_OK(emit_and_verify(ctx, goal, *reduced.value(), "ax_cut_principal"));
 }
 
+// =========================================================================
+// P6 — B0 framework: wrap_with_weakenings helper.
+//
+// Build a Deriv that proves [¬P, P, Q] via AxiomLit(0, 1). Wrap with
+// weakenings({Q}) → outer node has conclusion [¬P, P]. The verifier's
+// W grows [¬P, P] to [¬P, P, Q] before AxiomLit fires.
+// =========================================================================
+void test_wrap_with_weakenings() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> P");
+    FormulaBuilder builder(ctx);
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    FormulaHandle notP = goal_nnf.get().as_compound().left;
+    FormulaHandle P    = goal_nnf.get().as_compound().right;
+
+    FormulaHandle q_sent = parse_root(ctx, "Q -> Q");
+    FormulaHandle q_nnf  = builder.to_nnf(q_sent);
+    FormulaHandle Q      = q_nnf.get().as_compound().right;
+
+    // base: AxiomLit(0, 1) on [¬P, P, Q].
+    auto base = std::make_unique<Deriv>();
+    base->conclusion = {notP, P, Q};
+    base->rule = RAx{0, 1};
+
+    // Wrap with Q → outer's conclusion = [¬P, P].
+    auto wrapped = wrap_with_weakenings(std::move(base), {Q});
+    CHECK(wrapped->conclusion.size() == 2);
+    CHECK(wrapped->conclusion[0] == notP);
+    CHECK(wrapped->conclusion[1] == P);
+    CHECK(std::holds_alternative<RWeaken>(wrapped->rule));
+
+    // Top-level Or to reach the goal [¬P ∨ P].
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(wrapped)};
+
+    CHECK_OK(emit_and_verify(ctx, goal, *root, "wrap_w"));
+}
+
 }  // namespace
 
 int main() {
@@ -443,6 +485,7 @@ int main() {
     test_dead_cut_W_right();
     test_axiom_cut_non_principal();
     test_axiom_cut_principal();
+    test_wrap_with_weakenings();
     std::cout << "reduce_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

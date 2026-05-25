@@ -37,4 +37,25 @@ namespace logic::proof::translate::lkr_cut_elim {
 // verify gate catches bugs); only completeness narrows.
 util::Result<DerivPtr> eliminate_cuts(const Deriv& root);
 
+// =========================================================================
+// B0 helper: Weakening bridge.
+//
+// Wraps `base` with |to_add| RWeaken layers. Result's outermost node has
+// `conclusion = base.conclusion` with the trailing `to_add` entries
+// stripped; the verifier's W's then grow the goal from there back up to
+// base.conclusion before base's ops fire.
+//
+// Precondition: base.conclusion ends in to_add (in the given order):
+//   base.conclusion.size() >= to_add.size()
+//   for i in 0..to_add.size():
+//     base.conclusion[base.conclusion.size()-to_add.size()+i] == to_add[i]
+//
+// Used by the principal compound-cut reductions (B2 ∧/∨, B3 ∀/∃) to
+// bridge from the additive cut's conclusion Γ down to the multiplicative
+// intermediate Γ ++ Γ. Exposed in the header so tests can exercise it.
+// =========================================================================
+DerivPtr wrap_with_weakenings(
+    DerivPtr base,
+    const std::vector<FormulaHandle>& to_add);
+
 }  // namespace logic::proof::translate::lkr_cut_elim
