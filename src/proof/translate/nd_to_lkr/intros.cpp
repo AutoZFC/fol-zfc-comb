@@ -302,10 +302,8 @@ util::Result<IntroResult> emit_and_intro(
     // semantics (sorted left partition; principal consumed).
     SequentShadow left_post;
     left_post.lkr_term_for    = shadow.lkr_term_for;
-    left_post.step_to_neg_idx = shadow.step_to_neg_idx;
     SequentShadow right_post;
     right_post.lkr_term_for    = shadow.lkr_term_for;
-    right_post.step_to_neg_idx = shadow.step_to_neg_idx;
 
     // Build a quick lookup for right_needs.
     std::vector<bool> in_right(weakened.entries.size(), false);
@@ -327,6 +325,17 @@ util::Result<IntroResult> emit_and_intro(
     }
     size_t right_pos = right_post.entries.size();
     right_post.entries.push_back(theta);
+
+    // Remap step_to_neg_idx: parent f_k_idx is consumed (no remap);
+    // parent p < f_k_idx → p; parent p > f_k_idx → p - 1. LEFT and
+    // RIGHT have identical remaps because Weakening preserves the
+    // relative order of non-f_k_idx entries in both branches.
+    for (const auto& [step_idx, parent_pos] : shadow.step_to_neg_idx) {
+        if (parent_pos == f_k_idx) continue;
+        size_t mapped = parent_pos < f_k_idx ? parent_pos : parent_pos - 1;
+        left_post.step_to_neg_idx[step_idx]  = mapped;
+        right_post.step_to_neg_idx[step_idx] = mapped;
+    }
 
     return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
                                    left_pos, right_pos, op.a, op.b}};
@@ -405,10 +414,8 @@ util::Result<IntroResult> emit_iff_intro(
     // there.
     SequentShadow left_post;
     left_post.lkr_term_for    = shadow.lkr_term_for;
-    left_post.step_to_neg_idx = shadow.step_to_neg_idx;
     SequentShadow right_post;
     right_post.lkr_term_for    = shadow.lkr_term_for;
-    right_post.step_to_neg_idx = shadow.step_to_neg_idx;
 
     std::vector<bool> in_right(weakened.entries.size(), false);
     for (size_t i : right_needs) in_right[i] = true;
@@ -426,6 +433,18 @@ util::Result<IntroResult> emit_iff_intro(
     }
     size_t right_theta_idx = right_post.entries.size();
     right_post.entries.push_back(theta);
+
+    // Remap step_to_neg_idx: f_k_idx is consumed; other parent indices
+    // shift down by 1 if > f_k_idx. LEFT and RIGHT remap identically
+    // because Weakening preserves the relative order of non-f_k_idx
+    // entries in both branches. See emit_and_intro for the same
+    // pattern.
+    for (const auto& [step_idx, parent_pos] : shadow.step_to_neg_idx) {
+        if (parent_pos == f_k_idx) continue;
+        size_t mapped = parent_pos < f_k_idx ? parent_pos : parent_pos - 1;
+        left_post.step_to_neg_idx[step_idx]  = mapped;
+        right_post.step_to_neg_idx[step_idx] = mapped;
+    }
 
     return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
                                    left_phi_idx, right_theta_idx,

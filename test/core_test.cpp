@@ -102,9 +102,12 @@ bool test_nnf_de_morgan_or() {
 }
 
 bool test_nnf_iff() {
-    // P(x) <-> Q(x)  becomes  (~P(x) | Q(x)) & (P(x) | ~Q(x))
+    // P(x) <-> Q(x)  becomes  (~P(x) | Q(x)) & (~Q(x) | P(x))
+    // The right clause is in canonical NNF(Q→P) order (~Q ∨ P) rather
+    // than the legacy (P ∨ ~Q) — see formula.cpp's Op::Iff case for
+    // why (emit_iff_intro relies on this).
     return nnf_string_equals("forall x. (P(x) <-> Q(x))",
-                             "forall x_0. (~P(x_0) | Q(x_0)) & (P(x_0) | ~Q(x_0))");
+                             "forall x_0. (~P(x_0) | Q(x_0)) & (~Q(x_0) | P(x_0))");
 }
 
 bool test_nnf_neg_forall() {

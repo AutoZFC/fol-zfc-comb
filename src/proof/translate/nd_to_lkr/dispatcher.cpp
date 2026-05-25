@@ -174,6 +174,7 @@ util::ResultStatus emit_implies_elim_full(
     const SequentShadow&       shadow,
     const nd::ImpliesElim&     op,
     size_t                     target_pos,
+    const DemandPath&          norm_path,
     std::vector<lkr::Instr>&   out);
 
 // Multiplicative And-split helper. Mirrors cut_spine's emit_and_split:
@@ -260,28 +261,34 @@ util::ResultStatus emit_contradiction_close(
 
 // or_elim full emission (Phase 5e.4). 3 Cuts + Weakening{C} + outer
 // And on ¬or + two nested Ands on ¬ac and ¬bc + 4 AxiomLits.
+// Phase 6: norm_path propagates to both inner-RIGHT closes (¬C vs
+// target_pos copies).
 util::ResultStatus emit_or_elim_full(
     Ctx&                     dcc,
     SequentShadow            shadow,
     const nd::OrElim&        op,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out);
 
 // exists_elim full emission (Phase 5e.4). 1 Cut(∃x.φ) on the existential
 // formula step + Forall on the dualized ∀x.¬φ with eigen v + recurse on
-// the body's last step (the block's C-deriving step).
+// the body's last step (the block's C-deriving step). Phase 6:
+// norm_path forwards to that final recursion.
 util::ResultStatus emit_exists_elim_full(
     Ctx&                     dcc,
     SequentShadow            shadow,
     const nd::ExistsIntro&   op,
     uint32_t                 closer_step_idx,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out);
 
 // iff_elim_l/r full emission (combining-elim-like). 2 Cuts (on iff and
 // on the a/b operand) + Or-decompose of NNF(¬iff) + And on the
 // relevant disjunct + emit_closes on the duals. Structurally similar
-// to cut_spine's close_iff_elim_*.
+// to cut_spine's close_iff_elim_*. Phase 6: norm_path propagates to
+// the target-touching close (RIGHT for IFF_L, LEFT for IFF_R).
 template <typename IffElimOp>
 util::ResultStatus emit_iff_elim_full(
     Ctx&                     dcc,
@@ -289,6 +296,7 @@ util::ResultStatus emit_iff_elim_full(
     const IffElimOp&         op,
     bool                     is_left,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out);
 
 }  // namespace
@@ -389,7 +397,8 @@ util::ResultStatus translate_step_impl(
                 }
                 // No-witness form = EXISTS_ELIM block closer (Phase 5e.4).
                 return emit_exists_elim_full(
-                    dcc, std::move(shadow), op, step.idx, target_pos, out);
+                    dcc, std::move(shadow), op, step.idx, target_pos,
+                    norm_path, out);
             } else if constexpr (std::is_same_v<T, nd::ExcludedMiddle>) {
                 TRY_ASSIGN(r, intros::emit_excluded_middle(
                     ictx, op, shadow, target_pos, out, norm_path));
@@ -418,11 +427,11 @@ util::ResultStatus translate_step_impl(
                 // jointly). Not pure projection — handled with Cuts.
                 return emit_iff_elim_full(
                     dcc, std::move(shadow), op,
-                    /*is_left=*/true, target_pos, out);
+                    /*is_left=*/true, target_pos, norm_path, out);
             } else if constexpr (std::is_same_v<T, nd::IffElimR>) {
                 return emit_iff_elim_full(
                     dcc, std::move(shadow), op,
-                    /*is_left=*/false, target_pos, out);
+                    /*is_left=*/false, target_pos, norm_path, out);
             } else if constexpr (std::is_same_v<T, nd::DoubleNegElim>) {
                 TRY_ASSIGN(desc, projections::emit_double_neg_elim(
                     pctx, op, shadow, target_pos));
@@ -442,9 +451,11 @@ util::ResultStatus translate_step_impl(
 
             // ---- combining elims (Phase 5d, 5e.4) ------------------
             else if constexpr (std::is_same_v<T, nd::ImpliesElim>) {
-                return emit_implies_elim_full(dcc, shadow, op, target_pos, out);
+                return emit_implies_elim_full(
+                    dcc, shadow, op, target_pos, norm_path, out);
             } else if constexpr (std::is_same_v<T, nd::OrElim>) {
-                return emit_or_elim_full(dcc, std::move(shadow), op, target_pos, out);
+                return emit_or_elim_full(
+                    dcc, std::move(shadow), op, target_pos, norm_path, out);
             }
 
             // ---- closer family (Phase 5e.2) -----------------------
@@ -649,6 +660,7 @@ util::ResultStatus emit_implies_elim_full(
     const SequentShadow&     shadow,
     const nd::ImpliesElim&   op,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out)
 {
     if (op.impl.idx >= dcc.trace.step_env.size() ||
@@ -705,20 +717,42 @@ util::ResultStatus emit_implies_elim_full(
     size_t cut_ant_idx = right_ant.entries.size();
     right_ant.entries.push_back(neg_ant_nnf);
 
-    // Step 3: And{principal=cut_impl_idx, left_partition=[cut_ant_idx]}.
-    out.emplace_back(lkr::And{{}, cut_impl_idx, {cut_ant_idx}});
+    // Step 3: And-split on cut_impl_idx (= ¬impl = A ∧ ¬B).
+    //   LEFT-of-And:  partition = [cut_ant_idx], phi = NNF(A).
+    //                 → closes A vs ¬A. emit_close (no demand).
+    //   RIGHT-of-And: all other entries (including target_pos), theta
+    //                 = NNF(¬B). → closes ¬B vs target_pos = NNF(B-
+    //                 demand-peeled). apply_path_and_close (demand
+    //                 applies to ¬B before the dual close).
+    FormulaHandle phi   = neg_impl_nnf.get().as_compound().left;   // = NNF(A)
+    FormulaHandle theta = neg_impl_nnf.get().as_compound().right;  // = NNF(¬B)
 
-    // LEFT-of-And: [neg_ant_nnf=¬A, phi=NNF(A)]. Dual at (0, 1).
-    out.emplace_back(lkr::AxiomLit{{}, 0, 1});
+    std::vector<size_t> right_needs;
+    right_needs.reserve(right_ant.entries.size());
+    for (size_t k = 0; k < right_ant.entries.size(); ++k) {
+        if (k == cut_impl_idx) continue;
+        if (k == cut_ant_idx) continue;
+        right_needs.push_back(k);
+    }
 
-    // RIGHT-of-And: [Γ-complement, psi=NNF(¬B) at end]. Dual at
-    // (target_pos, psi_pos = right_ant.size() - 2).
-    // (psi_pos: complement has right_ant.size()-2 entries; psi
-    // appended at index complement.size() = right_ant.size()-2.)
-    size_t psi_pos = right_ant.entries.size() - 2;
-    out.emplace_back(lkr::AxiomLit{{}, target_pos, psi_pos});
+    TRY_ASSIGN(split, emit_and_split_local(
+        right_ant, cut_impl_idx, right_needs, phi, theta, out));
 
-    return util::Ok();
+    // LEFT close: phi (= A) vs cut_ant_idx remapped (= ¬A). emit_close
+    // — operand-vs-operand-dual, no demand chain to apply.
+    {
+        size_t l_neg_a = split.left_remap.at(cut_ant_idx);
+        EmitCloseContext ecc{dcc.builder};
+        TRY(emit_close(ecc, split.left, split.left_phi_idx, l_neg_a, out));
+    }
+    // RIGHT close: theta (= ¬B, un-decomposed) vs target_pos remapped
+    // (= NNF(B-demand-peeled)). norm_path peels theta down to match.
+    {
+        size_t r_target = split.right_remap.at(target_pos);
+        return apply_path_and_close(
+            dcc, split.right, r_target, split.right_theta_idx,
+            norm_path, out);
+    }
 }
 
 util::ResultStatus emit_contradiction_close(
@@ -829,6 +863,7 @@ util::ResultStatus emit_or_elim_full(
     SequentShadow            shadow,
     const nd::OrElim&        op,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out)
 {
     if (op.or_formula.idx >= dcc.trace.step_env.size() ||
@@ -932,7 +967,11 @@ util::ResultStatus emit_or_elim_full(
         EmitCloseContext ecc{dcc.builder};
         TRY(emit_close(ecc, inner.left, inner.left_phi_idx, in_l_neg_a, out));
         size_t in_r_c = inner.right_remap.at(l_c);
-        TRY(emit_close(ecc, inner.right, inner.right_theta_idx, in_r_c, out));
+        // RIGHT close: theta=neg_c_l (= NNF(¬C)) vs target_pos copy
+        // (= NNF(C-demand-peeled)). norm_path peels neg_c_l to match.
+        TRY(apply_path_and_close(
+            dcc, inner.right, in_r_c, inner.right_theta_idx,
+            norm_path, out));
     }
 
     // RIGHT outer subgoal: handles B-case via ¬bc (symmetric).
@@ -956,7 +995,11 @@ util::ResultStatus emit_or_elim_full(
         EmitCloseContext ecc{dcc.builder};
         TRY(emit_close(ecc, inner.left, inner.left_phi_idx, in_l_neg_b, out));
         size_t in_r_c_dup = inner.right_remap.at(r_c_dup);
-        return emit_close(ecc, inner.right, inner.right_theta_idx, in_r_c_dup, out);
+        // RIGHT close: theta=neg_c_r (= NNF(¬C)) vs target_pos
+        // duplicate (= NNF(C-demand-peeled)). norm_path peels.
+        return apply_path_and_close(
+            dcc, inner.right, in_r_c_dup, inner.right_theta_idx,
+            norm_path, out);
     }
 }
 
@@ -985,6 +1028,7 @@ util::ResultStatus emit_exists_elim_full(
     const nd::ExistsIntro&   op,
     uint32_t                 closer_step_idx,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out)
 {
     auto co = dcc.closer_to_opener.find(closer_step_idx);
@@ -1072,10 +1116,11 @@ util::ResultStatus emit_exists_elim_full(
     shadow.lkr_term_for[exists_elim_idx] = binding;
     shadow.step_to_neg_idx[exists_elim_idx] = cut_ex_idx;
 
-    // Step 4: recurse on body's last step.
+    // Step 4: recurse on body's last step, forwarding norm_path so
+    // the body's translation sees the original demand chain.
     return translate_step_impl(
         dcc, std::move(shadow), op.body, target_pos,
-        DemandPath{}, out);
+        norm_path, out);
 }
 
 // iff_elim_l(iff: A↔B, a: A) ⊢ B  /  iff_elim_r(iff, b: B) ⊢ A.
@@ -1108,6 +1153,7 @@ util::ResultStatus emit_iff_elim_full(
     const IffElimOp&         op,
     bool                     is_left,
     size_t                   target_pos,
+    const DemandPath&        norm_path,
     std::vector<lkr::Instr>& out)
 {
     StepRef iff_step = op.iff;
@@ -1171,28 +1217,20 @@ util::ResultStatus emit_iff_elim_full(
     shadow.entries[cut_iff_idx] = first_clause;
     shadow.entries.push_back(second_clause);
 
-    // Step 4: And-split the first_clause with right_needs=[target_pos].
-    // first_clause = A∧¬B (IFF_L) or B∧¬A (IFF_R)... wait, let me think.
-    // NNF(¬(A↔B)) = (A∧¬B)∨(¬A∧B). first_clause = A∧¬B always.
-    // For IFF_L (op.a = A): LEFT-of-And pairs A vs ¬A (= neg_op_nnf).
-    //   RIGHT-of-And pairs ¬B vs target=B.
-    // For IFF_R (op.b = B): LEFT-of-And pairs A vs ??? We don't have ¬A
-    //   in scope. We have ¬B (neg_op_nnf) instead. So IFF_R needs to
-    //   pair against the SECOND clause (¬A∧B): LEFT-of-And pairs ¬A vs
-    //   ??? — still missing.
-    //
-    // Hmm. For IFF_R, the correct match: use the SECOND clause (¬A∧B).
-    // Decompose: ¬A pairs with A (which we'd need), and B pairs with
-    // target=A (target=A under IFF_R). The pairings don't match
-    // straightforwardly. Need a different structure.
-    //
-    // The cut_spine code uses first_clause directly (A∧¬B) for IFF_L:
-    //   LEFT-of-And: A (phi) + ¬A (in scope, from cut_op_idx). Close.
-    //   RIGHT-of-And: ¬B (psi) + target=B. Close.
-    // For IFF_R (need to derive A from iff and B):
-    //   Should use the SECOND clause (¬A∧B):
-    //     LEFT-of-And: ¬A (phi) + target=A. Close.
-    //     RIGHT-of-And: B (psi) + ¬B (in scope, from cut_op_idx). Close.
+    // Step 4: And-split.
+    // NNF(¬(A↔B)) = (A∧¬B) ∨ (B∧¬A) — canonical NNF order, see
+    // formula.cpp's Op::Iff case. Both clauses are And-shape.
+    //   first_clause = A∧¬B  → for IFF_L: phi=A, psi=¬B.
+    //                          LEFT closes A vs ¬A (cut_op_idx).
+    //                          RIGHT closes ¬B vs target_pos=B (demand
+    //                          applies here).
+    //   second_clause = B∧¬A → for IFF_R: phi=B, psi=¬A.
+    //                          LEFT closes B vs ¬B (cut_op_idx).
+    //                          RIGHT closes ¬A vs target_pos=A (demand
+    //                          applies here).
+    // Symmetric: both variants have target_pos paired with psi (RIGHT
+    // close, demand-touching), and cut_op_idx paired with phi (LEFT
+    // close, operand-only). right_needs = {target_pos} for both.
 
     if (!first_clause.get().is_compound() ||
         first_clause.get().as_compound().op != Op::And ||
@@ -1208,40 +1246,33 @@ util::ResultStatus emit_iff_elim_full(
     FormulaHandle phi = clause.get().as_compound().left;
     FormulaHandle psi = clause.get().as_compound().right;
 
-    // Partition: choose which side of And gets target_pos vs cut_op_idx.
-    //   IFF_L: phi=A; LEFT needs ¬A (= cut_op); RIGHT needs B (= target).
-    //          → right_needs = {target_pos}.
-    //   IFF_R: phi=¬A; LEFT needs A (= target); RIGHT needs B (= cut_op
-    //          for IFF_R since neg_op = ¬B).
-    //          → right_needs = {cut_op_idx}.
     std::vector<size_t> right_needs;
-    if (is_left) {
-        right_needs.push_back(target_pos);
-    } else {
-        right_needs.push_back(cut_op_idx);
-    }
+    right_needs.push_back(target_pos);
     TRY_ASSIGN(split, emit_and_split_local(
         shadow, and_principal_idx, right_needs, phi, psi, out));
 
-    // Step 5: LEFT-of-And close phi vs its dual.
-    //   IFF_L: phi=A, dual at cut_op_idx (= ¬A).
-    //   IFF_R: phi=¬A, dual at target_pos (= A).
+    // Step 5: LEFT-of-And close phi vs cut_op_idx (operand vs operand-
+    // dual).
+    //   IFF_L: phi=A, cut_op_idx holds ¬A.
+    //   IFF_R: phi=B, cut_op_idx holds ¬B.
+    // Both pair an atomic-or-compound operand with its NNF dual. No
+    // demand chain to apply (demand attaches to the result side =
+    // target_pos, which is on the RIGHT branch only).
     {
-        size_t l_dual = is_left
-            ? split.left_remap.at(cut_op_idx)
-            : split.left_remap.at(target_pos);
+        size_t l_dual = split.left_remap.at(cut_op_idx);
         EmitCloseContext ecc{dcc.builder};
         TRY(emit_close(ecc, split.left, split.left_phi_idx, l_dual, out));
     }
-    // Step 6: RIGHT-of-And close psi vs its dual.
-    //   IFF_L: psi=¬B, dual at target_pos (= B).
-    //   IFF_R: psi=B, dual at cut_op_idx (= ¬B).
+    // Step 6: RIGHT-of-And close psi vs target_pos (result-side close).
+    //   IFF_L: psi=¬B, target=NNF(B-demand-peeled).
+    //   IFF_R: psi=¬A, target=NNF(A-demand-peeled).
+    // psi is the un-decomposed NNF dual of the result; norm_path
+    // peels it down to match target's pre-decomposed shape.
     {
-        size_t r_dual = is_left
-            ? split.right_remap.at(target_pos)
-            : split.right_remap.at(cut_op_idx);
-        EmitCloseContext ecc{dcc.builder};
-        return emit_close(ecc, split.right, split.right_theta_idx, r_dual, out);
+        size_t r_target = split.right_remap.at(target_pos);
+        return apply_path_and_close(
+            dcc, split.right, r_target, split.right_theta_idx,
+            norm_path, out);
     }
 }
 

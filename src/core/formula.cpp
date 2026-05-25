@@ -688,19 +688,26 @@ FormulaHandle nnf_compound(FormulaBuilder& b, const Compound& c, bool negate) {
             }
         }
         case Op::Iff: {
-            // φ ↔ ψ        ≡  (¬φ ∨ ψ) ∧ (φ ∨ ¬ψ)
-            // ¬(φ ↔ ψ)    ≡  (φ ∧ ¬ψ) ∨ (¬φ ∧ ψ)
+            // φ ↔ ψ        ≡  (¬φ ∨ ψ) ∧ (¬ψ ∨ φ)
+            // ¬(φ ↔ ψ)    ≡  (φ ∧ ¬ψ) ∨ (ψ ∧ ¬φ)
+            //
+            // The right clause uses canonical NNF order so that the
+            // second clause IS NNF(ψ→φ) = ¬ψ ∨ φ — required by
+            // emit_iff_intro, which feeds the "ba" (B→A) operand into
+            // this position and expects its NNF (= ¬B ∨ A = ¬ψ ∨ φ)
+            // to structurally match. The negate branch mirrors the
+            // swap to preserve de-Morgan duality with the positive.
             FormulaHandle phi_pos = nnf_dispatch(b, c.left,  false);
             FormulaHandle phi_neg = nnf_dispatch(b, c.left,  true);
             FormulaHandle psi_pos = nnf_dispatch(b, c.right, false);
             FormulaHandle psi_neg = nnf_dispatch(b, c.right, true);
             if (negate) {
                 FormulaHandle a = b.make_and(phi_pos, psi_neg);
-                FormulaHandle bb = b.make_and(phi_neg, psi_pos);
+                FormulaHandle bb = b.make_and(psi_pos, phi_neg);
                 return b.make_or(a, bb);
             } else {
                 FormulaHandle a = b.make_or(phi_neg, psi_pos);
-                FormulaHandle bb = b.make_or(phi_pos, psi_neg);
+                FormulaHandle bb = b.make_or(psi_neg, phi_pos);
                 return b.make_and(a, bb);
             }
         }
