@@ -35,7 +35,11 @@ namespace logic::proof::translate::lkr_cut_elim {
 // the implemented fragment. Out-of-fragment cuts (cases not yet
 // handled) are left in place — soundness is preserved (the emit-then-
 // verify gate catches bugs); only completeness narrows.
-util::Result<DerivPtr> eliminate_cuts(const Deriv& root);
+//
+// `builder` must be the same FormulaBuilder used to construct `root`'s
+// FormulaHandles. The B3 (∀/∃) reduction substitutes terms into
+// formulas, which mints new FormulaHandles in the builder.
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root);
 
 // =========================================================================
 // B0 helper: Weakening bridge.

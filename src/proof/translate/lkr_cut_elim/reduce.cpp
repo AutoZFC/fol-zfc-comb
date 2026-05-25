@@ -1,5 +1,6 @@
 #include "src/proof/translate/lkr_cut_elim/reduce.h"
 
+#include "src/core/formula.h"
 #include "src/proof/lkr/literal.h"
 
 #include <algorithm>
@@ -45,7 +46,72 @@ DerivPtr clone(const Deriv& d) {
     return n;
 }
 
-util::Result<DerivPtr> reduce(const Deriv& d);  // forward
+struct ReduceCtx {
+    FormulaBuilder& builder;
+};
+
+util::Result<DerivPtr> reduce(ReduceCtx& cc, const Deriv& d);  // forward
+
+// Substitute `old_t` with `new_t` in every formula and term within a
+// Deriv subtree. Returns a fresh Deriv with updated formulas.
+//
+// Capture-avoidance (§6 of CUT_ELIM_DESIGN.md): the substitution is
+// applied via FormulaBuilder::translate_term which performs literal
+// term replacement without Gen interaction. Eigenvars are fixed
+// variables; if `old_t` = Term::fixed(a) where `a` is the eigen of an
+// OUTER Forall, no INNER quantifier should re-introduce `a` (by
+// eigenvar freshness). Inner RForall.eigen values are kept as-is;
+// inner RExists.witness terms get translated. A future rectification
+// pass would harden this against pathological reuse.
+DerivPtr substitute_in_deriv(ReduceCtx& cc, const Deriv& d,
+                              const Term& old_t, const Term& new_t) {
+    auto out = std::make_unique<Deriv>();
+    out->conclusion.reserve(d.conclusion.size());
+    for (auto h : d.conclusion) {
+        out->conclusion.push_back(cc.builder.translate_term(h, old_t, new_t));
+    }
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RAx>) {
+            out->rule = r;
+        } else if constexpr (std::is_same_v<T, ROne>) {
+            out->rule = r;
+        } else if constexpr (std::is_same_v<T, RLemma>) {
+            out->rule = r;
+        } else if constexpr (std::is_same_v<T, RExchange>) {
+            out->rule = RExchange{r.i, r.j,
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RWeaken>) {
+            out->rule = RWeaken{
+                cc.builder.translate_term(r.added, old_t, new_t),
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RContract>) {
+            out->rule = RContract{r.i, r.j,
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RAnd>) {
+            out->rule = RAnd{r.principal, r.left_partition,
+                substitute_in_deriv(cc, *r.left,  old_t, new_t),
+                substitute_in_deriv(cc, *r.right, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, ROr>) {
+            out->rule = ROr{r.principal,
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RForall>) {
+            // Inner Forall's eigen kept as-is (assumed fresh).
+            out->rule = RForall{r.principal, r.eigen,
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            Term new_witness = cc.builder.translate_in_term(r.witness, old_t, new_t);
+            out->rule = RExists{r.principal, new_witness,
+                substitute_in_deriv(cc, *r.child, old_t, new_t)};
+        } else if constexpr (std::is_same_v<T, RCut>) {
+            out->rule = RCut{
+                cc.builder.translate_term(r.cut_formula, old_t, new_t),
+                substitute_in_deriv(cc, *r.left,  old_t, new_t),
+                substitute_in_deriv(cc, *r.right, old_t, new_t)};
+        }
+    }, d.rule);
+    return out;
+}
 
 // ---- §4 (B0) helpers: multiplicative cut + Weakening bridge ----------------
 //
@@ -214,16 +280,63 @@ DerivPtr try_axiom_cut_principal(const RCut& cut) {
     return nullptr;
 }
 
+// ---- §5.3 ∀/∃ principal cut ------------------------------------------------
+//
+// Cut(∀x.β) where LEFT ends in Forall(eigen=a) and RIGHT ends in
+// Exists(witness=t), both principal on their last position. Reduce by
+// substituting a:=t throughout LEFT's child subderivation, then cut on
+// β[x:=t] at strictly smaller degree.
+//
+// Also handles the symmetric case (Cut(∃x.β) with LEFT=Exists, RIGHT=
+// Forall) via the same helper with swapped sides.
+//
+// Returns nullptr if shape doesn't match; otherwise a NEW Cut node
+// whose cut formula has strictly smaller degree. Caller (reduce_cut)
+// recursively reduces the result so the new smaller cut is eliminated
+// in turn — terminates by degree induction.
+DerivPtr try_forall_exists_principal(ReduceCtx& cc, const RCut& cut) {
+    auto try_pair = [&](const Deriv& forall_side, const Deriv& exists_side)
+        -> DerivPtr {
+        const RForall* fr = std::get_if<RForall>(&forall_side.rule);
+        const RExists* er = std::get_if<RExists>(&exists_side.rule);
+        if (!fr || !er) return nullptr;
+        size_t last_F = forall_side.conclusion.size() - 1;
+        size_t last_E = exists_side.conclusion.size() - 1;
+        if (fr->principal != last_F || er->principal != last_E) {
+            return nullptr;
+        }
+        Term a_term = Term::fixed(fr->eigen);
+        Term t_term = er->witness;
+        auto subbed = substitute_in_deriv(cc, *fr->child, a_term, t_term);
+        auto new_cut_node = std::make_unique<Deriv>();
+        new_cut_node->conclusion.assign(
+            forall_side.conclusion.begin(),
+            forall_side.conclusion.end() - 1);
+        FormulaHandle new_cut_formula = subbed->conclusion.back();
+        // Convention: LEFT side of an RCut ends in the cut formula
+        // (positive), RIGHT ends in its NNF dual. `subbed` (from the
+        // Forall side) ends in β[x:=t]; `exists_side.child` ends in
+        // β̄[x:=t]. So LEFT=subbed, RIGHT=clone(exists_side.child).
+        new_cut_node->rule = RCut{
+            new_cut_formula,
+            std::move(subbed),
+            clone(*er->child)};
+        return new_cut_node;
+    };
+    if (auto out = try_pair(*cut.left,  *cut.right)) return out;
+    if (auto out = try_pair(*cut.right, *cut.left))  return out;
+    return nullptr;
+}
+
 // ---- reduce_cut: case analysis ---------------------------------------------
 //
 // `cut.left` and `cut.right` are already reduced (recurse invariant).
 // Try each case in order; first match wins. If none matches, leave the cut
 // in place (sound; emit will produce an LKR Cut op which the verifier
 // accepts).
-util::Result<DerivPtr> reduce_cut(const RCut& cut, std::vector<FormulaHandle> concl) {
+util::Result<DerivPtr> reduce_cut(ReduceCtx& cc, const RCut& cut,
+                                   std::vector<FormulaHandle> concl) {
     if (auto out = try_dead_cut_W(cut)) {
-        // Sanity: the W dead-cut returns the W'd child, whose conclusion
-        // is exactly the cut's expected output (additive: same Γ).
         return out;
     }
     if (auto out = try_axiom_cut_non_principal(cut)) {
@@ -232,16 +345,22 @@ util::Result<DerivPtr> reduce_cut(const RCut& cut, std::vector<FormulaHandle> co
     if (auto out = try_axiom_cut_principal(cut)) {
         return out;
     }
+    if (auto out = try_forall_exists_principal(cc, cut)) {
+        // The reduction produced a NEW (smaller) cut. Recursively
+        // reduce it so the new cut gets eliminated too (by degree
+        // induction).
+        return reduce(cc, *out);
+    }
     // No case fired — preserve the cut.
     auto n = std::make_unique<Deriv>();
     n->conclusion = std::move(concl);
     n->rule = RCut{cut.cut_formula, clone(*cut.left), clone(*cut.right)};
-    return n;
+    return util::Result<DerivPtr>(std::move(n));
 }
 
 // ---- recursion harness -----------------------------------------------------
 
-util::Result<DerivPtr> reduce(const Deriv& d) {
+util::Result<DerivPtr> reduce(ReduceCtx& cc, const Deriv& d) {
     auto out = std::make_unique<Deriv>();
     out->conclusion = d.conclusion;
 
@@ -252,41 +371,41 @@ util::Result<DerivPtr> reduce(const Deriv& d) {
             out->rule = r;
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RExchange>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = RExchange{r.i, r.j, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RWeaken>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = RWeaken{r.added, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RContract>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = RContract{r.i, r.j, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RAnd>) {
-            TRY_ASSIGN(l, reduce(*r.left));
-            TRY_ASSIGN(rt, reduce(*r.right));
+            TRY_ASSIGN(l, reduce(cc, *r.left));
+            TRY_ASSIGN(rt, reduce(cc, *r.right));
             out->rule = RAnd{r.principal, r.left_partition,
                              std::move(l), std::move(rt)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, ROr>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = ROr{r.principal, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RForall>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = RForall{r.principal, r.eigen, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RExists>) {
-            TRY_ASSIGN(c, reduce(*r.child));
+            TRY_ASSIGN(c, reduce(cc, *r.child));
             out->rule = RExists{r.principal, r.witness, std::move(c)};
             return util::Result<DerivPtr>(std::move(out));
         } else if constexpr (std::is_same_v<T, RCut>) {
             // Reduce children first, then attempt to eliminate this cut.
-            TRY_ASSIGN(l, reduce(*r.left));
-            TRY_ASSIGN(rt, reduce(*r.right));
+            TRY_ASSIGN(l, reduce(cc, *r.left));
+            TRY_ASSIGN(rt, reduce(cc, *r.right));
             RCut reduced{r.cut_formula, std::move(l), std::move(rt)};
-            return reduce_cut(reduced, d.conclusion);
+            return reduce_cut(cc, reduced, d.conclusion);
         }
         return MAKE_ERROR << "reduce: unhandled rule variant";
     }, d.rule);
@@ -294,8 +413,9 @@ util::Result<DerivPtr> reduce(const Deriv& d) {
 
 }  // namespace
 
-util::Result<DerivPtr> eliminate_cuts(const Deriv& root) {
-    return reduce(root);
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
+    ReduceCtx cc{builder};
+    return reduce(cc, root);
 }
 
 DerivPtr wrap_with_weakenings(

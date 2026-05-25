@@ -117,7 +117,7 @@ void test_smoke_cut_free() {
     root->conclusion = {goal_nnf};
     root->rule = ROr{0, std::move(leaf)};
 
-    auto reduced = eliminate_cuts(*root);
+    auto reduced = eliminate_cuts(builder, *root);
     if (!reduced.ok()) {
         std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
         ++g_failed; return;
@@ -210,7 +210,7 @@ void test_dead_cut_W_left() {
 
     CHECK(count_cuts(*root) == 1);
 
-    auto reduced = eliminate_cuts(*root);
+    auto reduced = eliminate_cuts(builder, *root);
     if (!reduced.ok()) {
         std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
         ++g_failed; return;
@@ -285,7 +285,7 @@ void test_dead_cut_W_right() {
     root->rule = RCut{Q, std::move(non_w_left), std::move(w_right)};
 
     CHECK(count_cuts(*root) == 1);
-    auto reduced = eliminate_cuts(*root);
+    auto reduced = eliminate_cuts(builder, *root);
     if (!reduced.ok()) {
         std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
         ++g_failed; return;
@@ -351,7 +351,7 @@ void test_axiom_cut_non_principal() {
     root->rule = ROr{0, std::move(cut_node)};
 
     CHECK(count_cuts(*root) == 1);
-    auto reduced = eliminate_cuts(*root);
+    auto reduced = eliminate_cuts(builder, *root);
     if (!reduced.ok()) {
         std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
         ++g_failed; return;
@@ -426,13 +426,91 @@ void test_axiom_cut_principal() {
     root->rule = ROr{0, std::move(cut_node)};
 
     CHECK(count_cuts(*root) == 1);
-    auto reduced = eliminate_cuts(*root);
+    auto reduced = eliminate_cuts(builder, *root);
     if (!reduced.ok()) {
         std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
         ++g_failed; return;
     }
     CHECK(count_cuts(*reduced.value()) == 0);
     CHECK_OK(emit_and_verify(ctx, goal, *reduced.value(), "ax_cut_principal"));
+}
+
+// =========================================================================
+// P7 — §5.3 ∀/∃ principal cut.
+//
+// Cut(∀x.P(x)) where:
+//   LEFT  = Forall(eigen=a) at the cut-formula position. LEFT's child
+//           closes via a Γ-internal AxiomLit (non-principal w.r.t. cut).
+//   RIGHT = Exists(witness=Term::fixed(a)) at the dual position.
+//           RIGHT's child closes via the same Γ-internal AxiomLit.
+//
+// After reduction:
+//   substitute a := a (no-op since witness uses the same eigen);
+//   new Cut(P(a)) which then reduces via B1 axiom non-principal to a
+//   plain RAx over Γ. Result: cut-free.
+//
+// Γ = [¬R, R] provides the dual pair for the inner Ax. The goal is
+// just ⊢ Γ = ⊢ ¬R ∨ R wrapped via Or. The Cut on ∀x.P(x) is a
+// gratuitous detour that B3 collapses.
+// =========================================================================
+void test_forall_exists_principal() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "R -> R");
+    FormulaBuilder builder(ctx);
+    FormulaHandle goal_nnf = builder.to_nnf(goal);  // ¬R ∨ R
+    FormulaHandle notR = goal_nnf.get().as_compound().left;
+    FormulaHandle R    = goal_nnf.get().as_compound().right;
+
+    // Build ∀x.P(x) and ∃x.¬P(x) via parsing.
+    FormulaHandle fa_P = parse_root(ctx, "forall x. P(x)");
+    FormulaHandle fa_P_nnf = builder.to_nnf(fa_P);
+    FormulaHandle ex_negP_nnf = builder.to_nnf(builder.make_not(fa_P));
+
+    // Instantiate the body at eigen=0 to get P(0) and ¬P(0).
+    var_index a = 0;
+    FormulaHandle P_body = fa_P_nnf.get().as_quantified().body;
+    FormulaHandle P_at_a = builder.instantiate_quantifier_body(P_body, Term::fixed(a));
+    FormulaHandle neg_P_body = ex_negP_nnf.get().as_quantified().body;
+    FormulaHandle negP_at_a = builder.instantiate_quantifier_body(neg_P_body, Term::fixed(a));
+
+    // LEFT: RForall{principal=2, eigen=0, child=Ax(0,1) on [¬R, R, P(a)]}.
+    auto leaf_L = std::make_unique<Deriv>();
+    leaf_L->conclusion = {notR, R, P_at_a};
+    leaf_L->rule = RAx{0, 1};
+    auto forall_L = std::make_unique<Deriv>();
+    forall_L->conclusion = {notR, R, fa_P_nnf};
+    forall_L->rule = RForall{2, a, std::move(leaf_L)};
+
+    // RIGHT: RExists{principal=2, witness=Term::fixed(0), child=Ax(0,1)
+    //   on [¬R, R, ¬P(a)]}.
+    auto leaf_R = std::make_unique<Deriv>();
+    leaf_R->conclusion = {notR, R, negP_at_a};
+    leaf_R->rule = RAx{0, 1};
+    auto exists_R = std::make_unique<Deriv>();
+    exists_R->conclusion = {notR, R, ex_negP_nnf};
+    exists_R->rule = RExists{2, Term::fixed(a), std::move(leaf_R)};
+
+    // Cut(∀x.P(x)) on [¬R, R].
+    auto cut_node = std::make_unique<Deriv>();
+    cut_node->conclusion = {notR, R};
+    cut_node->rule = RCut{fa_P_nnf, std::move(forall_L), std::move(exists_R)};
+
+    // Wrap with Or(0) at the goal level.
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {goal_nnf};
+    root->rule = ROr{0, std::move(cut_node)};
+
+    CHECK(count_cuts(*root) == 1);
+    auto reduced = eliminate_cuts(builder, *root);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*reduced.value()) == 0);  // ∀/∃ principal + axiom non-principal
+    CHECK_OK(emit_and_verify(ctx, goal, *reduced.value(), "forall_exists_principal"));
 }
 
 // =========================================================================
@@ -486,6 +564,7 @@ int main() {
     test_axiom_cut_non_principal();
     test_axiom_cut_principal();
     test_wrap_with_weakenings();
+    test_forall_exists_principal();
     std::cout << "reduce_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }
