@@ -272,31 +272,66 @@ DerivPtr try_permute_unary(const Deriv& w) {
     return nullptr;
 }
 
-// Swap positions `lo` and `hi` in a LEAF rule's positional fields, and
-// in the leaf's conclusion entries. Returns nullptr if `d` is not a
-// closing rule (the position-rewrite for non-leaves needs to track
-// each rule's effect on positions through the subtree — out of fragment
-// for the initial impl).
-DerivPtr swap_leaf_positions(const Deriv& d, std::size_t lo, std::size_t hi) {
+// Swap positions `lo` and `hi` in a subtree's rule fields and conclusion.
+// Recurses through rules whose effect on the sequent preserves the
+// (lo, hi) swap structure to the child's sequent (ROr, RForall,
+// RExists — they only modify the principal slot + optionally append).
+// Returns nullptr if a rule in the subtree can't be cleanly remapped
+// (RExchange/RContract/RAnd/RCut/RWeaken — these change positions in
+// ways that require composing the outer swap with the rule's internal
+// position shift; deferred until a producer needs it).
+DerivPtr swap_subtree_positions(const Deriv& d,
+                                std::size_t lo, std::size_t hi) {
+    if (lo >= d.conclusion.size() || hi >= d.conclusion.size()) {
+        return nullptr;
+    }
     auto remap = [&](std::size_t p) -> std::size_t {
         return p == lo ? hi : (p == hi ? lo : p);
     };
     auto out = std::make_unique<Deriv>();
     out->conclusion = d.conclusion;
-    if (lo >= out->conclusion.size() || hi >= out->conclusion.size()) {
-        return nullptr;
-    }
     std::swap(out->conclusion[lo], out->conclusion[hi]);
+
     if (const auto* ax = std::get_if<RAx>(&d.rule)) {
         out->rule = RAx{remap(ax->a), remap(ax->b)};
-    } else if (const auto* one = std::get_if<ROne>(&d.rule)) {
-        out->rule = ROne{remap(one->idx)};
-    } else if (const auto* lem = std::get_if<RLemma>(&d.rule)) {
-        out->rule = RLemma{lem->target, lem->source_name};
-    } else {
-        return nullptr;
+        return out;
     }
-    return out;
+    if (const auto* one = std::get_if<ROne>(&d.rule)) {
+        out->rule = ROne{remap(one->idx)};
+        return out;
+    }
+    if (const auto* lem = std::get_if<RLemma>(&d.rule)) {
+        out->rule = RLemma{lem->target, lem->source_name};
+        return out;
+    }
+    if (const auto* o = std::get_if<ROr>(&d.rule)) {
+        // Or fires on position remap(principal); appends ψ at end.
+        // Child's positions: same (lo, hi) swap (positions in pre-Or
+        // sequent and post-Or sequent line up except for the principal
+        // slot, which is the one we're remapping). The appended ψ is
+        // at child.conclusion.size()-1 in BOTH original and swapped
+        // child — unchanged by the swap (swap doesn't touch the end).
+        auto new_child = swap_subtree_positions(*o->child, lo, hi);
+        if (!new_child) return nullptr;
+        out->rule = ROr{remap(o->principal), std::move(new_child)};
+        return out;
+    }
+    if (const auto* f = std::get_if<RForall>(&d.rule)) {
+        auto new_child = swap_subtree_positions(*f->child, lo, hi);
+        if (!new_child) return nullptr;
+        out->rule = RForall{remap(f->principal), f->eigen,
+                            std::move(new_child)};
+        return out;
+    }
+    if (const auto* e = std::get_if<RExists>(&d.rule)) {
+        auto new_child = swap_subtree_positions(*e->child, lo, hi);
+        if (!new_child) return nullptr;
+        out->rule = RExists{remap(e->principal), e->witness,
+                            std::move(new_child)};
+        return out;
+    }
+    // RExchange/RContract/RAnd/RCut/RWeaken: out of fragment.
+    return nullptr;
 }
 
 // ---- §4.4.1 W above RAnd (binary split) -------------------------------------
@@ -316,7 +351,7 @@ DerivPtr swap_leaf_positions(const Deriv& d, std::size_t lo, std::size_t hi) {
 // tail becomes [..., side_aux, φ] (φ at end because W appends). We
 // rewrite the leaf's positions for this swap. Non-leaf cases on the
 // affected side fall back to nullptr (out of fragment for the initial
-// impl; see swap_leaf_positions).
+// impl; see swap_subtree_positions).
 DerivPtr try_permute_and(const Deriv& w) {
     const auto* w_rule = std::get_if<RWeaken>(&w.rule);
     if (!w_rule) return nullptr;
@@ -347,7 +382,7 @@ DerivPtr try_permute_and(const Deriv& w) {
         if (orig_side.conclusion.size() < 2) return nullptr;
         std::size_t lo = orig_side.conclusion.size() - 2;
         std::size_t hi = orig_side.conclusion.size() - 1;
-        auto rewritten = swap_leaf_positions(orig_side, lo, hi);
+        auto rewritten = swap_subtree_positions(orig_side, lo, hi);
         if (!rewritten) return nullptr;
         auto wn = std::make_unique<Deriv>();
         wn->conclusion = rewritten->conclusion;

@@ -17,9 +17,12 @@
 
 #include "src/library/library.h"
 #include "src/parser/parser.h"
+#include "src/proof/lkr/verifier.h"
 #include "src/proof/nd/lowering.h"
 #include "src/proof/translate/iota_elim/eliminate_iota.h"
+#include "src/proof/translate/lkr_cut_elim/deriv.h"
 #include "src/proof/translate/lkr_to_comb/lkr_to_comb.h"
+#include "src/proof/translate/lkr_weak_elim/reduce.h"
 #include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/proof/translate/theorem_facts.h"
@@ -40,6 +43,8 @@ namespace ni  = logic::proof::translate::nd_internalize;
 namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
 namespace lc  = logic::proof::translate::lkr_to_comb;
+namespace lce = logic::proof::translate::lkr_cut_elim;
+namespace we  = logic::proof::translate::lkr_weak_elim;
 
 namespace {
 
@@ -163,8 +168,54 @@ void process_proof_file(
             continue;
         }
 
+        // Stage 4: Weakening-elimination (lkr_weak_elim). Build a Deriv
+        // from the LKR program, eliminate W's where possible, emit a
+        // cleaned LKR program. Failures here are non-fatal — Stage 4 is
+        // permutation-only; out-of-fragment cases leave residual W's
+        // (sound, just not fully reducing). The next stage (lkr_to_comb's
+        // InputGate I-2) will reject any remaining load-bearing W.
+        LKRProgram lkr_clean = lkr_r.value();
+        std::string stage4_diag = "ok";
+        {
+            FormulaBuilder builder(rt.context());
+            FormulaHandle goal_nnf = builder.to_nnf(wrapped_goal);
+            auto deriv_r = lce::build(builder, goal_nnf, lkr_r.value());
+            if (!deriv_r.ok()) {
+                stage4_diag = "build_failed: " + deriv_r.error().to_string();
+            } else {
+                auto cleaned_r = we::eliminate_weakenings(
+                    builder, *deriv_r.value());
+                if (!cleaned_r.ok()) {
+                    stage4_diag = "elim_failed: " + cleaned_r.error().to_string();
+                } else {
+                    auto emit_r = lce::emit(*cleaned_r.value());
+                    if (!emit_r.ok()) {
+                        stage4_diag = "emit_failed: " + emit_r.error().to_string();
+                    } else {
+                        Proof pf{System::LKR, emit_r.value()};
+                        lkr::LKRVerifier v;
+                        auto verify_r = v.verify(rt.context(), wrapped_goal, pf);
+                        if (!verify_r.ok()) {
+                            stage4_diag = "reverify_failed: "
+                                + verify_r.error().to_string();
+                        } else {
+                            lkr_clean = std::move(emit_r).unwrap();
+                            lkr_clean.claim_name = lkr_r.value().claim_name;
+                        }
+                    }
+                }
+            }
+        }
+        if (stage4_diag != "ok") {
+            // Stage 4 is permutation-only and best-effort; report
+            // diagnostic when the cleaned program can't be built/
+            // emitted/re-verified, but fall through with the original
+            // LKR (sound — leaves remaining W's for I-2 to flag).
+            std::cerr << "stage4 [" << name << "]: " << stage4_diag << "\n";
+        }
+
         lc::LKRtoComb comb(rt.context(), wrapped_goal, lemma_lkr_programs);
-        auto comb_r = comb.apply(lkr_r.value());
+        auto comb_r = comb.apply(lkr_clean);
         if (!comb_r.ok()) {
             fail("lkr_to_comb", comb_r.error().to_string());
             // Key the lemma registry by SentenceHandle (typed identity, per
@@ -172,7 +223,7 @@ void process_proof_file(
         // to a known axiom/theorem in ctx for the key to be available;
         // skip otherwise.
         if (auto sh = rt.context().find_known(name); sh.has_value()) {
-            lemma_lkr_programs[sh.value()] = std::move(lkr_r).unwrap();
+            lemma_lkr_programs[sh.value()] = std::move(lkr_clean);
         }
             results.push_back({proof_path, name, first_stage, first_detail});
             continue;
@@ -182,7 +233,7 @@ void process_proof_file(
         // to a known axiom/theorem in ctx for the key to be available;
         // skip otherwise.
         if (auto sh = rt.context().find_known(name); sh.has_value()) {
-            lemma_lkr_programs[sh.value()] = std::move(lkr_r).unwrap();
+            lemma_lkr_programs[sh.value()] = std::move(lkr_clean);
         }
         results.push_back({proof_path, name, "ok", ""});
 

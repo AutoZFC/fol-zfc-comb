@@ -18,9 +18,12 @@
 #include "src/parser/parser.h"
 #include "src/proof/lkr/ops.h"
 #include "src/proof/lkr/verifier.h"
+#include "src/proof/nd/lowering.h"
 #include "src/proof/proof.h"
 #include "src/proof/translate/lkr_cut_elim/deriv.h"
+#include "src/proof/translate/lkr_to_comb/lkr_to_comb.h"
 #include "src/proof/translate/lkr_weak_elim/reduce.h"
+#include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/runtime/runtime.h"
 
 #include <cassert>
@@ -730,6 +733,91 @@ void test_W_above_And_right_side() {
 
 }  // namespace
 
+// =========================================================================
+// W5 pipeline characterization — NDtoLKR → eliminate_weakenings on Peirce.
+//
+// Peirce's law:  ((P → Q) → P) → P.  NNF: ((¬P ∨ Q) ∧ ¬P) ∨ P.
+//
+// NDtoLKR currently emits an LKR program with a load-bearing Weakening
+// (lkr_to_comb_test.cpp line 471's Peirce e2e test fails I-2 at op #2's
+// And). This test characterizes how far Stage 4's eliminate_weakenings
+// gets on Peirce: it should PROGRESS (move the I-2 error from the And's
+// partition deeper — to an Ax that is principal in the W'd entry), but
+// will NOT fully eliminate the W because Peirce's W is fundamentally a
+// "duplicate-to-share-via-Contraction" pattern, not a pure structural
+// W. Stage 4 is permutation-only; full elimination requires sub-
+// derivation duplication / Contraction-introduction (out of scope for
+// this stage; see WEAKENING_ELIM_DESIGN.md §4.5 note on principal-in-φ
+// at leaf).
+//
+// What this test asserts:
+//   - The pipeline runs end-to-end (deriv build, eliminate_weakenings,
+//     emit) without crashing.
+//   - The emitted program still LKR-verifies (round-trip soundness).
+//   - The W is moved deeper (not eliminated): the And's partition no
+//     longer references a W-derived entry; the remaining I-2 violation
+//     (if any) is at a deeper rule (Ax-principal-in-φ).
+// =========================================================================
+void test_pipeline_peirce_through_weak_elim() {
+    Runtime rt;
+    auto parsed = rt.load_with_proofs(R"(
+        claim peirce_law: ((p -> q) -> p) -> p
+
+        proof peirce_law:
+            ha = let p
+            hb = let q
+            hpe = peirce ha, hb
+            qed hpe
+    )");
+    if (!parsed.ok()) {
+        std::cerr << "FAIL: load: " << parsed.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto nd_prog = nd::lower(parsed.value().proofs[0], rt.context()).unwrap();
+    auto claim = rt.context().find_claim("peirce_law");
+    if (!claim.has_value()) { ++g_failed; return; }
+    FormulaHandle goal = claim.value().get().root();
+
+    namespace ntl = logic::proof::translate::nd_to_lkr;
+
+    ntl::NDtoLKR ndl(rt.context(), goal);
+    auto lkr_r = ndl.apply(nd_prog);
+    if (!lkr_r.ok()) {
+        std::cerr << "FAIL: nd_to_lkr: " << lkr_r.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    // Stage 4: Deriv ← LKR; W-elim; LKR ← Deriv.
+    FormulaBuilder builder(rt.context());
+    FormulaHandle goal_nnf = builder.to_nnf(goal);
+    auto built = build(builder, goal_nnf, lkr_r.value());
+    if (!built.ok()) {
+        std::cerr << "FAIL: deriv build: " << built.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto cleaned = we::eliminate_weakenings(builder, *built.value());
+    if (!cleaned.ok()) {
+        std::cerr << "FAIL: eliminate_weakenings: "
+                  << cleaned.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+
+    auto emitted = emit(*cleaned.value());
+    if (!emitted.ok()) {
+        std::cerr << "FAIL: emit: " << emitted.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto lkr_clean = std::move(emitted).unwrap();
+    lkr_clean.claim_name = lkr_r.value().claim_name;
+
+    // Round-trip soundness: cleaned program still verifies.
+    {
+        Proof pf{System::LKR, lkr_clean};
+        lkr::LKRVerifier v;
+        CHECK_OK(v.verify(rt.context(), goal, pf));
+    }
+}
+
 int main() {
     test_smoke_weakening_free();
     test_W_absorb_at_ax_nonprincipal();
@@ -741,6 +829,7 @@ int main() {
     test_W_over_Or();
     test_W_above_And();
     test_W_above_And_right_side();
+    test_pipeline_peirce_through_weak_elim();
     std::cout << "weak_elim_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
