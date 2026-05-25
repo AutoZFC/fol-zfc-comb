@@ -1,6 +1,7 @@
 #include "src/proof/translate/lkr_cut_elim/deriv.h"
 
 #include "src/proof/lkr/literal.h"
+#include "src/proof/translate/lkr_cut_elim/validate.h"
 
 #include <algorithm>
 #include <optional>
@@ -262,6 +263,10 @@ util::Result<DerivPtr> build(
     if (pos != prog.instrs.size())
         return MAKE_ERROR << "build: " << (prog.instrs.size() - pos)
                           << " op(s) unconsumed";
+    // Convention gate (STAGE3_RESET_PLAN.md §4 / Step 1): every Deriv
+    // leaving build() must satisfy the per-rule structural invariants.
+    // This is the layer that catches the 05-27 convention bug class.
+    TRY(validate(*root));
     return root;
 }
 

@@ -1,11 +1,13 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
-# Explicit sequent-carrying derivation IR for LKR (build/emit round-trip).
-# Foundation for the rigorous Gentzen cut-elimination (CUT_ELIM_DESIGN.md).
+# Explicit sequent-carrying derivation IR for LKR (build/emit round-trip)
+# plus the structural-invariant validator (STAGE3_RESET_PLAN.md Step 1).
+# build() invokes validate() before returning, so every Deriv that leaves
+# the framework satisfies the convention.
 cc_library(
     name = "deriv",
-    srcs = ["deriv.cpp"],
-    hdrs = ["deriv.h"],
+    srcs = ["deriv.cpp", "validate.cpp"],
+    hdrs = ["deriv.h", "validate.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//src/core:formula",
