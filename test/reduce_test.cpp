@@ -343,6 +343,109 @@ void test_eliminate_with_cuts_returns_unchanged_in_step3() {
     CHECK(out.value()->conclusion == mult.value()->conclusion);
 }
 
+// =========================================================================
+// Step 4 — B1 axiom non-principal: cut against an RAx where neither
+// axiom literal is the cut formula. The OTHER premise is discarded;
+// reduction is RAx on the multiplicative conclusion (with shifted
+// positions when the axiom is on the right).
+// =========================================================================
+void test_b1_ax_nonprincipal_on_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle Pimp = parse_root(ctx, "P -> P");
+    FormulaHandle Qimp = parse_root(ctx, "Q -> Q");
+    FormulaHandle Rimp = parse_root(ctx, "R -> R");
+    FormulaBuilder b(ctx);
+    FormulaHandle Pnnf = b.to_nnf(Pimp);
+    FormulaHandle Qnnf = b.to_nnf(Qimp);
+    FormulaHandle Rnnf = b.to_nnf(Rimp);
+    FormulaHandle P    = Pnnf.get().as_compound().right;  // positive atom P
+    FormulaHandle notP = Pnnf.get().as_compound().left;   // ¬P
+    FormulaHandle Q    = Qnnf.get().as_compound().right;
+    FormulaHandle R    = Rnnf.get().as_compound().right;
+
+    // Hand-build a multiplicative RCut:
+    //   Γ_L = [P, ¬P, Q]            (axiom positions 0, 1; structural shape only)
+    //   cut formula = R             at left.concl[3]
+    //   Γ_R = [Q]
+    //   right.concl  = [Q, marker]  (marker = stand-in for ¬R; validate doesn't check duality)
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {P, notP, Q, R};
+    lefty->rule = RAx{0, 1};  // non-principal (cut slot is at 3)
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {Q, P};
+    righty->rule = RAx{0, 1};  // shape only
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {P, notP, Q, Q};  // Γ_L ++ Γ_R: |node| = 3+1 = 4 = gl+gr
+    cut->rule = RCut{R, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;  // share registry
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << out.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({P, notP, Q, Q}));
+
+    auto* ax = std::get_if<RAx>(&out.value()->rule);
+    if (!ax) { std::cerr << "FAIL: reduced root is not RAx\n"; ++g_failed; return; }
+    CHECK_EQ(ax->a, 0u);
+    CHECK_EQ(ax->b, 1u);
+}
+
+void test_b1_ax_nonprincipal_on_right() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle Pimp = parse_root(ctx, "P -> P");
+    FormulaHandle Qimp = parse_root(ctx, "Q -> Q");
+    FormulaHandle Rimp = parse_root(ctx, "R -> R");
+    FormulaBuilder b(ctx);
+    FormulaHandle Pnnf = b.to_nnf(Pimp);
+    FormulaHandle Qnnf = b.to_nnf(Qimp);
+    FormulaHandle Rnnf = b.to_nnf(Rimp);
+    FormulaHandle P    = Pnnf.get().as_compound().right;
+    FormulaHandle notP = Pnnf.get().as_compound().left;
+    FormulaHandle Q    = Qnnf.get().as_compound().right;
+    FormulaHandle R    = Rnnf.get().as_compound().right;
+
+    // Mult-Cut:
+    //   Γ_L = [Q]; cut formula = R    at left.concl[1]
+    //   left.concl = [Q, R]
+    //   Γ_R = [P, ¬P, Q]              (axiom at 0, 1; cut slot at 3)
+    //   right.concl = [P, ¬P, Q, marker]
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {Q, R};
+    lefty->rule = RAx{0, 1};  // shape only
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {P, notP, Q, R};  // marker = R (validate doesn't check duality)
+    righty->rule = RAx{0, 1};  // non-principal (cut slot at 3)
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {Q, P, notP, Q};  // Γ_L ++ Γ_R
+    cut->rule = RCut{R, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << out.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({Q, P, notP, Q}));
+
+    auto* ax = std::get_if<RAx>(&out.value()->rule);
+    if (!ax) { std::cerr << "FAIL: reduced root is not RAx\n"; ++g_failed; return; }
+    // Right's positions 0, 1 shift by |Γ_L| = 1 → expected {1, 2}.
+    CHECK_EQ(ax->a, 1u);
+    CHECK_EQ(ax->b, 2u);
+}
+
 }  // namespace
 
 int main() {
@@ -352,6 +455,8 @@ int main() {
     test_find_topmost_no_cuts();
     test_eliminate_cut_free_passes_through();
     test_eliminate_with_cuts_returns_unchanged_in_step3();
+    test_b1_ax_nonprincipal_on_left();
+    test_b1_ax_nonprincipal_on_right();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

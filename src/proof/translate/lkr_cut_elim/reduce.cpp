@@ -211,16 +211,93 @@ util::Result<DerivPtr> substitute_at(const Deriv& tree, const CutPath& path,
     }, tree.rule);
 }
 
-// --- §5 case dispatch — Step 3 scaffold (all stubs). ---
+// =========================================================================
+// §5 case implementations — Step 4 of STAGE3_RESET_PLAN.
 //
-// Given a multiplicative RCut, dispatch by (left.rule, right.rule) per
-// the §5 case analysis. Each case is filled in during Step 4. Until
-// then, every dispatch returns "not implemented" and the driver gives
-// up on this cut (and any below it that would have been unlocked).
+// Each try_* returns a DerivPtr on success or nullptr to signal "this
+// case does not apply." dispatch_cut chains them in order; the first
+// applicable case fires.
+// =========================================================================
+
+// --- B1: axiom case, non-principal (§5.2). -------------------------------
+//
+// One premise's rule is RAx with literals at positions {a, b}, and the
+// cut formula (at position |Γ_side| in that premise's conclusion) is NOT
+// among {a, b}. The axiom closes within the side's Γ alone; the cut
+// formula is just side context the axiom ignores.
+//
+// Reduction: discard the OTHER premise; produce a new RAx on the mult
+// conclusion Γ_L ++ Γ_R using the same literal positions (shifted if the
+// axiom is on the RIGHT, since right's positions are second half of the
+// mult conclusion).
+DerivPtr try_b1_ax_nonprincipal(const Deriv& cut_node, const RCut& cut,
+                                 bool ax_on_left) {
+    const Deriv* ax_side = ax_on_left ? cut.left.get() : cut.right.get();
+    const auto* ax = std::get_if<RAx>(&ax_side->rule);
+    if (!ax) return nullptr;
+    const std::size_t cut_pos = ax_side->conclusion.size() - 1;
+    if (ax->a == cut_pos || ax->b == cut_pos) return nullptr;  // principal — different case.
+
+    auto out = std::make_unique<Deriv>();
+    out->conclusion = cut_node.conclusion;
+
+    if (ax_on_left) {
+        // Left's positions a, b (both < |Γ_L|) map directly to the same
+        // positions in cut_node.conclusion (Γ_L is the first |Γ_L| entries).
+        out->rule = RAx{ax->a, ax->b};
+    } else {
+        // Right's positions a, b (both < |Γ_R|) are at positions
+        // (a + |Γ_L|, b + |Γ_L|) in cut_node.conclusion.
+        const std::size_t gl = cut.left->conclusion.size() - 1;
+        out->rule = RAx{ax->a + gl, ax->b + gl};
+    }
+    return out;
+}
+
+// --- B1: ROne case, non-principal. ---------------------------------------
+//
+// Like RAx non-principal but with the single truth-literal (1 / ¬⊥). The
+// cut formula must NOT be at the ROne's idx position; otherwise the idx
+// shifts in the mult conclusion.
+DerivPtr try_b1_one_nonprincipal(const Deriv& cut_node, const RCut& cut,
+                                  bool one_on_left) {
+    const Deriv* one_side = one_on_left ? cut.left.get() : cut.right.get();
+    const auto* one = std::get_if<ROne>(&one_side->rule);
+    if (!one) return nullptr;
+    const std::size_t cut_pos = one_side->conclusion.size() - 1;
+    if (one->idx == cut_pos) return nullptr;  // principal — separate case.
+
+    auto out = std::make_unique<Deriv>();
+    out->conclusion = cut_node.conclusion;
+    if (one_on_left) {
+        out->rule = ROne{one->idx};
+    } else {
+        const std::size_t gl = cut.left->conclusion.size() - 1;
+        out->rule = ROne{one->idx + gl};
+    }
+    return out;
+}
+
+// =========================================================================
+// dispatch_cut — try cases in order. nullptr-or-error from each case.
+// =========================================================================
 util::Result<DerivPtr> dispatch_cut(FormulaBuilder& /*builder*/,
-                                     const Deriv& /*cut_node*/,
-                                     const RCut& /*cut*/) {
-    return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4)";
+                                     const Deriv& cut_node,
+                                     const RCut& cut) {
+    // B1 — axiom / truth-literal non-principal on either side.
+    if (auto out = try_b1_ax_nonprincipal(cut_node, cut, /*ax_on_left=*/true))
+        return util::Result<DerivPtr>(std::move(out));
+    if (auto out = try_b1_ax_nonprincipal(cut_node, cut, /*ax_on_left=*/false))
+        return util::Result<DerivPtr>(std::move(out));
+    if (auto out = try_b1_one_nonprincipal(cut_node, cut, /*one_on_left=*/true))
+        return util::Result<DerivPtr>(std::move(out));
+    if (auto out = try_b1_one_nonprincipal(cut_node, cut, /*one_on_left=*/false))
+        return util::Result<DerivPtr>(std::move(out));
+
+    // TODO Step 4 continued: B1 principal axiom (cut formula IS one of the
+    // axiom's literals); B2 principal logical (∧/∨/∀/∃); B3 capture-
+    // avoiding substitution; B4 permutation; B5 structural W/C/X.
+    return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 
 }  // namespace
