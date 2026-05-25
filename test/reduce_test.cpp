@@ -716,7 +716,240 @@ void test_wrap_with_weakenings() {
     CHECK_OK(emit_and_verify(ctx, goal, *root, "wrap_w"));
 }
 
+// =========================================================================
+// B2 — §5.3 ∧/∨ principal cut.
+//
+// Goal: prove ⊢ Γ = [P, ¬P, Q, ¬Q] (tautological — Ax{0,1} or Ax{2,3}).
+// We use a Cut(¬P ∧ ¬Q): LEFT proves ⊢ Γ, ¬P∧¬Q (via And-split using
+// internal Ax pairs); RIGHT proves ⊢ Γ, P∨Q (via Or then Ax). After
+// cut-elim, the result should be a Deriv proving ⊢ Γ — with no Cut.
+//
+// Structure:
+//   LEFT  = RAnd{principal=4, partition=[0,1], ll, lr}
+//     ll = RAx{0,1} on [P, ¬P, ¬P]              (P/¬P close; ¬P = β = LEFT_phi)
+//     lr = RAx{0,1} on [Q, ¬Q, ¬Q]              (Q/¬Q close; ¬Q = γ = RIGHT_psi)
+//   RIGHT = ROr{principal=4, rc}
+//     rc = RAx{0,1} on [P, ¬P, Q, ¬Q, P, Q]    (P/¬P close; P,Q are β̄/γ̄)
+//   ROOT = RCut{¬P∧¬Q, LEFT, RIGHT}             (conclusion = Γ)
+//
+// Expected reduction:
+//   1. Sub-cut on β=¬P: mcut(rc, |Γ|=4, ll, 2) — both RAx non-principal
+//      in their respective β̄/β slots. Result: RAx leaf on the wider
+//      conclusion (size 7).
+//   2. Sub-cut on γ=¬Q: mcut(d1, |Γ|=4, lr, 2) — same shape.
+//      Result: RAx leaf on conclusion of size 8.
+//   3. Wrap with |Γ|=4 RWeaken's, stripping the trailing sorted(L_part)
+//      ++ sorted(complement_L) = [P, ¬P, Q, ¬Q] entries. Outermost
+//      conclusion = Γ (first |Γ| of d2). ✓
+// =========================================================================
+void test_and_or_principal_cut() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    // Build atoms P, ¬P, Q, ¬Q.
+    FormulaHandle pp_sent = parse_root(ctx, "P -> P");
+    FormulaHandle pp_nnf  = builder.to_nnf(pp_sent);  // ¬P ∨ P
+    FormulaHandle notP = pp_nnf.get().as_compound().left;
+    FormulaHandle P    = pp_nnf.get().as_compound().right;
+
+    FormulaHandle qq_sent = parse_root(ctx, "Q -> Q");
+    FormulaHandle qq_nnf  = builder.to_nnf(qq_sent);
+    FormulaHandle notQ = qq_nnf.get().as_compound().left;
+    FormulaHandle Q    = qq_nnf.get().as_compound().right;
+
+    // Cut formula φ = ¬P ∧ ¬Q. NNF dual = P ∨ Q.
+    FormulaHandle phi = builder.to_nnf(builder.make_and(notP, notQ));
+    FormulaHandle phi_bar = builder.to_nnf(builder.make_or(P, Q));
+
+    // The "goal" we're constructing is ⊢ Γ = [P, ¬P, Q, ¬Q]. This is a
+    // disjunction — encode as a formula by Or-ing: P ∨ ¬P ∨ Q ∨ ¬Q.
+    FormulaHandle goal = builder.to_nnf(builder.make_or(P,
+                              builder.make_or(notP,
+                                  builder.make_or(Q, notQ))));
+
+    // LEFT premise of the cut: ⊢ P, ¬P, Q, ¬Q, ¬P∧¬Q.
+    auto ll = std::make_unique<Deriv>();
+    ll->conclusion = {P, notP, notP};
+    ll->rule = RAx{0, 1};
+
+    auto lr = std::make_unique<Deriv>();
+    lr->conclusion = {Q, notQ, notQ};
+    lr->rule = RAx{0, 1};
+
+    auto cut_left = std::make_unique<Deriv>();
+    cut_left->conclusion = {P, notP, Q, notQ, phi};
+    cut_left->rule = RAnd{4, {0, 1}, std::move(ll), std::move(lr)};
+
+    // RIGHT premise of the cut: ⊢ P, ¬P, Q, ¬Q, P∨Q.
+    auto rc = std::make_unique<Deriv>();
+    rc->conclusion = {P, notP, Q, notQ, P, Q};
+    rc->rule = RAx{0, 1};
+
+    auto cut_right = std::make_unique<Deriv>();
+    cut_right->conclusion = {P, notP, Q, notQ, phi_bar};
+    cut_right->rule = ROr{4, std::move(rc)};
+
+    // ROOT: Cut(¬P∧¬Q). conclusion = Γ = [P, ¬P, Q, ¬Q].
+    auto cut_node = std::make_unique<Deriv>();
+    cut_node->conclusion = {P, notP, Q, notQ};
+    cut_node->rule = RCut{phi, std::move(cut_left), std::move(cut_right)};
+
+    // Wrap in Or-chains so the goal is the disjunction.
+    // Or unfolding: goal_nnf = P ∨ ¬P ∨ Q ∨ ¬Q (right-assoc by
+    // make_or order: P ∨ (¬P ∨ (Q ∨ ¬Q))).
+    // To go from [P, ¬P, Q, ¬Q] up to [goal_nnf], we need 3 Or-intros
+    // (each combining the last two entries into an Or). But in the
+    // verifier-forward direction, ROr GOES from [..., ϕ∨ψ] to [..., ϕ, ψ].
+    // So we INVERT: at root, sequent is [goal_nnf]; ROr expands.
+    //
+    // Easier test design: just assert that eliminate_cuts on cut_node
+    // returns a cut-free Deriv with conclusion = Γ, and that the
+    // emitted program plus a wrapper to reach goal_nnf verifies.
+
+    CHECK(count_cuts(*cut_node) == 1);
+    auto reduced = eliminate_cuts(builder, *cut_node);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: "
+                  << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*reduced.value()) == 0);
+    // Check the conclusion is preserved.
+    CHECK(reduced.value()->conclusion.size() == 4);
+    CHECK(reduced.value()->conclusion[0] == P);
+    CHECK(reduced.value()->conclusion[1] == notP);
+    CHECK(reduced.value()->conclusion[2] == Q);
+    CHECK(reduced.value()->conclusion[3] == notQ);
+
+    // Wrap with 3 Or-intros to reach goal_nnf, then verify.
+    auto wrap_or = [&](DerivPtr inner, FormulaHandle goal_form,
+                       const std::vector<FormulaHandle>& post_or_seq) -> DerivPtr {
+        auto node = std::make_unique<Deriv>();
+        node->conclusion = post_or_seq;
+        // We need to wrap `inner` (which proves a longer sequent) under
+        // an Or that expands ϕ∨ψ at some position into ϕ and ψ. Skip
+        // for brevity — just inspect cuts directly.
+        (void)goal_form;
+        return inner;
+    };
+    (void)wrap_or;
+
+    // Round-trip soundness via direct verification: emit and verify
+    // against the conclusion. (The disjunction wrapping is mechanical;
+    // the cut-elim correctness is what we're checking.)
+    auto emitted = emit(*reduced.value());
+    if (!emitted.ok()) {
+        std::cerr << "FAIL: emit: " << emitted.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    // The emit's "goal" needs to be the conclusion as a formula. Since
+    // our conclusion is a 4-entry list, treat the goal as the
+    // disjunction P ∨ (¬P ∨ (Q ∨ ¬Q)) and wrap the program with 3 Or
+    // ops up front to unfold from [goal] to [P, ¬P, Q, ¬Q].
+    LKRProgram prog;
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Or{{}, 1});
+    prog.instrs.push_back(lkr::Or{{}, 2});
+    for (auto& op : emitted.value().instrs) {
+        prog.instrs.push_back(std::move(op));
+    }
+    Proof pf{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    CHECK_OK(v.verify(ctx, goal, pf));
+}
+
 }  // namespace
+
+// =========================================================================
+// B5 — §5.5 contraction-against-cut.
+//
+// Cut formula on one side was produced by Contract merging an existing
+// Γ-position with the cut formula slot. The Contract erases the cut
+// formula slot (j == last); the kept entry is the Γ-position duplicate.
+//
+// In our additive IR: cut.right.conclusion = Γ + φ̄ where Γ has φ̄ at
+// some position k. cut.right.rule = RContract{i=k, j=last_R}; the
+// Contract drops position last_R, leaving Γ unchanged. cut.right.child
+// (= post-Contract sequent) = Γ, exactly the cut's outer conclusion.
+//
+// Reduction: replace the entire RCut with cut.right.child. The cut is
+// trivially redundant — the Contract on RIGHT just collapsed the cut-
+// added duplicate back into Γ.
+//
+// Test setup:
+//   Goal: ⊢ Γ = [A, ¬A, ¬B] (tautological: A/¬A close it).
+//   Cut(B): LEFT proves ⊢ Γ + B = [A, ¬A, ¬B, B] via Ax{2,3} (¬B/B).
+//           RIGHT proves ⊢ Γ + ¬B = [A, ¬A, ¬B, ¬B] via Contract{2, 3}
+//           merging the two ¬B's, then Ax{0,1} (A/¬A).
+// =========================================================================
+void test_contract_against_cut() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder builder(ctx);
+
+    FormulaHandle aa_sent = parse_root(ctx, "A -> A");
+    FormulaHandle aa_nnf  = builder.to_nnf(aa_sent);
+    FormulaHandle notA = aa_nnf.get().as_compound().left;
+    FormulaHandle A    = aa_nnf.get().as_compound().right;
+
+    FormulaHandle bb_sent = parse_root(ctx, "B -> B");
+    FormulaHandle bb_nnf  = builder.to_nnf(bb_sent);
+    FormulaHandle notB = bb_nnf.get().as_compound().left;
+    FormulaHandle B    = bb_nnf.get().as_compound().right;
+
+    // LEFT premise of cut: ⊢ A, ¬A, ¬B, B.
+    auto cut_left_node = std::make_unique<Deriv>();
+    cut_left_node->conclusion = {A, notA, notB, B};
+    cut_left_node->rule = RAx{2, 3};
+
+    // RIGHT premise of cut: ⊢ A, ¬A, ¬B, ¬B.
+    //   Contract{i=2, j=3} merges the two ¬B's → ⊢ A, ¬A, ¬B.
+    //   Then Ax{0, 1} closes (A/¬A).
+    auto post_contract = std::make_unique<Deriv>();
+    post_contract->conclusion = {A, notA, notB};
+    post_contract->rule = RAx{0, 1};
+
+    auto cut_right_node = std::make_unique<Deriv>();
+    cut_right_node->conclusion = {A, notA, notB, notB};
+    cut_right_node->rule = RContract{2, 3, std::move(post_contract)};
+
+    // ROOT: Cut(B). conclusion = Γ = [A, ¬A, ¬B].
+    auto cut_node = std::make_unique<Deriv>();
+    cut_node->conclusion = {A, notA, notB};
+    cut_node->rule = RCut{B, std::move(cut_left_node), std::move(cut_right_node)};
+
+    CHECK(count_cuts(*cut_node) == 1);
+    auto reduced = eliminate_cuts(builder, *cut_node);
+    if (!reduced.ok()) {
+        std::cerr << "FAIL: " << reduced.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*reduced.value()) == 0);
+    CHECK(reduced.value()->conclusion.size() == 3);
+    CHECK(reduced.value()->conclusion[0] == A);
+    CHECK(reduced.value()->conclusion[1] == notA);
+    CHECK(reduced.value()->conclusion[2] == notB);
+
+    // Wrap with Or to reach a sentence goal, then verify.
+    FormulaHandle goal = builder.to_nnf(builder.make_or(A,
+                                builder.make_or(notA, notB)));
+    LKRProgram prog;
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Or{{}, 1});
+    auto emitted = emit(*reduced.value());
+    if (!emitted.ok()) { ++g_failed; return; }
+    for (auto& op : emitted.value().instrs) {
+        prog.instrs.push_back(std::move(op));
+    }
+    Proof pf{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    CHECK_OK(v.verify(ctx, goal, pf));
+}
 
 int main() {
     test_smoke_cut_free();
@@ -728,6 +961,8 @@ int main() {
     test_forall_exists_principal();
     test_exchange_permutation();
     test_mcut_ax_nonprincipal();
+    test_and_or_principal_cut();
+    test_contract_against_cut();
     std::cout << "reduce_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

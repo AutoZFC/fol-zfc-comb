@@ -229,20 +229,24 @@ DerivPtr mcut_impl(FormulaBuilder& /*builder*/,
 //
 // Cut(φ) where one premise's last rule is RWeaken adding the cut formula φ
 // at the end of its conclusion. The Weakening contributed φ without proving
-// it; the Cut is "dead". The conclusion of the cut (after dropping φ from
-// the W'd premise) was already available — just weaken in the OTHER
-// premise's extra formulas to reach the Cut's conclusion.
+// it; the Cut is "dead".
 //
-// Concretely (LEFT dead-cut variant):
-//   Cut(φ): LEFT = ⊢ Γ, φ from RWeaken(φ) on child ⊢ Γ.
-//           RIGHT = ⊢ Γ, φ̄ (additive, so same Γ).
-//   Replace with: LEFT's child ⊢ Γ. (Additive cut's conclusion = Γ.)
+// **KNOWN ISSUE (corpus exposure 2026-05-27):** this implementation was
+// designed against synthetic test Derivs that used a Weakening convention
+// opposite to `build()`'s convention. In build-convention (node smaller,
+// child bigger for W), a top-level RWeaken in cut.left or cut.right has
+// node.conclusion = Γ + α (the post-Cut sequent) and child.conclusion =
+// (Γ + α) + added (post-W, with `added` ≠ α). The cut formula α was placed
+// by Cut, NOT by the W — so this isn't actually a "dead cut" in the spec's
+// sense. Returning `clone(child)` here yields a Deriv with conclusion
+// (Γ + α) + added, NOT Γ; emit then produces invalid LKR.
 //
-// (Symmetric for RIGHT dead-cut.)
-//
-// Returns nullopt if the cut isn't a dead-cut shape; otherwise returns
-// the replacement subtree (already reduced, since the surviving child
-// was itself produced by `reduce`).
+// For now the test-convention tests in reduce_test still exercise this
+// path (they construct Derivs that don't match build's invariants), so
+// it stays in the dispatcher. Wire-up into the pipeline (comb_checker) is
+// deferred until this is refactored to handle build-convention correctly.
+// The likely correct shape: dead-cut requires looking deeper (find the W
+// inside cut.left's subtree that introduced α, not at the top).
 DerivPtr try_dead_cut_W(const RCut& cut) {
     // Cut(φ) semantics: cut.left ends in φ at its last position, cut.right
     // ends in NNF(¬φ). For Weakening (which appends to its conclusion),
@@ -327,6 +331,48 @@ DerivPtr try_axiom_cut_principal(const RCut& cut) {
     return nullptr;
 }
 
+// ---- §5.5 contraction-against-cut ------------------------------------------
+//
+// One premise's outermost rule is (C) merging the cut formula slot with
+// a Γ-position. In LKR/additive form: pre-Contract sequent has two
+// copies of the same formula (one in Γ, one at the cut formula slot);
+// post-Contract drops the cut formula slot, leaving Γ.
+//
+// The spec's "duplicate left, cut twice" multiplicative reduction
+// collapses in the additive case to a simpler form: when the
+// Contract drops the cut formula slot directly (j == last in our IR
+// convention), the post-Contract conclusion is exactly the additive
+// cut's Γ. We can replace the entire RCut with the Contract's child.
+//
+// Concretely, for cut.right.rule = RContract{i, j, child} with
+// j == last_R:
+//   - pre-Contract: cut.right.conclusion = Γ + φ̄ (verifier sees the
+//     cut formula at last_R; Γ at position i contained the duplicate).
+//   - post-Contract: child.conclusion = pre-Contract minus entry j =
+//     Γ.
+//   - The cut's outer conclusion is Γ; so child is a valid replacement.
+//
+// Symmetric case: cut.left.rule = RContract with j == last_L.
+//
+// More complex Contract patterns (j != last; the cut formula slot is
+// kept but a Γ position is erased) require additional Exchange
+// bookkeeping — deferred for now.
+DerivPtr try_contract_against_cut(const RCut& cut) {
+    if (const auto* lc = std::get_if<RContract>(&cut.left->rule)) {
+        std::size_t last_L = cut.left->conclusion.size() - 1;
+        if (lc->j == last_L) {
+            return clone(*lc->child);
+        }
+    }
+    if (const auto* rc = std::get_if<RContract>(&cut.right->rule)) {
+        std::size_t last_R = cut.right->conclusion.size() - 1;
+        if (rc->j == last_R) {
+            return clone(*rc->child);
+        }
+    }
+    return nullptr;
+}
+
 // ---- §5.4 permutation (cut not principal in R) -----------------------------
 //
 // When dl's top rule R does not act on the cut formula's position, we
@@ -398,6 +444,129 @@ DerivPtr try_permute_exchange(const RCut& cut) {
     return nullptr;
 }
 
+// ---- §5.3 ∧/∨ principal cut ------------------------------------------------
+//
+// Cut(β∧γ) where LEFT ends in (∧) principal on β∧γ at the last position,
+// and RIGHT ends in (∨) principal on β̄∨γ̄ at the last position. (Or the
+// symmetric case Cut(β∨γ) with LEFT=Or, RIGHT=And.)
+//
+// LEFT = RAnd{principal=|Γ|, partition=L_part, ll, lr}:
+//   ll proves ⊢ sorted(L_part) ++ β    (size |L_part|+1, β at end).
+//   lr proves ⊢ sorted(complement_L) ++ γ  (size |complement_L|+1, γ at end).
+// RIGHT = ROr{principal=|Γ|, rc}:
+//   rc proves ⊢ Γ ++ β̄ ++ γ̄    (size |Γ|+2, β̄ at |Γ|, γ̄ at |Γ|+1).
+//
+// Reduce via two sub-cuts (β then γ), using `mcut`:
+//   d1 = mcut(rc, β̄@|Γ|, ll, β@end)
+//      → proves Γ ++ γ̄ ++ sorted(L_part)         (size |Γ|+1+|L_part|).
+//   d2 = mcut(d1, γ̄@|Γ|, lr, γ@end)
+//      → proves Γ ++ sorted(L_part) ++ sorted(complement_L)  (size 2|Γ|).
+//
+// d2's first |Γ| entries are Γ in original order; the next |Γ| are
+// sorted(L_part) ++ sorted(complement_L), a permutation of Γ.
+//
+// Wrap d2 with |Γ| RWeaken's via `wrap_with_weakenings`, stripping the
+// trailing |Γ| entries — outermost conclusion = Γ (original order). ✓
+//
+// Both sub-cuts call into `mcut`; if mcut can't construct a proof for
+// either, we return nullptr (out-of-fragment for this B2 impl; falls
+// through to leaving the original cut in place).
+DerivPtr try_and_or_principal(ReduceCtx& cc, const RCut& cut) {
+    // Look at both orderings of (left_rule, right_rule) — we accept
+    // either LEFT=And/RIGHT=Or (cut formula is ∧) or LEFT=Or/RIGHT=And
+    // (cut formula is ∨). The cut formula always sits on LEFT's last
+    // position; its NNF dual sits on RIGHT's last position.
+    const Deriv* L = cut.left.get();
+    const Deriv* R = cut.right.get();
+    if (L->conclusion.empty() || R->conclusion.empty()) return nullptr;
+    std::size_t last_L = L->conclusion.size() - 1;
+    std::size_t last_R = R->conclusion.size() - 1;
+
+    const RAnd* la = nullptr;
+    const ROr* ro  = nullptr;
+    if ((la = std::get_if<RAnd>(&L->rule)) &&
+        (ro = std::get_if<ROr>(&R->rule))) {
+        // canonical orientation
+    } else if ((ro = std::get_if<ROr>(&L->rule)) &&
+               (la = std::get_if<RAnd>(&R->rule))) {
+        // Symmetric: cut formula is ∨; LEFT is the Or-side. Swap so L
+        // points at the And-side for the unified reduction logic below.
+        std::swap(L, R);
+        std::swap(last_L, last_R);
+    } else {
+        return nullptr;
+    }
+
+    if (la->principal != last_L) return nullptr;
+    if (ro->principal != last_R) return nullptr;
+
+    // Extract the cut formula and its two conjuncts/disjuncts.
+    // For cut_is_and: LEFT's last = β∧γ; RIGHT's last (NNF dual) = β̄∨γ̄.
+    // For cut_is_or (the swapped case): the formula sitting on RIGHT
+    // (= original LEFT pre-swap) is β∨γ; LEFT (= original RIGHT pre-swap)
+    // has β̄∧γ̄.
+    //
+    // In both cases the IR's `cut.left.conclusion[last]` is the cut
+    // formula. After swap, L is the And-side. Let's pull β/γ from the
+    // And-side's principal entry — it's either β∧γ (cut_is_and) or
+    // β̄∧γ̄ (cut_is_or, meaning the conjuncts are the duals).
+    const FormulaHandle and_principal = L->conclusion[last_L];
+    if (!and_principal.get().is_compound() ||
+        and_principal.get().as_compound().op != Op::And) {
+        return nullptr;
+    }
+    FormulaHandle and_left  = and_principal.get().as_compound().left;
+    FormulaHandle and_right = and_principal.get().as_compound().right;
+    // β = and_left, γ = and_right when cut_is_and; otherwise β = ¬and_left
+    // (= a disjunct in the original ∨). We use the And-side's perspective:
+    // the And-side has and_left at position |sorted(L_part)| in ll,
+    // and and_right at the end of lr.
+
+    const Deriv& ll = *la->left;
+    const Deriv& lr = *la->right;
+    const Deriv& rc = *ro->child;
+
+    if (ll.conclusion.empty() || ll.conclusion.back() != and_left) return nullptr;
+    if (lr.conclusion.empty() || lr.conclusion.back() != and_right) return nullptr;
+    // The Or-side's child rc must have: NNF(¬and_left) at |Γ|, NNF(¬and_right) at |Γ|+1.
+    if (rc.conclusion.size() != last_R + 2) return nullptr;
+    FormulaHandle and_left_dual  = cc.builder.to_nnf(cc.builder.make_not(and_left));
+    FormulaHandle and_right_dual = cc.builder.to_nnf(cc.builder.make_not(and_right));
+    if (rc.conclusion[last_R]     != and_left_dual)  return nullptr;
+    if (rc.conclusion[last_R + 1] != and_right_dual) return nullptr;
+
+    // Sub-cut 1: mcut(rc at β̄_pos, ll at β_pos).
+    std::size_t ll_beta_pos = ll.conclusion.size() - 1;
+    std::size_t rc_beta_bar_pos = last_R;       // β̄ at |Γ| in rc
+    auto d1 = mcut(cc.builder, rc, rc_beta_bar_pos, ll, ll_beta_pos);
+    if (!d1) return nullptr;
+
+    // d1.conclusion = (rc - β̄) ++ (ll - β):
+    //   = [Γ entries + γ̄] ++ sorted(L_part) entries.
+    //   γ̄ is at position |Γ| (β̄ was at |Γ| in rc; removing it shifted
+    //   γ̄ from |Γ|+1 down to |Γ|).
+    std::size_t d1_gamma_bar_pos = last_R;
+    std::size_t lr_gamma_pos = lr.conclusion.size() - 1;
+
+    // Sub-cut 2: mcut(d1 at γ̄_pos, lr at γ_pos).
+    auto d2 = mcut(cc.builder, *d1, d1_gamma_bar_pos, lr, lr_gamma_pos);
+    if (!d2) return nullptr;
+
+    // d2.conclusion = (d1 - γ̄) ++ (lr - γ):
+    //   = [Γ entries + sorted(L_part)] ++ sorted(complement_L) entries.
+    //   Size = |Γ| + |L_part| + |complement_L| = 2|Γ|. The first |Γ|
+    //   entries are Γ in original order; the trailing |Γ| are a
+    //   permutation of Γ.
+    std::size_t gamma_size = last_R;       // = |Γ|
+    if (d2->conclusion.size() != 2 * gamma_size) return nullptr;
+
+    std::vector<FormulaHandle> to_add(
+        d2->conclusion.begin() + static_cast<std::ptrdiff_t>(gamma_size),
+        d2->conclusion.end());
+
+    return wrap_with_weakenings(std::move(d2), to_add);
+}
+
 // ---- §5.3 ∀/∃ principal cut ------------------------------------------------
 //
 // Cut(∀x.β) where LEFT ends in Forall(eigen=a) and RIGHT ends in
@@ -461,6 +630,12 @@ util::Result<DerivPtr> reduce_cut(ReduceCtx& cc, const RCut& cut,
         return out;
     }
     if (auto out = try_axiom_cut_principal(cut)) {
+        return out;
+    }
+    if (auto out = try_and_or_principal(cc, cut)) {
+        return reduce(cc, *out);
+    }
+    if (auto out = try_contract_against_cut(cut)) {
         return out;
     }
     if (auto out = try_forall_exists_principal(cc, cut)) {

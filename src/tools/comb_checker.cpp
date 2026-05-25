@@ -43,7 +43,7 @@ namespace ni  = logic::proof::translate::nd_internalize;
 namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
 namespace lc  = logic::proof::translate::lkr_to_comb;
-namespace lce = logic::proof::translate::lkr_cut_elim;
+namespace lce = logic::proof::translate::lkr_cut_elim;  // for build/emit
 namespace we  = logic::proof::translate::lkr_weak_elim;
 
 namespace {
@@ -168,12 +168,11 @@ void process_proof_file(
             continue;
         }
 
-        // Stage 4: Weakening-elimination (lkr_weak_elim). Build a Deriv
-        // from the LKR program, eliminate W's where possible, emit a
-        // cleaned LKR program. Failures here are non-fatal — Stage 4 is
-        // permutation-only; out-of-fragment cases leave residual W's
-        // (sound, just not fully reducing). The next stage (lkr_to_comb's
-        // InputGate I-2) will reject any remaining load-bearing W.
+        // Stage 4: Weakening-elimination only. Stage 3 (eliminate_cuts)
+        // is NOT wired in yet — the existing engine has bugs exposed by
+        // the corpus that need a separate audit (see Stage 3 notes).
+        // Failures here are non-fatal — fall through with the original
+        // LKR (sound; just leaves residual W's for I-2 to flag).
         LKRProgram lkr_clean = lkr_r.value();
         std::string stage4_diag = "ok";
         {
