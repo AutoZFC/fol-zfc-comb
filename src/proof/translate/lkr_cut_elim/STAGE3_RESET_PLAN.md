@@ -20,7 +20,8 @@ now targets KS1 (`memory: project_lkr_ks1_pivot_2026_05_31`); Stage 3 itself
 | 4 — B1 non-principal | RAx / ROne where cut formula isn't an axiom literal | ✅ shipped | `b4068a5` |
 | 4 — B1 principal axiom | RAx where cut formula IS an axiom literal | ✅ shipped (drop+rotate graft) |
 | 4 — B1 principal ROne | ROne where cut formula IS the truth literal | ⏳ pending |
-| 4 — B2 principal logical | ∧ vs ∨, ∀ vs ∃ | ⏳ blocked* |
+| 4 — B2 ∧ vs ∨ | both orientations → two lower-degree cuts + reorder | ✅ shipped |
+| 4 — B2 ∀ vs ∃ | needs B3 capture-avoiding subst | ⏳ pending |
 | 4 — B3 capture-avoiding subst | needed by B2's ∀/∃ case | ⏳ pending |
 | 4 — B4 permutation | cut not principal in one premise | ⏳ pending |
 | 4 — B5 structural | W dead-cut, C duplication, X | ⏳ blocked* |

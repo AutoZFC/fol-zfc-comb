@@ -375,6 +375,128 @@ DerivPtr try_b1_ax_principal(const Deriv& cut_node, const RCut& cut,
     return cur;   // cur.conclusion == cut_node.conclusion
 }
 
+// --- permutation helpers (used by B2 / future B4) ------------------------
+//
+// selection_swaps(perm): swaps that, applied in order to the identity
+// arrangement [0..n-1], produce `perm` (perm[t] = source index landing at t).
+std::vector<std::pair<std::size_t, std::size_t>>
+selection_swaps(const std::vector<std::size_t>& perm) {
+    const std::size_t n = perm.size();
+    std::vector<std::size_t> arr(n), pos(n);
+    for (std::size_t i = 0; i < n; ++i) { arr[i] = i; pos[i] = i; }
+    std::vector<std::pair<std::size_t, std::size_t>> swaps;
+    for (std::size_t t = 0; t < n; ++t) {
+        const std::size_t want = perm[t];
+        const std::size_t cur = pos[want];
+        if (cur != t) {
+            const std::size_t other = arr[t];
+            std::swap(arr[t], arr[cur]);
+            pos[want] = t; pos[other] = cur;
+            swaps.emplace_back(t, cur);
+        }
+    }
+    return swaps;
+}
+
+// Wrap `inner` with RExchange nodes applying `swaps` in order (first swap
+// deepest). Result conclusion = inner.conclusion permuted by the swaps.
+DerivPtr apply_swaps(DerivPtr inner,
+                     const std::vector<std::pair<std::size_t, std::size_t>>& swaps) {
+    DerivPtr cur = std::move(inner);
+    for (const auto& sw : swaps) {
+        auto node = std::make_unique<Deriv>();
+        node->conclusion = cur->conclusion;
+        std::swap(node->conclusion[sw.first], node->conclusion[sw.second]);
+        node->rule = RExchange{sw.first, sw.second, std::move(cur)};
+        cur = std::move(node);
+    }
+    return cur;
+}
+
+// match_perm(src, tgt): m[t] = a distinct source index with src[m[t]] == tgt[t].
+// Requires src and tgt to be permutations of each other (same multiset).
+std::vector<std::size_t> match_perm(const std::vector<FormulaHandle>& src,
+                                    const std::vector<FormulaHandle>& tgt) {
+    const std::size_t n = src.size();
+    std::vector<bool> used(n, false);
+    std::vector<std::size_t> m(n, 0);
+    for (std::size_t t = 0; t < n; ++t)
+        for (std::size_t p = 0; p < n; ++p)
+            if (!used[p] && src[p] == tgt[t]) { used[p] = true; m[t] = p; break; }
+    return m;
+}
+
+// --- B2: principal logical, ∧ vs ∨ (§5.3). -------------------------------
+//
+// Cut on φ where one premise ends in (∧) producing φ=β∧γ and the other ends
+// in (∨) producing φ̄=β̄∨γ̄ (the dual pair, by De Morgan). The ∧-premise
+// supplies Lβ ⊢ Π₁,β and Lγ ⊢ Π₂,γ (Π₁⊎Π₂ = its context C_∧); the ∨-premise
+// supplies Oc ⊢ C_∨,β̄,γ̄. Replace with two lower-degree cuts:
+//   cut β :  Lβ (Π₁,β)  ×  Oc' (C_∨,γ̄,β̄)   ⟹  Π₁,C_∨,γ̄
+//   cut γ :  Lγ (Π₂,γ)  ×  (Π₁,C_∨,γ̄)      ⟹  Π₂,Π₁,C_∨
+// then reorder Π₂,Π₁,C_∨ into node.conclusion (= C_∧,C_∨ or C_∨,C_∧). Works
+// for both orientations (φ=∧ left, or φ=∨ left): only node order differs, and
+// the final reorder absorbs it. d(β),d(γ) < d(β∧γ). ✓
+DerivPtr try_b2_and_or(const Deriv& cut_node, const RCut& cut) {
+    const RAnd* andR = std::get_if<RAnd>(&cut.left->rule);
+    const ROr*  orR  = std::get_if<ROr>(&cut.right->rule);
+    const Deriv* andD = cut.left.get();
+    const Deriv* orD  = cut.right.get();
+    if (!andR || !orR) {                 // try the other orientation (φ=∨ left)
+        andR = std::get_if<RAnd>(&cut.right->rule);
+        orR  = std::get_if<ROr>(&cut.left->rule);
+        andD = cut.right.get();
+        orD  = cut.left.get();
+    }
+    if (!andR || !orR) return nullptr;   // not an ∧-vs-∨ principal cut.
+
+    // The ∧/∨ must be principal: it sits at the premise's last position (the
+    // cut slot). RAnd/ROr.principal is that slot iff it equals |Γ_side|.
+    if (andR->principal != andD->conclusion.size() - 1) return nullptr;
+    if (orR->principal  != orD->conclusion.size()  - 1) return nullptr;
+
+    const Deriv* Lb = andR->left.get();      // Π₁ ++ {β}
+    const Deriv* Lg = andR->right.get();     // Π₂ ++ {γ}
+    const Deriv* Oc = orR->child.get();      // C_∨ ++ {β̄, γ̄}
+    const std::size_t cv = Oc->conclusion.size() - 2;   // |C_∨|
+
+    const std::vector<FormulaHandle>& LbC = Lb->conclusion;
+    const std::vector<FormulaHandle>& LgC = Lg->conclusion;
+    const std::vector<FormulaHandle>& OcC = Oc->conclusion;
+    const FormulaHandle beta  = LbC.back();
+    const FormulaHandle gamma = LgC.back();
+    const FormulaHandle gbar  = OcC.back();        // γ̄
+
+    // Π₁, Π₂, C_∨ as sequences.
+    std::vector<FormulaHandle> Pi1(LbC.begin(), LbC.end() - 1);
+    std::vector<FormulaHandle> Pi2(LgC.begin(), LgC.end() - 1);
+    std::vector<FormulaHandle> Cvee(OcC.begin(), OcC.begin() + cv);
+
+    // Oc' = Oc with its last two (β̄, γ̄) swapped → C_∨, γ̄, β̄.
+    auto Ocp = std::make_unique<Deriv>();
+    Ocp->conclusion = OcC;
+    std::swap(Ocp->conclusion[cv], Ocp->conclusion[cv + 1]);
+    Ocp->rule = RExchange{cv, cv + 1, clone(*Oc)};
+
+    // cut β.
+    auto cut1 = std::make_unique<Deriv>();
+    cut1->conclusion = Pi1;
+    cut1->conclusion.insert(cut1->conclusion.end(), Cvee.begin(), Cvee.end());
+    cut1->conclusion.push_back(gbar);
+    cut1->rule = RCut{beta, clone(*Lb), std::move(Ocp)};
+
+    // cut γ.
+    auto cut2 = std::make_unique<Deriv>();
+    cut2->conclusion = Pi2;
+    cut2->conclusion.insert(cut2->conclusion.end(), Pi1.begin(), Pi1.end());
+    cut2->conclusion.insert(cut2->conclusion.end(), Cvee.begin(), Cvee.end());
+    cut2->rule = RCut{gamma, clone(*Lg), std::move(cut1)};
+
+    // Reorder cut2 (Π₂,Π₁,C_∨) into node.conclusion (same multiset).
+    auto swaps = selection_swaps(match_perm(cut2->conclusion, cut_node.conclusion));
+    return apply_swaps(std::move(cut2), swaps);
+}
+
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
@@ -397,9 +519,12 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& /*builder*/,
     if (auto out = try_b1_ax_principal(cut_node, cut, /*ax_on_left=*/false))
         return util::Result<DerivPtr>(std::move(out));
 
-    // TODO Step 4 continued: B1 principal ROne; B2 principal logical
-    // (∧/∨/∀/∃); B3 capture-avoiding substitution; B4 permutation; B5
-    // structural W/C/X.
+    // B2 — principal logical, ∧ vs ∨ (either orientation).
+    if (auto out = try_b2_and_or(cut_node, cut))
+        return util::Result<DerivPtr>(std::move(out));
+
+    // TODO Step 4 continued: B1 principal ROne; B2 ∀ vs ∃ (needs B3
+    // capture-avoiding substitution); B4 permutation; B5 structural W/C/X.
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 

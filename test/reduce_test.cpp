@@ -531,6 +531,97 @@ void test_b1_ax_principal_on_right() {
     CHECK(std::holds_alternative<RWeaken>(out.value()->rule));  // dropped the spare B
 }
 
+// =========================================================================
+// Step 4 — B2 ∧/∨ principal (§5.3). A cut on β∧γ where one premise ends in
+// (∧) and the other in (∨) splits into two lower-degree cuts on β then γ.
+// With β,γ atomic the residual cuts are axiom-principal, so the whole thing
+// drives to Cut == 0 (B2 then B1). Both orientations tested.
+// =========================================================================
+namespace {
+struct B2Atoms {
+    FormulaHandle P, nP, Q, nQ, PandQ, dual;  // dual = ¬P ∨ ¬Q
+};
+B2Atoms b2_atoms(GlobalContext& ctx, FormulaBuilder& b) {
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle Q  = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle PandQ = b.to_nnf(b.make_and(P, Q));
+    FormulaHandle dual  = b.to_nnf(b.make_not(PandQ));   // ¬P ∨ ¬Q
+    FormulaHandle nP = dual.get().as_compound().left;
+    FormulaHandle nQ = dual.get().as_compound().right;
+    return {P, nP, Q, nQ, PandQ, dual};
+}
+}  // namespace
+
+void test_b2_and_on_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    auto a = b2_atoms(ctx, b);
+
+    // left = RAnd ⊢ [¬P, ¬Q, P∧Q]; right = ROr ⊢ [P, Q, ¬P∨¬Q].
+    auto Lb = std::make_unique<Deriv>();
+    Lb->conclusion = {a.nP, a.P}; Lb->rule = RAx{0, 1};
+    auto Lg = std::make_unique<Deriv>();
+    Lg->conclusion = {a.nQ, a.Q}; Lg->rule = RAx{0, 1};
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {a.nP, a.nQ, a.PandQ};
+    lefty->rule = RAnd{2, {0}, std::move(Lb), std::move(Lg)};
+
+    auto Oc = std::make_unique<Deriv>();
+    Oc->conclusion = {a.P, a.Q, a.nP, a.nQ}; Oc->rule = RAx{0, 2};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {a.P, a.Q, a.dual};
+    righty->rule = ROr{2, std::move(Oc)};
+
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {a.nP, a.nQ, a.P, a.Q};
+    cut->rule = RCut{a.PandQ, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.nP, a.nQ, a.P, a.Q}));
+}
+
+void test_b2_or_on_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    auto a = b2_atoms(ctx, b);
+
+    // φ = ¬P∨¬Q: left = ROr ⊢ [P, Q, ¬P∨¬Q]; right = RAnd ⊢ [¬P, ¬Q, P∧Q].
+    auto Oc = std::make_unique<Deriv>();
+    Oc->conclusion = {a.P, a.Q, a.nP, a.nQ}; Oc->rule = RAx{0, 2};
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {a.P, a.Q, a.dual};
+    lefty->rule = ROr{2, std::move(Oc)};
+
+    auto Lb = std::make_unique<Deriv>();
+    Lb->conclusion = {a.nP, a.P}; Lb->rule = RAx{0, 1};
+    auto Lg = std::make_unique<Deriv>();
+    Lg->conclusion = {a.nQ, a.Q}; Lg->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {a.nP, a.nQ, a.PandQ};
+    righty->rule = RAnd{2, {0}, std::move(Lb), std::move(Lg)};
+
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {a.P, a.Q, a.nP, a.nQ};
+    cut->rule = RCut{a.dual, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.P, a.Q, a.nP, a.nQ}));
+}
+
 }  // namespace
 
 int main() {
@@ -544,6 +635,8 @@ int main() {
     test_b1_ax_nonprincipal_on_right();
     test_b1_ax_principal_on_left();
     test_b1_ax_principal_on_right();
+    test_b2_and_on_left();
+    test_b2_or_on_left();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
