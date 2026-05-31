@@ -447,6 +447,90 @@ void test_b1_ax_nonprincipal_on_right() {
     CHECK_EQ(ax->b, 2u);
 }
 
+// =========================================================================
+// Step 4 — B1 axiom PRINCIPAL: the cut formula IS one of the axiom literals,
+// so the axiom side closes on φ and its dual φ̄ ∈ its Γ. The cut is redundant:
+// graft the OTHER premise after dropping the axiom side down to the shared
+// dual (drop-weakening) and reordering. Exercises drops + rotation.
+// =========================================================================
+void test_b1_ax_principal_on_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle Pnnf = b.to_nnf(parse_root(ctx, "P -> P"));
+    FormulaHandle P    = Pnnf.get().as_compound().right;   // P
+    FormulaHandle notP = Pnnf.get().as_compound().left;    // ¬P
+    FormulaHandle A    = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right;
+    FormulaHandle B    = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+
+    // Mult-Cut on P: Γ_L = [¬P, A], Γ_R = [P, B], node = [¬P, A, P, B].
+    //   left.concl  = [¬P, A, P]   RAx{0,2}  (¬P dual to P=cut slot 2; principal)
+    //   right.concl = [P, B, ¬P]   RAx{0,2}  (the discarded-from-left side)
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {notP, A, P};
+    lefty->rule = RAx{0, 2};                 // principal: cut slot 2 is a literal
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {P, B, notP};
+    righty->rule = RAx{0, 2};
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {notP, A, P, B};       // Γ_L ++ Γ_R
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << out.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({notP, A, P, B}));
+    CHECK(std::holds_alternative<RWeaken>(out.value()->rule));  // dropped the spare A
+}
+
+void test_b1_ax_principal_on_right() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle Pnnf = b.to_nnf(parse_root(ctx, "P -> P"));
+    FormulaHandle P    = Pnnf.get().as_compound().right;
+    FormulaHandle notP = Pnnf.get().as_compound().left;
+    FormulaHandle Q    = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle B    = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+
+    // Mult-Cut on P: Γ_L = [Q], Γ_R = [P, B], node = [Q, P, B].
+    //   left  = a NON-axiom (RExchange) so dispatch falls through to RIGHT.
+    //   left.concl  = [Q, P]   (Γ_L ++ {P}); via RExchange{0,1} → RAx on [P, Q].
+    //   right.concl = [P, B, ¬P]   RAx{0,2}  (¬P=cut slot 2 dual to P at 0; principal)
+    auto ax_leaf = std::make_unique<Deriv>();
+    ax_leaf->conclusion = {P, Q};
+    ax_leaf->rule = RAx{0, 1};
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {Q, P};
+    lefty->rule = RExchange{0, 1, std::move(ax_leaf)};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {P, B, notP};
+    righty->rule = RAx{0, 2};                // principal on the right
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {Q, P, B};             // Γ_L ++ Γ_R
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) {
+        std::cerr << "FAIL: eliminate_cuts: " << out.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({Q, P, B}));
+    CHECK(std::holds_alternative<RWeaken>(out.value()->rule));  // dropped the spare B
+}
+
 }  // namespace
 
 int main() {
@@ -458,6 +542,8 @@ int main() {
     test_eliminate_with_cuts_returns_unchanged_in_step3();
     test_b1_ax_nonprincipal_on_left();
     test_b1_ax_nonprincipal_on_right();
+    test_b1_ax_principal_on_left();
+    test_b1_ax_principal_on_right();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

@@ -1,7 +1,12 @@
 # Stage 3 reset plan
 
-**Status:** Steps 0–3 SHIPPED; Step 4 PARTIAL (B1 non-principal axiom +
-ROne only); Steps 4 remainder + 5 PENDING.
+**Status:** Steps 0–3 SHIPPED; Step 4 PARTIAL (B1 non-principal axiom/ROne +
+B1 **principal axiom**); B0 now wired into `eliminate_cuts`; Step 4 remainder
++ 5 PENDING. The "reversed-W design question" that blocked the principal case
+is RESOLVED: the 2026-05-31 weakening fix (`Weakening{idx}`=drop) makes the IR
+uniform, so B1-principal grafts the surviving premise by drop+rotate. Back-end
+now targets KS1 (`memory: project_lkr_ks1_pivot_2026_05_31`); Stage 3 itself
+(LKR→LKR cut-elim) is unchanged by that pivot.
 **Companion to:** `CUT_ELIM_DESIGN.md` (the math — unchanged by this plan).
 
 ## Progress log
@@ -13,7 +18,8 @@ ROne only); Steps 4 remainder + 5 PENDING.
 | 2 | `additive_to_multiplicative` — B0 as a real pre-pass | ✅ shipped | `8ac3dd1` |
 | 3 | `eliminate_cuts` worklist driver on (degree, topmost) | ✅ shipped | `5df5ca1` |
 | 4 — B1 non-principal | RAx / ROne where cut formula isn't an axiom literal | ✅ shipped | `b4068a5` |
-| 4 — B1 principal | RAx / ROne where cut formula IS an axiom literal | ⏳ blocked* |
+| 4 — B1 principal axiom | RAx where cut formula IS an axiom literal | ✅ shipped (drop+rotate graft) |
+| 4 — B1 principal ROne | ROne where cut formula IS the truth literal | ⏳ pending |
 | 4 — B2 principal logical | ∧ vs ∨, ∀ vs ∃ | ⏳ blocked* |
 | 4 — B3 capture-avoiding subst | needed by B2's ∀/∃ case | ⏳ pending |
 | 4 — B4 permutation | cut not principal in one premise | ⏳ pending |

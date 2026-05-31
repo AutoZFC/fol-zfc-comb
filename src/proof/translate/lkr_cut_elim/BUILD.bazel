@@ -42,6 +42,7 @@ cc_library(
     hdrs = ["reduce.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":b0",
         ":deriv",
         "//src/core:formula",
         "//src/util:error",

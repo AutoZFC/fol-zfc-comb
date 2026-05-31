@@ -1,5 +1,6 @@
 #include "src/proof/translate/lkr_cut_elim/reduce.h"
 
+#include "src/proof/translate/lkr_cut_elim/b0.h"
 #include "src/proof/translate/lkr_cut_elim/validate.h"
 
 #include <algorithm>
@@ -289,6 +290,91 @@ DerivPtr try_b1_one_nonprincipal(const Deriv& cut_node, const RCut& cut,
     return out;
 }
 
+// --- B1: axiom case, PRINCIPAL (§5.2). -----------------------------------
+//
+// One premise is RAx with the cut formula principal: φ sits at that side's
+// last position (cut_pos) and IS one of the axiom literals. The axiom closes
+// that side on φ and its dual φ̄, so φ̄ already appears in that side's Γ at
+// the OTHER axiom position. The cut is therefore redundant — graft the OTHER
+// premise's derivation D onto the mult conclusion node = Γ_L ++ Γ_R.
+//
+// This reduction needs to SHRINK the doubled-looking context down to D's
+// conclusion; that is exactly what the (now sound, drop-semantics) Weakening
+// provides — see WEAKENING_FIX_DESIGN.md.
+//
+//   ax on LEFT  (left = RAx on (p, gl), Γ_L[p] = φ̄):
+//     drop every Γ_L entry except p  → [φ̄] ++ Γ_R   (φ̄ at front)
+//     rotate φ̄ to the back           → Γ_R ++ {φ̄}
+//     graft D = cut.right (proves Γ_R ++ {φ̄}).
+//   ax on RIGHT (right = RAx on (q, gr), Γ_R[q] = φ):
+//     drop every Γ_R entry except q  → Γ_L ++ {φ}   (φ at last position gl)
+//     graft D = cut.left (proves Γ_L ++ {φ}); no reorder needed.
+DerivPtr try_b1_ax_principal(const Deriv& cut_node, const RCut& cut,
+                             bool ax_on_left) {
+    const Deriv* ax_side = ax_on_left ? cut.left.get() : cut.right.get();
+    const auto* ax = std::get_if<RAx>(&ax_side->rule);
+    if (!ax) return nullptr;
+    const std::size_t cut_pos = ax_side->conclusion.size() - 1;
+    std::size_t dual_in_side;
+    if      (ax->a == cut_pos) dual_in_side = ax->b;
+    else if (ax->b == cut_pos) dual_in_side = ax->a;
+    else return nullptr;   // non-principal — handled by try_b1_ax_nonprincipal.
+
+    const std::size_t gl = cut.left->conclusion.size() - 1;
+    const std::size_t gr = cut.right->conclusion.size() - 1;
+    const std::vector<FormulaHandle>& full = cut_node.conclusion;  // Γ_L ++ Γ_R
+
+    std::size_t keep, side_lo, side_hi;
+    DerivPtr D;
+    if (ax_on_left) {
+        keep = dual_in_side;           // < gl; same index in `full`
+        side_lo = 0; side_hi = gl;
+        D = clone(*cut.right);
+    } else {
+        keep = gl + dual_in_side;      // dual at full position gl + q
+        side_lo = gl; side_hi = gl + gr;
+        D = clone(*cut.left);
+    }
+
+    // Positions to drop (the axiom side's Γ except `keep`), descending so each
+    // stays valid as higher positions are removed first.
+    std::vector<std::size_t> drop_idxs;
+    for (std::size_t i = side_hi; i-- > side_lo; )
+        if (i != keep) drop_idxs.push_back(i);
+
+    // concls[k] = `full` with drop_idxs[0..k-1] removed; concls.back() is the
+    // axiom side reduced to its dual + the other side's Γ.
+    std::vector<std::vector<FormulaHandle>> concls;
+    concls.push_back(full);
+    for (std::size_t d : drop_idxs) {
+        std::vector<FormulaHandle> next = concls.back();
+        next.erase(next.begin() + d);
+        concls.push_back(std::move(next));
+    }
+
+    DerivPtr cur = std::move(D);
+    if (ax_on_left) {
+        // D = cut.right with concl Γ_R ++ {φ̄}; rotate φ̄ (last) to the front
+        // so the chain bottoms out at [φ̄] ++ Γ_R = concls.back().
+        for (std::size_t k = gr; k-- > 0; ) {
+            auto node = std::make_unique<Deriv>();
+            node->conclusion = cur->conclusion;
+            std::swap(node->conclusion[k], node->conclusion[k + 1]);
+            node->rule = RExchange{k, k + 1, std::move(cur)};
+            cur = std::move(node);
+        }
+    }
+
+    // Wrap with the RWeaken drops, innermost → outermost.
+    for (std::size_t k = drop_idxs.size(); k-- > 0; ) {
+        auto node = std::make_unique<Deriv>();
+        node->conclusion = concls[k];
+        node->rule = RWeaken{drop_idxs[k], std::move(cur)};
+        cur = std::move(node);
+    }
+    return cur;   // cur.conclusion == cut_node.conclusion
+}
+
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
@@ -305,9 +391,15 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& /*builder*/,
     if (auto out = try_b1_one_nonprincipal(cut_node, cut, /*one_on_left=*/false))
         return util::Result<DerivPtr>(std::move(out));
 
-    // TODO Step 4 continued: B1 principal axiom (cut formula IS one of the
-    // axiom's literals); B2 principal logical (∧/∨/∀/∃); B3 capture-
-    // avoiding substitution; B4 permutation; B5 structural W/C/X.
+    // B1 — axiom principal (cut formula IS one of the axiom's literals).
+    if (auto out = try_b1_ax_principal(cut_node, cut, /*ax_on_left=*/true))
+        return util::Result<DerivPtr>(std::move(out));
+    if (auto out = try_b1_ax_principal(cut_node, cut, /*ax_on_left=*/false))
+        return util::Result<DerivPtr>(std::move(out));
+
+    // TODO Step 4 continued: B1 principal ROne; B2 principal logical
+    // (∧/∨/∀/∃); B3 capture-avoiding substitution; B4 permutation; B5
+    // structural W/C/X.
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 
@@ -343,7 +435,10 @@ std::optional<CutCandidate> find_topmost_max_deg_cut(const Deriv& root) {
 
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
     TRY(validate(root));
-    DerivPtr current = clone(root);
+    // B0: every additive Cut → multiplicative (CUT_ELIM_DESIGN §4). The §5
+    // cases below assume the multiplicative shape (node = Γ_L ++ Γ_R).
+    // Idempotent on already-multiplicative / cut-free trees.
+    TRY_ASSIGN(current, additive_to_multiplicative(root));
 
     // Worklist loop: find topmost max-degree cut, attempt dispatch,
     // replace on success, give up on stub failure.
