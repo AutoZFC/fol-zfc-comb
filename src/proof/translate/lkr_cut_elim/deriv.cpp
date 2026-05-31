@@ -63,11 +63,21 @@ struct Builder {
             return node;
         }
         if (auto* op = std::get_if<lkr::Weakening>(&instr)) {
-            TRY_ASSIGN(f, source_nnf(b, op->formula, "weakening"));
-            Seq ch = cur;
-            ch.push_back(f);
+            if (op->idx >= cur.size())
+                return MAKE_ERROR << "build: Weakening idx OOB";
+            Seq ch = cur;                       // goal-directed drop: child = cur − {idx}
+            ch.erase(ch.begin() + op->idx);
             TRY_ASSIGN(child, sub(std::move(ch), pos));
-            node->rule = RWeaken{f, std::move(child)};
+            node->rule = RWeaken{op->idx, std::move(child)};
+            return node;
+        }
+        if (auto* op = std::get_if<lkr::Duplicate>(&instr)) {
+            if (op->src >= cur.size())
+                return MAKE_ERROR << "build: Duplicate src OOB";
+            Seq ch = cur;                       // child = cur ++ {copy of src}
+            ch.push_back(cur[op->src]);
+            TRY_ASSIGN(child, sub(std::move(ch), pos));
+            node->rule = RDuplicate{op->src, std::move(child)};
             return node;
         }
         if (auto* op = std::get_if<lkr::Contraction>(&instr)) {
@@ -199,7 +209,12 @@ struct Emitter {
             return walk(*r->child);
         }
         if (auto* r = std::get_if<RWeaken>(&d.rule)) {
-            lkr::Weakening o; o.formula = r->added;
+            lkr::Weakening o; o.idx = r->idx;
+            out.push_back(lkr::Instr(o));
+            return walk(*r->child);
+        }
+        if (auto* r = std::get_if<RDuplicate>(&d.rule)) {
+            lkr::Duplicate o; o.src = r->src;
             out.push_back(lkr::Instr(o));
             return walk(*r->child);
         }

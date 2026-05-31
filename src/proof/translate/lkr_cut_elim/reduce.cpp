@@ -23,7 +23,9 @@ DerivPtr clone(const Deriv& d) {
         } else if constexpr (std::is_same_v<T, RExchange>) {
             n->rule = RExchange{r.i, r.j, clone(*r.child)};
         } else if constexpr (std::is_same_v<T, RWeaken>) {
-            n->rule = RWeaken{r.added, clone(*r.child)};
+            n->rule = RWeaken{r.idx, clone(*r.child)};
+        } else if constexpr (std::is_same_v<T, RDuplicate>) {
+            n->rule = RDuplicate{r.src, clone(*r.child)};
         } else if constexpr (std::is_same_v<T, RContract>) {
             n->rule = RContract{r.i, r.j, clone(*r.child)};
         } else if constexpr (std::is_same_v<T, RAnd>) {
@@ -57,6 +59,7 @@ void scan_cuts(const Deriv& d, std::size_t& max_deg, bool& any) {
             scan_cuts(*r.right, max_deg, any);
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
                              std::is_same_v<T, RContract> ||
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||
@@ -93,6 +96,7 @@ bool find_topmost(const Deriv& d, std::size_t target_deg,
             return false;
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
                              std::is_same_v<T, RContract> ||
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||
@@ -117,6 +121,7 @@ const Deriv* at_path(const Deriv& tree, const CutPath& path) {
                 next = (step == 0) ? r.left.get() : r.right.get();
             } else if constexpr (std::is_same_v<T, RExchange> ||
                                  std::is_same_v<T, RWeaken>   ||
+                                 std::is_same_v<T, RDuplicate>||
                                  std::is_same_v<T, RContract> ||
                                  std::is_same_v<T, ROr>       ||
                                  std::is_same_v<T, RForall>   ||
@@ -178,7 +183,13 @@ util::Result<DerivPtr> substitute_at(const Deriv& tree, const CutPath& path,
         else if constexpr (std::is_same_v<T, RWeaken>) {
             TRY_ASSIGN(nc, substitute_at(*r.child, path,
                                          std::move(new_subtree), depth + 1));
-            n->rule = RWeaken{r.added, std::move(nc)};
+            n->rule = RWeaken{r.idx, std::move(nc)};
+            return util::Result<DerivPtr>(std::move(n));
+        }
+        else if constexpr (std::is_same_v<T, RDuplicate>) {
+            TRY_ASSIGN(nc, substitute_at(*r.child, path,
+                                         std::move(new_subtree), depth + 1));
+            n->rule = RDuplicate{r.src, std::move(nc)};
             return util::Result<DerivPtr>(std::move(n));
         }
         else if constexpr (std::is_same_v<T, RContract>) {

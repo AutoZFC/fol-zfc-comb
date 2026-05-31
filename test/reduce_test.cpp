@@ -76,6 +76,7 @@ size_t count_cuts(const Deriv& d) {
             n = count_cuts(*r.left) + count_cuts(*r.right);
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
                              std::is_same_v<T, RContract> ||
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||

@@ -289,7 +289,7 @@ util::Result<IntroResult> emit_and_intro(
     for (size_t i = 0; i < original_size; ++i) {
         if (i == f_k_idx) continue;
         const FormulaHandle dup = shadow.entries[i];
-        out.emplace_back(lkr::Weakening{{}, dup});
+        out.emplace_back(lkr::Duplicate{{}, i});   // append a copy of entry i
         right_needs.push_back(weakened.entries.size());
         weakened.entries.push_back(dup);
     }
@@ -401,7 +401,7 @@ util::Result<IntroResult> emit_iff_intro(
     for (size_t i = 0; i < original_size; ++i) {
         if (i == f_k_idx) continue;
         const FormulaHandle dup = shadow.entries[i];
-        out.emplace_back(lkr::Weakening{{}, dup});
+        out.emplace_back(lkr::Duplicate{{}, i});   // append a copy of entry i
         right_needs.push_back(weakened.entries.size());
         weakened.entries.push_back(dup);
     }
@@ -552,10 +552,11 @@ util::Result<IntroResult> emit_peirce(
     out.emplace_back(lkr::Or{{}, f_k_idx});
     SequentShadow work = shadow;
     work.entries[f_k_idx] = outer.value().left;     // conjunct
-    work.entries.push_back(a_nnf);                  // A (first copy)
+    size_t a1_idx = work.entries.size();
+    work.entries.push_back(a_nnf);                  // A (first copy) at a1_idx
 
-    // Step 2: Weakening{A}.
-    out.emplace_back(lkr::Weakening{{}, a_nnf});
+    // Step 2: duplicate A (multiplicative fan-out feeds both And branches).
+    out.emplace_back(lkr::Duplicate{{}, a1_idx});
     size_t a2_idx = work.entries.size();
     work.entries.push_back(a_nnf);                  // A (second copy)
 

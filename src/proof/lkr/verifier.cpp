@@ -205,9 +205,23 @@ util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Exchange& op) {
 
 util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Weakening& op) {
     TRY(require_top(s, "weakening"));
-    TRY_ASSIGN(f, resolve_source_nnf(s, op.formula, "weakening"));
-    SequentRecord ng = s.top();
-    ng.entries.push_back(f);
+    auto& g = s.top();
+    TRY(require_idx(g, op.idx, "weakening"));
+    // Goal-directed W: the current goal Γ,φ reduces to the subgoal Γ by
+    // dropping entry `idx`. Sound (⋁Γ ⟹ ⋁(Γ,φ)); see WEAKENING_FIX_DESIGN.md.
+    SequentRecord ng = g;
+    ng.entries.erase(ng.entries.begin() + op.idx);
+    s.replace_top(std::move(ng));
+    return util::Ok();
+}
+
+util::ResultStatus exec_op(Session& s, uint32_t /*idx*/, const Duplicate& op) {
+    TRY(require_top(s, "duplicate"));
+    auto& g = s.top();
+    TRY(require_idx(g, op.src, "duplicate"));
+    // Append a copy of entry `src` (Γ,φ → Γ,φ,φ). Sound (⋁ unchanged).
+    SequentRecord ng = g;
+    ng.entries.push_back(ng.entries[op.src]);
     s.replace_top(std::move(ng));
     return util::Ok();
 }

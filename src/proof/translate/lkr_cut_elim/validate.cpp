@@ -59,21 +59,49 @@ struct Validator {
                 return walk(*r.child, path + ".X");
             }
             else if constexpr (std::is_same_v<T, RWeaken>) {
+                // Goal-directed W: child = node with position `idx` removed
+                // (child SMALLER). This is the canary against the 05-27
+                // reversed-W bug — see WEAKENING_FIX_DESIGN.md.
+                if (r.idx >= concl.size())
+                    return MAKE_ERROR << path << ": RWeaken idx OOB (idx=" << r.idx
+                                      << ", |Γ|=" << concl.size() << ")";
                 if (!r.child)
                     return MAKE_ERROR << path << ": RWeaken has null child";
                 const Seq& cc = r.child->conclusion;
-                if (cc.size() != concl.size() + 1)
+                if (concl.empty() || cc.size() != concl.size() - 1)
                     return MAKE_ERROR << path << ": RWeaken child size " << cc.size()
-                                      << " != node size + 1 = " << concl.size() + 1
-                                      << " — convention is child = node ++ {added}";
+                                      << " != node size - 1 = "
+                                      << (concl.empty() ? std::string("(node empty)")
+                                                        : std::to_string(concl.size() - 1))
+                                      << " — convention is child = node − {idx}";
+                for (size_t k = 0, c = 0; k < concl.size(); ++k) {
+                    if (k == r.idx) continue;
+                    if (cc[c] != concl[k])
+                        return MAKE_ERROR << path << ": RWeaken child[" << c
+                                          << "] != node[" << k << "]";
+                    ++c;
+                }
+                return walk(*r.child, path + ".W");
+            }
+            else if constexpr (std::is_same_v<T, RDuplicate>) {
+                // child = node ++ {copy of position src} (child BIGGER).
+                if (r.src >= concl.size())
+                    return MAKE_ERROR << path << ": RDuplicate src OOB (src=" << r.src
+                                      << ", |Γ|=" << concl.size() << ")";
+                if (!r.child)
+                    return MAKE_ERROR << path << ": RDuplicate has null child";
+                const Seq& cc = r.child->conclusion;
+                if (cc.size() != concl.size() + 1)
+                    return MAKE_ERROR << path << ": RDuplicate child size " << cc.size()
+                                      << " != node size + 1 = " << concl.size() + 1;
                 for (size_t k = 0; k < concl.size(); ++k) {
                     if (cc[k] != concl[k])
-                        return MAKE_ERROR << path << ": RWeaken child[" << k
+                        return MAKE_ERROR << path << ": RDuplicate child[" << k
                                           << "] != node[" << k << "]";
                 }
-                if (cc.back() != r.added)
-                    return MAKE_ERROR << path << ": RWeaken child.back() != added";
-                return walk(*r.child, path + ".W");
+                if (cc.back() != concl[r.src])
+                    return MAKE_ERROR << path << ": RDuplicate child.back() != node[src]";
+                return walk(*r.child, path + ".Dup");
             }
             else if constexpr (std::is_same_v<T, RContract>) {
                 if (r.i >= concl.size() || r.j >= concl.size())

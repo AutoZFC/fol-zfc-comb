@@ -184,14 +184,36 @@ void test_hand_built_canonical_RWeaken() {
     FormulaHandle P    = Pnnf.get().as_compound().right;
     FormulaHandle Q    = Qnnf.get().as_compound().right;
 
-    // Canonical: node = [notP, P] (smaller), child = [notP, P, Q] (bigger, post-W).
+    // Canonical (goal-directed W = drop): node = [notP, P, Q] (has the entry
+    // to drop), child = [notP, P] (smaller, Q at idx 2 dropped).
     auto leaf = std::make_unique<Deriv>();
-    leaf->conclusion = {notP, P, Q};
+    leaf->conclusion = {notP, P};
     leaf->rule = RAx{0, 1};
     auto w = std::make_unique<Deriv>();
-    w->conclusion = {notP, P};
-    w->rule = RWeaken{Q, std::move(leaf)};
+    w->conclusion = {notP, P, Q};
+    w->rule = RWeaken{2, std::move(leaf)};
     CHECK_OK(validate(*w));
+}
+
+void test_hand_built_canonical_RDuplicate() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaHandle Pimp = parse_root(ctx, "P -> P");
+    FormulaBuilder b(ctx);
+    FormulaHandle Pnnf = b.to_nnf(Pimp);
+    FormulaHandle notP = Pnnf.get().as_compound().left;
+    FormulaHandle P    = Pnnf.get().as_compound().right;
+
+    // Canonical Duplicate: node = [notP, P] (smaller), child = [notP, P, P]
+    // (bigger, a copy of idx 1 appended).
+    auto leaf = std::make_unique<Deriv>();
+    leaf->conclusion = {notP, P, P};
+    leaf->rule = RAx{0, 1};
+    auto d = std::make_unique<Deriv>();
+    d->conclusion = {notP, P};
+    d->rule = RDuplicate{1, std::move(leaf)};
+    CHECK_OK(validate(*d));
 }
 
 void test_hand_built_canonical_RCut_additive() {
@@ -240,14 +262,15 @@ void test_inverted_RWeaken_convention_caught() {
     FormulaHandle P    = Pnnf.get().as_compound().right;
     FormulaHandle Q    = Qnnf.get().as_compound().right;
 
-    // INVERTED: child smaller than node (the OLD convention that bit us).
-    // node = [notP, P, Q]; child = [notP, P]; added = Q.
+    // INVERTED for the goal-directed W: child BIGGER than node (that is a
+    // Duplicate shape, not a Weakening). validate must reject — RWeaken
+    // requires child = node − {idx} (child smaller).
     auto leaf = std::make_unique<Deriv>();
-    leaf->conclusion = {notP, P};
+    leaf->conclusion = {notP, P, Q};
     leaf->rule = RAx{0, 1};
     auto w = std::make_unique<Deriv>();
-    w->conclusion = {notP, P, Q};
-    w->rule = RWeaken{Q, std::move(leaf)};
+    w->conclusion = {notP, P};
+    w->rule = RWeaken{0, std::move(leaf)};
     CHECK_ERR(validate(*w));
 }
 
@@ -378,6 +401,7 @@ int main() {
     test_build_round_trip_smoke();
     test_hand_built_canonical_RAx_and_ROr();
     test_hand_built_canonical_RWeaken();
+    test_hand_built_canonical_RDuplicate();
     test_hand_built_canonical_RCut_additive();
     test_inverted_RWeaken_convention_caught();
     test_RAnd_partition_violations();

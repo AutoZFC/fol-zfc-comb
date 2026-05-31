@@ -9,19 +9,20 @@ namespace logic::proof::translate::lkr_cut_elim {
 
 namespace {
 
-DerivPtr wrap_with_weakenings_inner(DerivPtr base,
-                                     const std::vector<FormulaHandle>& to_add) {
-    // base.conclusion ends in to_add (pointwise). Build |to_add| RWeakens
-    // from innermost to outermost; each strips one trailing entry going
-    // outward, so the outermost wrapper's conclusion = base.conclusion
-    // with all of to_add stripped.
-    DerivPtr cur = std::move(base);
-    for (auto it = to_add.rbegin(); it != to_add.rend(); ++it) {
-        FormulaHandle added = *it;
+DerivPtr wrap_with_duplicates(DerivPtr mult, std::size_t n) {
+    // mult.conclusion = Γ ++ Γ (size 2n). The additive→multiplicative bridge
+    // is the doubled context read goal-directed: the node conclusion Γ grows
+    // into Γ,Γ by DUPLICATING each γ_k (CUT_ELIM_DESIGN §4 calls this the
+    // |Γ| contractions; in the goal-directed IR it is RDuplicate). Build n
+    // RDuplicate wrappers from innermost (src=n-1, child=mult) to outermost
+    // (src=0, conclusion=Γ). Each wrapper's conclusion = child minus its
+    // trailing copy of γ_src.
+    DerivPtr cur = std::move(mult);
+    for (std::size_t k = n; k-- > 0; ) {
         auto wrapper = std::make_unique<Deriv>();
         wrapper->conclusion = cur->conclusion;
         wrapper->conclusion.pop_back();
-        wrapper->rule = RWeaken{added, std::move(cur)};
+        wrapper->rule = RDuplicate{k, std::move(cur)};
         cur = std::move(wrapper);
     }
     return cur;
@@ -47,7 +48,12 @@ util::Result<DerivPtr> b0_walk(const Deriv& d) {
         }
         else if constexpr (std::is_same_v<T, RWeaken>) {
             TRY_ASSIGN(c, b0_walk(*r.child));
-            n->rule = RWeaken{r.added, std::move(c)};
+            n->rule = RWeaken{r.idx, std::move(c)};
+            return util::Result<DerivPtr>(std::move(n));
+        }
+        else if constexpr (std::is_same_v<T, RDuplicate>) {
+            TRY_ASSIGN(c, b0_walk(*r.child));
+            n->rule = RDuplicate{r.src, std::move(c)};
             return util::Result<DerivPtr>(std::move(n));
         }
         else if constexpr (std::is_same_v<T, RContract>) {
@@ -112,13 +118,10 @@ util::Result<DerivPtr> b0_walk(const Deriv& d) {
             mult->conclusion = std::move(mult_concl);
             mult->rule = RCut{r.cut_formula, std::move(l), std::move(rr)};
 
-            // Wrap with |Γ| RWeakens. Each W adds one entry of Γ; outermost
-            // W has conclusion = original Γ (matching the additive RCut's
-            // node.concl), and the innermost W's child IS mult.
-            std::vector<FormulaHandle> to_add(d.conclusion.begin(),
-                                              d.conclusion.end());
+            // Bridge the doubled context Γ,Γ back down to the additive
+            // RCut's node.concl = Γ with |Γ| RDuplicate wrappers.
             return util::Result<DerivPtr>(
-                wrap_with_weakenings_inner(std::move(mult), to_add));
+                wrap_with_duplicates(std::move(mult), d.conclusion.size()));
         }
         else {
             return MAKE_ERROR << "b0: unhandled rule variant";

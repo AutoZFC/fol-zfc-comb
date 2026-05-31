@@ -367,21 +367,66 @@ void test_exchange_rejects_oob() {
 }
 
 // =========================================================================
-// Weakening appends a new formula to the sequent. Goal P → P (NNF ¬P ∨ P).
-// Or(0) → [¬P, P]. Weakening(Q) → [¬P, P, Q]. AxiomLit(0,1) still closes.
+// Weakening (goal-directed) DROPS an entry. Goal P → (P | Q), NNF
+// ¬P ∨ (P ∨ Q). Or(0) → [¬P, P∨Q]. Or(1) → [¬P, P, Q]. Weakening(2) drops
+// the spare Q → [¬P, P]. AxiomLit(0,1) closes. (Sound: ⋁[¬P,P] ⟹ ⋁[¬P,P,Q].)
 // =========================================================================
-void test_weakening_appends() {
+void test_weakening_drops() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P -> (P | Q)");
+
+    LKRProgram prog;
+    prog.claim_name = "weakening";
+    prog.instrs.push_back(lkr::Or{{}, 0});
+    prog.instrs.push_back(lkr::Or{{}, 1});
+    prog.instrs.push_back(lkr::Weakening{{}, 2});   // drop Q
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
+
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_OK(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Soundness: the old "append a fresh formula" attack on ⊢P is now
+// structurally impossible — Weakening can only DROP. Dropping the only
+// entry of [P] yields the empty sequent, which no axiom closes. Rejected.
+// =========================================================================
+void test_weakening_cannot_fabricate() {
+    Runtime rt;
+    auto loaded = rt.load("axiom dummy: forall x. P(x)");
+    assert(loaded.ok());
+    GlobalContext& ctx = rt.context();
+    FormulaHandle goal = parse_root(ctx, "P");
+
+    LKRProgram prog;
+    prog.claim_name = "fabricate";
+    prog.instrs.push_back(lkr::Weakening{{}, 0});   // [P] → []
+    prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1}); // OOB on empty
+    Proof p{System::LKR, std::move(prog)};
+    lkr::LKRVerifier v;
+    EXPECT_ERR(v.verify(ctx, goal, p));
+}
+
+// =========================================================================
+// Duplicate appends a copy of an entry. Goal P → P (NNF ¬P ∨ P).
+// Or(0) → [¬P, P]. Duplicate(1) copies P → [¬P, P, P]. AxiomLit(0,1) closes
+// (the axiom absorbs the spare P).
+// =========================================================================
+void test_duplicate_appends() {
     Runtime rt;
     auto loaded = rt.load("axiom dummy: forall x. P(x)");
     assert(loaded.ok());
     GlobalContext& ctx = rt.context();
     FormulaHandle goal = parse_root(ctx, "P -> P");
-    FormulaHandle Q    = parse_root(ctx, "Q");
 
     LKRProgram prog;
-    prog.claim_name = "weakening";
+    prog.claim_name = "duplicate";
     prog.instrs.push_back(lkr::Or{{}, 0});
-    prog.instrs.push_back(lkr::Weakening{{}, Q});
+    prog.instrs.push_back(lkr::Duplicate{{}, 1});   // copy P
     prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
     Proof p{System::LKR, std::move(prog)};
@@ -391,7 +436,7 @@ void test_weakening_appends() {
 
 // =========================================================================
 // Contraction merges two equal entries. Goal P → P (NNF ¬P ∨ P).
-// Or(0) → [¬P, P]. Weakening(P) → [¬P, P, P]. Contraction(1,2) → [¬P, P].
+// Or(0) → [¬P, P]. Duplicate(1) → [¬P, P, P]. Contraction(1,2) → [¬P, P].
 // AxiomLit(0,1) closes.
 // =========================================================================
 void test_contraction_merges_duplicates() {
@@ -400,12 +445,11 @@ void test_contraction_merges_duplicates() {
     assert(loaded.ok());
     GlobalContext& ctx = rt.context();
     FormulaHandle goal = parse_root(ctx, "P -> P");
-    FormulaHandle P    = parse_root(ctx, "P");
 
     LKRProgram prog;
     prog.claim_name = "contraction_merge";
     prog.instrs.push_back(lkr::Or{{}, 0});
-    prog.instrs.push_back(lkr::Weakening{{}, P});
+    prog.instrs.push_back(lkr::Duplicate{{}, 1});
     prog.instrs.push_back(lkr::Contraction{{}, 1, 2});
     prog.instrs.push_back(lkr::AxiomLit{{}, 0, 1});
 
@@ -604,7 +648,9 @@ int main() {
     test_exchange_swaps_entries();
     test_exchange_self_is_noop();
     test_exchange_rejects_oob();
-    test_weakening_appends();
+    test_weakening_drops();
+    test_weakening_cannot_fabricate();
+    test_duplicate_appends();
     test_contraction_merges_duplicates();
     test_contraction_rejects_unequal();
     test_contraction_rejects_same_index();

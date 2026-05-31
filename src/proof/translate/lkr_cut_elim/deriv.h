@@ -53,9 +53,13 @@ struct RLemma  {
 
 // Structural rules (one child).
 struct RExchange { std::size_t i{}; std::size_t j{}; DerivPtr child; };
-// Weakening mirrors the verifier: the child's conclusion is THIS node's
-// conclusion with `added` appended. (`added` is the appended NNF formula.)
-struct RWeaken   { FormulaHandle added{}; DerivPtr child; };
+// Weakening mirrors the (goal-directed) verifier: the child's conclusion is
+// THIS node's conclusion with position `idx` REMOVED (child is SMALLER).
+// This is Hughes W read backward (Γ,φ → Γ). See WEAKENING_FIX_DESIGN.md.
+struct RWeaken   { std::size_t idx{}; DerivPtr child; };
+// Duplicate: the child's conclusion is THIS conclusion with a copy of
+// position `src` appended (child is BIGGER). Inverse of RContract.
+struct RDuplicate{ std::size_t src{}; DerivPtr child; };
 struct RContract { std::size_t i{}; std::size_t j{}; DerivPtr child; };
 
 // Logical rules.
@@ -70,7 +74,7 @@ struct RCut   { FormulaHandle cut_formula{}; DerivPtr left; DerivPtr right; };
 
 using Rule = std::variant<
     RAx, ROne, RLemma,
-    RExchange, RWeaken, RContract,
+    RExchange, RWeaken, RDuplicate, RContract,
     RAnd, ROr, RForall, RExists,
     RCut>;
 

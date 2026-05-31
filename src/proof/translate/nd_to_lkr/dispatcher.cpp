@@ -927,8 +927,8 @@ util::ResultStatus emit_or_elim_full(
     size_t i_bc = shadow.entries.size();
     shadow.entries.push_back(neg_bc_nnf);
 
-    // Weakening: duplicate C.
-    out.emplace_back(lkr::Weakening{{}, nnf_c});
+    // Duplicate C (it lives at target_pos) for the multiplicative fan-out.
+    out.emplace_back(lkr::Duplicate{{}, target_pos});
     size_t i_c_dup = shadow.entries.size();
     shadow.entries.push_back(nnf_c);
 

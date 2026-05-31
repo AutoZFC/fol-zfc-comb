@@ -53,8 +53,8 @@
 // open_goals = [[NNF(goal)]]. Success: empty open_goals after the last op.
 //
 //   Closing ops  (AxiomLit, One, CloseByLemma): pop the current goal.
-//   Linear  ops  (Exchange, Weakening, Contraction, Or, Forall, Exists):
-//     replace the current goal with one new goal.
+//   Linear  ops  (Exchange, Weakening, Duplicate, Contraction, Or, Forall,
+//     Exists): replace the current goal with one new goal.
 //   Branching ops (And, Cut): pop the current goal, push two new ones
 //     (depth-first; the second is on top so the next instruction operates
 //     on it).
@@ -143,10 +143,25 @@ struct Exchange {
     size_t   j{0};
 };
 
-// Weakening: append `formula` to the entries.
+// Weakening (W), goal-directed: DROP entry `idx` from the current goal
+// (Γ,φ → Γ). This is Hughes §11 `W : Γ / Γ,φ` read in the verifier's
+// backward direction — the goal Γ,φ reduces to the subgoal Γ. Sound:
+// ⋁Γ ⟹ ⋁(Γ,φ). The earlier "append an arbitrary formula" form was
+// backward-unsound (it accepted ⊢P); see WEAKENING_FIX_DESIGN.md. Maps
+// to KS1 `w`.
 struct Weakening {
-    OpHeader      h{};
-    FormulaSource formula{};
+    OpHeader h{};
+    size_t   idx{0};
+};
+
+// Duplicate (contraction read backward): append a COPY of entry `src` to
+// the current goal (Γ,φ → Γ,φ,φ). Sound: ⋁(Γ,φ,φ) = ⋁(Γ,φ). This is the
+// "grow" primitive the multiplicative And fan-out needs (NDtoLKR sends a
+// shared formula to both branches). Maps to KS1 `c`. Distinct from
+// Contraction, which MERGES two equal entries; Duplicate is its inverse.
+struct Duplicate {
+    OpHeader h{};
+    size_t   src{0};
 };
 
 // Contraction: remove entries[j] when entries[i] == entries[j] (alpha-
@@ -234,7 +249,7 @@ struct Cut {
 // =========================================================================
 using Instr = std::variant<
     AxiomLit, One, CloseByLemma,
-    Exchange, Weakening, Contraction,
+    Exchange, Weakening, Duplicate, Contraction,
     And, Or, Forall, Exists,
     Cut
 >;

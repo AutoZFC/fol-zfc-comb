@@ -69,6 +69,7 @@ size_t count_cuts(const Deriv& d) {
             n = count_cuts(*r.left) + count_cuts(*r.right);
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
                              std::is_same_v<T, RContract> ||
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||
@@ -98,6 +99,7 @@ size_t count_strict_mult_cuts(const Deriv& d) {
               + count_strict_mult_cuts(*r.right);
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
                              std::is_same_v<T, RContract> ||
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||
@@ -247,28 +249,26 @@ void test_hand_built_additive_RCut_becomes_wrapped_mult() {
         ++g_failed; return;
     }
 
-    // Expect structure: RWeaken{R} → RWeaken{P} → RCut (mult, node = [P,R,P,R]).
+    // Expect structure: RDuplicate{0} → RDuplicate{1} → RCut (mult, node =
+    // [P,R,P,R]). The doubled context Γ,Γ is reached from Γ goal-directed by
+    // DUPLICATING each entry (CUT_ELIM_DESIGN §4; see WEAKENING_FIX_DESIGN.md).
     //
-    // |Γ| = 2 RWeakens, outermost has node.concl = [P, R], each adds one
-    // entry from Γ (in original-Γ order, i.e. P first, then R).
-    //
-    // wrap_with_weakenings_inner iterates to_add in REVERSE, so:
-    //   - innermost W adds the LAST entry of to_add = R, gives concl [P,R,P,R];
-    //   - outermost W adds the FIRST entry = P, has concl [P,R].
-    // The deepest W's child is the mult-Cut.
+    // wrap_with_duplicates builds k = n-1 .. 0 from the inside out:
+    //   - innermost RDuplicate{1} copies node[1]=R, child = mult [P,R,P,R];
+    //   - outermost RDuplicate{0} copies node[0]=P, concl [P,R].
 
     const Deriv* cur = out.value().get();
     CHECK(cur->conclusion == std::vector<FormulaHandle>({P, R}));
 
-    auto* w1 = std::get_if<RWeaken>(&cur->rule);
-    if (!w1) { std::cerr << "FAIL: top is not RWeaken\n"; ++g_failed; return; }
-    CHECK(w1->added == P);
+    auto* w1 = std::get_if<RDuplicate>(&cur->rule);
+    if (!w1) { std::cerr << "FAIL: top is not RDuplicate\n"; ++g_failed; return; }
+    CHECK(w1->src == 0);
     cur = w1->child.get();
     CHECK(cur->conclusion == std::vector<FormulaHandle>({P, R, P}));
 
-    auto* w2 = std::get_if<RWeaken>(&cur->rule);
-    if (!w2) { std::cerr << "FAIL: second is not RWeaken\n"; ++g_failed; return; }
-    CHECK(w2->added == R);
+    auto* w2 = std::get_if<RDuplicate>(&cur->rule);
+    if (!w2) { std::cerr << "FAIL: second is not RDuplicate\n"; ++g_failed; return; }
+    CHECK(w2->src == 1);
     cur = w2->child.get();
     CHECK(cur->conclusion == std::vector<FormulaHandle>({P, R, P, R}));
 
