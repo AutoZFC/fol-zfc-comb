@@ -210,49 +210,6 @@ cc_test(
 )
 
 cc_test(
-    name = "interpret_tree_test",
-    srcs = ["interpret_tree_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/comb:verifier",
-        "//src/proof/lkr:ops",
-        "//src/proof/translate/lkr_to_comb:cut_augment",
-        "//src/proof/translate/lkr_to_comb:interpret_tree",
-        "//src/proof/translate/lkr_to_comb:sequent_replay",
-        "//src/proof/translate/lkr_to_comb:tree",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "scope_augment_test",
-    srcs = ["scope_augment_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof/translate/lkr_to_comb:scope_augment",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "lkr_to_comb_test",
-    srcs = ["lkr_to_comb_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/nd:lowering",
-        "//src/proof/translate/lkr_to_comb",
-        "//src/proof/translate/nd_to_lkr",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
     name = "deriv_test",
     srcs = ["deriv_test.cpp"],
     deps = [
@@ -311,24 +268,6 @@ cc_test(
         "//src/proof/translate/lkr_cut_elim:b0",
         "//src/proof/translate/lkr_cut_elim:deriv",
         "//src/proof/translate/lkr_cut_elim:reduce",
-        "//src/proof/translate/nd_to_lkr",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "weak_elim_test",
-    srcs = ["weak_elim_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:proof_value",
-        "//src/proof/lkr:ops",
-        "//src/proof/lkr:verifier",
-        "//src/proof/nd:lowering",
-        "//src/proof/translate/lkr_cut_elim:deriv",
-        "//src/proof/translate/lkr_to_comb",
-        "//src/proof/translate/lkr_weak_elim:reduce",
         "//src/proof/translate/nd_to_lkr",
         "//src/runtime",
     ],
@@ -432,7 +371,6 @@ test_suite(
         ":deriv_invariants_test",
         ":b0_test",
         ":reduce_test",
-        ":weak_elim_test",
         ":iota_translator_test",
         ":ks1_checker_test",
         ":ks1_decompose_test",
@@ -440,7 +378,6 @@ test_suite(
         ":ks1_equiv_test",
         ":ks1_read_fonet_test",
         ":ks1_validation_test",
-        ":lkr_to_comb_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_test",
         ":runtime_test",

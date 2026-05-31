@@ -25,9 +25,11 @@ cc_binary(
     ],
 )
 
-# comb_checker — runs ND→iota_elim→nd_internalize→NDtoLKR→LKRtoComb on
-# every theorem in a .fol.proof file and reports per-theorem
-# pipeline status. Used for ZFC end-to-end coverage measurement.
+# comb_checker — runs ND→iota_elim→nd_internalize→NDtoLKR on every
+# theorem in a .fol.proof file, verifies the resulting LKR program, and
+# reports per-theorem pipeline status. The direct LKR→comb path is
+# retired (future route: LKR→KS1→comb); this tool ends at LKR verify.
+# Used for ZFC end-to-end coverage measurement.
 cc_binary(
     name = "comb_checker",
     srcs = ["comb_checker.cpp"],
@@ -35,13 +37,11 @@ cc_binary(
     deps = [
         "//src/library",
         "//src/parser",
+        "//src/proof:proof_value",
         "//src/proof/lkr:verifier",
         "//src/proof/nd:lowering",
         "//src/proof/translate:theorem_facts",
         "//src/proof/translate/iota_elim:eliminate_iota",
-        "//src/proof/translate/lkr_cut_elim:deriv",
-        "//src/proof/translate/lkr_to_comb",
-        "//src/proof/translate/lkr_weak_elim:reduce",
         "//src/proof/translate/nd_internalize:apply",
         "//src/proof/translate/nd_to_lkr",
         "//src/runtime",

@@ -1,6 +1,9 @@
-// comb_checker — runs the full ND → iota_elim → nd_internalize →
-// NDtoLKR → LKRtoComb pipeline per theorem and reports per-theorem
-// success/failure.
+// comb_checker — runs the ND → iota_elim → nd_internalize →
+// NDtoLKR pipeline per theorem, then verifies the resulting LKR
+// program, and reports per-theorem success/failure.
+//
+// The direct LKR→combinatorial-proof path has been retired (the future
+// route is LKR→KS1→comb); this tool now ends at LKR verification.
 //
 // CLI:
 //   comb_checker <header.fol.def> <proof.fol.proof>
@@ -19,10 +22,8 @@
 #include "src/parser/parser.h"
 #include "src/proof/lkr/verifier.h"
 #include "src/proof/nd/lowering.h"
+#include "src/proof/proof.h"
 #include "src/proof/translate/iota_elim/eliminate_iota.h"
-#include "src/proof/translate/lkr_cut_elim/deriv.h"
-#include "src/proof/translate/lkr_to_comb/lkr_to_comb.h"
-#include "src/proof/translate/lkr_weak_elim/reduce.h"
 #include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/proof/translate/theorem_facts.h"
@@ -42,9 +43,6 @@ namespace tr  = logic::proof::translate;
 namespace ni  = logic::proof::translate::nd_internalize;
 namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
-namespace lc  = logic::proof::translate::lkr_to_comb;
-namespace lce = logic::proof::translate::lkr_cut_elim;  // for build/emit
-namespace we  = logic::proof::translate::lkr_weak_elim;
 
 namespace {
 
@@ -71,14 +69,13 @@ std::string load_headers(Runtime& rt,
     return "";
 }
 
-// Process every theorem in `proof_path` through the full comb pipeline.
-// Populates `theorem_facts` and `lemma_lkr_programs` in-place so
-// subsequent files see this file's results.
+// Process every theorem in `proof_path` through the ND → nd_internalize →
+// NDtoLKR pipeline, then verify the resulting LKR program. Populates
+// `theorem_facts` in-place so subsequent files see this file's results.
 void process_proof_file(
     Runtime&                  rt,
     const std::string&        proof_path,
     tr::TheoremFactsMap&      theorem_facts,
-    lc::LemmaCombProofs&      lemma_lkr_programs,
     std::vector<StageResult>& results)
 {
     std::ifstream proof_file(proof_path);
@@ -168,71 +165,15 @@ void process_proof_file(
             continue;
         }
 
-        // Stage 4: Weakening-elimination only. Stage 3 (eliminate_cuts)
-        // is NOT wired in yet — the existing engine has bugs exposed by
-        // the corpus that need a separate audit (see Stage 3 notes).
-        // Failures here are non-fatal — fall through with the original
-        // LKR (sound; just leaves residual W's for I-2 to flag).
-        LKRProgram lkr_clean = lkr_r.value();
-        std::string stage4_diag = "ok";
-        {
-            FormulaBuilder builder(rt.context());
-            FormulaHandle goal_nnf = builder.to_nnf(wrapped_goal);
-            auto deriv_r = lce::build(builder, goal_nnf, lkr_r.value());
-            if (!deriv_r.ok()) {
-                stage4_diag = "build_failed: " + deriv_r.error().to_string();
-            } else {
-                auto cleaned_r = we::eliminate_weakenings(
-                    builder, *deriv_r.value());
-                if (!cleaned_r.ok()) {
-                    stage4_diag = "elim_failed: " + cleaned_r.error().to_string();
-                } else {
-                    auto emit_r = lce::emit(*cleaned_r.value());
-                    if (!emit_r.ok()) {
-                        stage4_diag = "emit_failed: " + emit_r.error().to_string();
-                    } else {
-                        Proof pf{System::LKR, emit_r.value()};
-                        lkr::LKRVerifier v;
-                        auto verify_r = v.verify(rt.context(), wrapped_goal, pf);
-                        if (!verify_r.ok()) {
-                            stage4_diag = "reverify_failed: "
-                                + verify_r.error().to_string();
-                        } else {
-                            lkr_clean = std::move(emit_r).unwrap();
-                            lkr_clean.claim_name = lkr_r.value().claim_name;
-                        }
-                    }
-                }
-            }
-        }
-        if (stage4_diag != "ok") {
-            // Stage 4 is permutation-only and best-effort; report a
-            // diagnostic when the cleaned program can't be built/
-            // emitted/re-verified, but fall through with the original
-            // LKR (sound — leaves remaining W's for I-2 to flag).
-            std::cerr << "stage4 [" << name << "]: " << stage4_diag << "\n";
-        }
-
-        lc::LKRtoComb comb(rt.context(), wrapped_goal, lemma_lkr_programs);
-        auto comb_r = comb.apply(lkr_clean);
-        if (!comb_r.ok()) {
-            fail("lkr_to_comb", comb_r.error().to_string());
-            // Key the lemma registry by SentenceHandle (typed identity, per
-        // the "no string hacks in IR" rule). The lemma's name must resolve
-        // to a known axiom/theorem in ctx for the key to be available;
-        // skip otherwise.
-        if (auto sh = rt.context().find_known(name); sh.has_value()) {
-            lemma_lkr_programs[sh.value()] = std::move(lkr_clean);
-        }
+        // The direct LKR→comb path is retired. End at LKR verification:
+        // verify the NDtoLKR output against the wrapped goal.
+        Proof pf{System::LKR, lkr_r.value()};
+        lkr::LKRVerifier v;
+        auto verify_r = v.verify(rt.context(), wrapped_goal, pf);
+        if (!verify_r.ok()) {
+            fail("lkr_verify", verify_r.error().to_string());
             results.push_back({proof_path, name, first_stage, first_detail});
             continue;
-        }
-        // Key the lemma registry by SentenceHandle (typed identity, per
-        // the "no string hacks in IR" rule). The lemma's name must resolve
-        // to a known axiom/theorem in ctx for the key to be available;
-        // skip otherwise.
-        if (auto sh = rt.context().find_known(name); sh.has_value()) {
-            lemma_lkr_programs[sh.value()] = std::move(lkr_clean);
         }
         results.push_back({proof_path, name, "ok", ""});
 
@@ -282,19 +223,16 @@ int main(int argc, char* argv[]) {
     }
 
     tr::TheoremFactsMap   theorem_facts;
-    lc::LemmaCombProofs   lemma_lkr_programs;
     std::vector<StageResult> results;
 
     // Process dep proofs first (in argv order — caller is responsible
     // for topological ordering), then the main proof file. All theorems
-    // share the same maps so dep theorems' facts are available to the
+    // share the same map so dep theorems' facts are available to the
     // main file.
     for (const auto& dep : dep_proofs) {
-        process_proof_file(rt, dep, theorem_facts,
-                            lemma_lkr_programs, results);
+        process_proof_file(rt, dep, theorem_facts, results);
     }
-    process_proof_file(rt, proof_path, theorem_facts,
-                        lemma_lkr_programs, results);
+    process_proof_file(rt, proof_path, theorem_facts, results);
 
     // Report.
     int ok = 0, unproved_marker = 0;
