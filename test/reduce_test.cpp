@@ -666,6 +666,53 @@ void test_b3_forall_on_left() {
     CHECK(out.value()->conclusion == std::vector<FormulaHandle>({notPt, Pt}));
 }
 
+// =========================================================================
+// Step 4 — B4 permutation (§5.4). The cut formula is a SIDE formula of the
+// left premise's ROr (the ∨ is non-principal). The cut permutes ABOVE the
+// ROr: the result is ROr-at-root with the (same-degree) cut moved into its
+// premise. Leaves are RLemma so the permutation is the only transformation;
+// we check the tree stays valid, the conclusion is preserved, and the cut
+// count is unchanged (permutation, not elimination).
+// =========================================================================
+void test_b4_permute_or_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    SentenceHandle sh = ctx.find_known("dummy").value();
+
+    FormulaHandle A    = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right;
+    FormulaHandle notA = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().left;
+    FormulaHandle B    = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+    FormulaHandle notB = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().left;
+    FormulaHandle P    = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle notP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle AorB = b.to_nnf(b.make_or(A, B));
+
+    // left = ROr{0, Lc} ⊢ [A∨B, P]; Lc = [A, P, B] (RLemma). cut slot = 1.
+    auto Lc = std::make_unique<Deriv>();
+    Lc->conclusion = {A, P, B}; Lc->rule = RLemma{AxiomRef{sh}, "dummy"};
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {AorB, P};
+    lefty->rule = ROr{0, std::move(Lc)};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {notA, notB, notP};
+    righty->rule = RLemma{AxiomRef{sh}, "dummy"};
+
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {AorB, notA, notB};       // Γ_L ++ Γ_R
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({AorB, notA, notB}));
+    CHECK(count_cuts(*out.value()) == 1);                       // permuted, not eliminated
+    CHECK(std::holds_alternative<ROr>(out.value()->rule));     // ROr now at the root
+}
+
 }  // namespace
 
 int main() {
@@ -682,6 +729,7 @@ int main() {
     test_b2_and_on_left();
     test_b2_or_on_left();
     test_b3_forall_on_left();
+    test_b4_permute_or_left();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

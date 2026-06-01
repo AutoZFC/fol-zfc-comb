@@ -628,6 +628,70 @@ DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
     return out;
 }
 
+// --- B4: permutation / commutative case (§5.4). --------------------------
+//
+// The cut formula is a SIDE formula of one premise's last rule R (R's
+// principal ≠ the cut slot). Permute the cut ABOVE R: cut φ out of R's
+// premise against the other side, then re-apply R below the cut. The cut
+// keeps its degree but moves strictly upward (rank decreases), so the
+// worklist eventually reaches a principal/axiom position.
+//
+// Implemented uniformly with the permutation helpers: find φ in R's premise,
+// exchange it to the cut slot, cut, then reorder (by formula-matching) to the
+// shape R consumes, and wrap in R. Currently: ROr on the left premise.
+
+// Cut φ out of `prem` against `other` and reorder the result to `target`
+// (same multiset). `prem` ends the cut on φ; `other` carries φ̄ at its last.
+DerivPtr cut_out_and_reorder(const Deriv* prem, FormulaHandle phi,
+                             const Deriv* other,
+                             const std::vector<FormulaHandle>& target) {
+    // Move some occurrence of φ to prem's last position.
+    std::size_t last = prem->conclusion.size() - 1;
+    std::size_t q = last;
+    for (std::size_t k = 0; k < prem->conclusion.size(); ++k)
+        if (prem->conclusion[k] == phi) { q = k; break; }
+    DerivPtr px = clone(*prem);
+    if (q != last) {
+        auto ex = std::make_unique<Deriv>();
+        ex->conclusion = px->conclusion;
+        std::swap(ex->conclusion[q], ex->conclusion[last]);
+        ex->rule = RExchange{q, last, std::move(px)};
+        px = std::move(ex);
+    }
+    // New cut on φ: node = (px minus φ) ++ (other minus φ̄).
+    auto nc = std::make_unique<Deriv>();
+    nc->conclusion.assign(px->conclusion.begin(), px->conclusion.end() - 1);
+    nc->conclusion.insert(nc->conclusion.end(),
+                          other->conclusion.begin(), other->conclusion.end() - 1);
+    nc->rule = RCut{phi, std::move(px), clone(*other)};
+    return apply_swaps(std::move(nc), selection_swaps(match_perm(nc->conclusion, target)));
+}
+
+DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut) {
+    const std::vector<FormulaHandle>& node = cut_node.conclusion;
+
+    // ROr on the LEFT premise, non-principal.
+    if (const ROr* orr = std::get_if<ROr>(&cut.left->rule)) {
+        const std::size_t gl = cut.left->conclusion.size() - 1;  // cut slot
+        if (orr->principal != gl) {
+            const Formula& f = node[orr->principal].get();   // α∨β (in Γ_L prefix)
+            FormulaHandle alpha = f.as_compound().left;
+            FormulaHandle beta  = f.as_compound().right;
+            // R's premise shape on node: position p → α, β appended.
+            std::vector<FormulaHandle> target = node;
+            target[orr->principal] = alpha;
+            target.push_back(beta);
+            DerivPtr child = cut_out_and_reorder(orr->child.get(), cut.cut_formula,
+                                                 cut.right.get(), target);
+            auto out = std::make_unique<Deriv>();
+            out->conclusion = node;
+            out->rule = ROr{orr->principal, std::move(child)};
+            return out;
+        }
+    }
+    return nullptr;
+}
+
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
@@ -658,8 +722,12 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
     if (auto out = try_b3_forall_exists(cut_node, cut, builder))
         return util::Result<DerivPtr>(std::move(out));
 
-    // TODO Step 4 continued: B1 principal ROne; B4 permutation; B5
-    // structural W/C/X.
+    // B4 — permutation (cut formula is a side formula of a premise's rule).
+    if (auto out = try_b4_permute(cut_node, cut))
+        return util::Result<DerivPtr>(std::move(out));
+
+    // TODO Step 4 continued: B1 principal ROne; B4 remaining rules
+    // (RForall/RExists/RAnd/structural, both sides); B5 structural W/C/X.
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 
