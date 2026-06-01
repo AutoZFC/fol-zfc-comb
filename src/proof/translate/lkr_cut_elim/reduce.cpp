@@ -232,37 +232,48 @@ util::Result<DerivPtr> substitute_at(const Deriv& tree, const CutPath& path,
 // applicable case fires.
 // =========================================================================
 
+// See through pure-permutation exchanges to an underlying RAx, mapping the
+// axiom's literal positions up through each swap so they are expressed in
+// `d`'s own conclusion coordinates. This lets B1 fire when an appending-rule
+// permutation (B4) has wrapped the axiom in a φ-to-last exchange — the
+// wrapper is discarded by the reduction anyway. Returns {a, b} or nullopt.
+std::optional<std::pair<std::size_t, std::size_t>> effective_axiom(const Deriv* d) {
+    if (const RAx* ax = std::get_if<RAx>(&d->rule))
+        return std::make_pair(ax->a, ax->b);
+    if (const RExchange* ex = std::get_if<RExchange>(&d->rule)) {
+        auto inner = effective_axiom(ex->child.get());
+        if (!inner) return std::nullopt;
+        auto sw = [&](std::size_t p) {
+            return p == ex->i ? ex->j : (p == ex->j ? ex->i : p);
+        };
+        return std::make_pair(sw(inner->first), sw(inner->second));
+    }
+    return std::nullopt;
+}
+
 // --- B1: axiom case, non-principal (§5.2). -------------------------------
 //
-// One premise's rule is RAx with literals at positions {a, b}, and the
-// cut formula (at position |Γ_side| in that premise's conclusion) is NOT
-// among {a, b}. The axiom closes within the side's Γ alone; the cut
-// formula is just side context the axiom ignores.
-//
-// Reduction: discard the OTHER premise; produce a new RAx on the mult
-// conclusion Γ_L ++ Γ_R using the same literal positions (shifted if the
-// axiom is on the RIGHT, since right's positions are second half of the
-// mult conclusion).
+// One premise closes by an axiom (possibly under permutation exchanges) with
+// literals at positions {a, b}, and the cut formula (at position |Γ_side|) is
+// NOT among {a, b}. The axiom closes within the side's Γ alone; the cut
+// formula is just side context the axiom ignores. Discard the OTHER premise;
+// produce a new RAx on the mult conclusion Γ_L ++ Γ_R.
 DerivPtr try_b1_ax_nonprincipal(const Deriv& cut_node, const RCut& cut,
                                  bool ax_on_left) {
     const Deriv* ax_side = ax_on_left ? cut.left.get() : cut.right.get();
-    const auto* ax = std::get_if<RAx>(&ax_side->rule);
+    auto ax = effective_axiom(ax_side);
     if (!ax) return nullptr;
     const std::size_t cut_pos = ax_side->conclusion.size() - 1;
-    if (ax->a == cut_pos || ax->b == cut_pos) return nullptr;  // principal — different case.
+    if (ax->first == cut_pos || ax->second == cut_pos) return nullptr;  // principal.
 
     auto out = std::make_unique<Deriv>();
     out->conclusion = cut_node.conclusion;
 
     if (ax_on_left) {
-        // Left's positions a, b (both < |Γ_L|) map directly to the same
-        // positions in cut_node.conclusion (Γ_L is the first |Γ_L| entries).
-        out->rule = RAx{ax->a, ax->b};
+        out->rule = RAx{ax->first, ax->second};
     } else {
-        // Right's positions a, b (both < |Γ_R|) are at positions
-        // (a + |Γ_L|, b + |Γ_L|) in cut_node.conclusion.
         const std::size_t gl = cut.left->conclusion.size() - 1;
-        out->rule = RAx{ax->a + gl, ax->b + gl};
+        out->rule = RAx{ax->first + gl, ax->second + gl};
     }
     return out;
 }
@@ -313,12 +324,12 @@ DerivPtr try_b1_one_nonprincipal(const Deriv& cut_node, const RCut& cut,
 DerivPtr try_b1_ax_principal(const Deriv& cut_node, const RCut& cut,
                              bool ax_on_left) {
     const Deriv* ax_side = ax_on_left ? cut.left.get() : cut.right.get();
-    const auto* ax = std::get_if<RAx>(&ax_side->rule);
+    auto ax = effective_axiom(ax_side);   // sees through permutation exchanges
     if (!ax) return nullptr;
     const std::size_t cut_pos = ax_side->conclusion.size() - 1;
     std::size_t dual_in_side;
-    if      (ax->a == cut_pos) dual_in_side = ax->b;
-    else if (ax->b == cut_pos) dual_in_side = ax->a;
+    if      (ax->first  == cut_pos) dual_in_side = ax->second;
+    else if (ax->second == cut_pos) dual_in_side = ax->first;
     else return nullptr;   // non-principal — handled by try_b1_ax_nonprincipal.
 
     const std::size_t gl = cut.left->conclusion.size() - 1;
@@ -747,19 +758,84 @@ DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* prem,
         out->rule = RExchange{base + r->i, base + r->j, std::move(child)};
         return out;
     }
-    // RDuplicate (appending), RAnd (binary), leaves: handled elsewhere / TODO.
+    if (const RDuplicate* r = std::get_if<RDuplicate>(&prem->rule)) {
+        if (r->src == cs) return nullptr;        // duplicating φ → contraction-of-cut (B5)
+        std::vector<FormulaHandle> target = node;
+        target.push_back(node[base + r->src]);
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RDuplicate{base + r->src, std::move(child)};
+        return out;
+    }
+    // RAnd (binary) handled separately; leaves are B1.
     return nullptr;
+}
+
+// Permute the cut past a binary RAnd on premise `andD` (cut.left or cut.right).
+// The cut formula sits in exactly one of the ∧'s two sub-premises (determined
+// by the partition); cut it into THAT sub-premise, leave the other untouched,
+// and re-apply (∧) below — routing the other cut side's Γ into the same branch.
+// `base` = 0 if andD is the left premise, |Γ_L| if it is the right.
+DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* andD,
+                    FormulaHandle cut_formula, const Deriv* other, std::size_t base) {
+    const RAnd* a = std::get_if<RAnd>(&andD->rule);
+    if (!a) return nullptr;
+    const std::size_t cs = andD->conclusion.size() - 1;   // cut slot in andD
+    if (a->principal == cs) return nullptr;               // ∧ is the cut formula → B2
+    const std::size_t og = other->conclusion.size() - 1;  // |Γ_other|
+    const Formula& f = node[base + a->principal].get();   // α∧γ
+    FormulaHandle alpha = f.as_compound().left, gamma = f.as_compound().right;
+
+    bool cs_in_lp = false;
+    for (std::size_t p : a->left_partition) if (p == cs) { cs_in_lp = true; break; }
+
+    // node positions in `andD`'s Γ slice and `other`'s Γ slice.
+    std::vector<bool> in_lp_node(node.size(), false);
+    for (std::size_t p : a->left_partition)
+        if (p != cs) in_lp_node[base + p] = true;            // map partition → node (p < cs)
+    // `other`'s Γ occupies [other_base, other_base+og).
+    const std::size_t other_base = (base == 0) ? (node.size() - og) : 0;
+
+    // Decide which branch the cut formula (and `other`'s Γ) flow into.
+    auto build = [&](bool into_left) -> DerivPtr {
+        const Deriv* into  = into_left ? a->left.get()  : a->right.get();
+        FormulaHandle tail = into_left ? alpha : gamma;
+        // Branch membership in node: the partition entries keep their side; the
+        // cut formula's side (= `into`) also absorbs `other`'s Γ.
+        std::vector<std::size_t> part;          // = the new left_partition
+        std::vector<FormulaHandle> target;
+        for (std::size_t k = 0; k < node.size(); ++k) {
+            if (k == base + a->principal) continue;
+            bool in_left_branch = in_lp_node[k];
+            if (k >= other_base && k < other_base + og) in_left_branch = into_left;
+            if (in_left_branch) part.push_back(k);
+            if (in_left_branch == into_left) target.push_back(node[k]);
+        }
+        target.push_back(tail);
+        DerivPtr cutd = cut_out_and_reorder(into, cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        if (into_left)
+            out->rule = RAnd{base + a->principal, part, std::move(cutd), clone(*a->right)};
+        else
+            out->rule = RAnd{base + a->principal, part, clone(*a->left), std::move(cutd)};
+        return out;
+    };
+    return build(cs_in_lp);
 }
 
 DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& b) {
     const std::vector<FormulaHandle>& node = cut_node.conclusion;
     const std::size_t gl = cut.left->conclusion.size() - 1;
+    FormulaHandle phibar = cut.right->conclusion.back();
     if (auto out = try_b4_unary(node, cut.left.get(), cut.cut_formula,
                                 cut.right.get(), 0, b))
         return out;
-    FormulaHandle phibar = cut.right->conclusion.back();
     if (auto out = try_b4_unary(node, cut.right.get(), phibar,
                                 cut.left.get(), gl, b))
+        return out;
+    if (auto out = try_b4_and(node, cut.left.get(), cut.cut_formula, cut.right.get(), 0))
+        return out;
+    if (auto out = try_b4_and(node, cut.right.get(), phibar, cut.left.get(), gl))
         return out;
     return nullptr;
 }

@@ -502,15 +502,13 @@ void test_b1_ax_principal_on_right() {
     FormulaHandle B    = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
 
     // Mult-Cut on P: Γ_L = [Q], Γ_R = [P, B], node = [Q, P, B].
-    //   left  = a NON-axiom (RExchange) so dispatch falls through to RIGHT.
-    //   left.concl  = [Q, P]   (Γ_L ++ {P}); via RExchange{0,1} → RAx on [P, Q].
+    //   left  = a NON-axiom (RLemma) so dispatch falls through to RIGHT.
+    //   left.concl  = [Q, P]   (Γ_L ++ {P}).
     //   right.concl = [P, B, ¬P]   RAx{0,2}  (¬P=cut slot 2 dual to P at 0; principal)
-    auto ax_leaf = std::make_unique<Deriv>();
-    ax_leaf->conclusion = {P, Q};
-    ax_leaf->rule = RAx{0, 1};
+    SentenceHandle sh = ctx.find_known("dummy").value();
     auto lefty = std::make_unique<Deriv>();
     lefty->conclusion = {Q, P};
-    lefty->rule = RExchange{0, 1, std::move(ax_leaf)};
+    lefty->rule = RLemma{AxiomRef{sh}, "dummy"};
     auto righty = std::make_unique<Deriv>();
     righty->conclusion = {P, B, notP};
     righty->rule = RAx{0, 2};                // principal on the right
@@ -834,6 +832,65 @@ void test_b4_weaken_right() {
     CHECK(out.value()->conclusion == std::vector<FormulaHandle>({C, a.A, a.P}));
 }
 
+// Appending-rule chain: ROr over a REAL axiom. B4 permutes the cut above the
+// ROr (inserting a φ-to-last exchange); B1 then sees through that exchange to
+// the axiom and closes → Cut == 0.
+void test_b4_or_chain_to_zero() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle B  = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+    FormulaHandle C  = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    FormulaHandle nPorB = b.to_nnf(b.make_or(nP, B));
+    // left = ROr{0} ⊢ [¬P∨B, P]; child [¬P, P, B] (RAx{0,1}, real duals ¬P/P).
+    auto Rc = std::make_unique<Deriv>(); Rc->conclusion = {nP, P, B}; Rc->rule = RAx{0, 1};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {nPorB, P};
+    lefty->rule = ROr{0, std::move(Rc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, nP};
+    righty->rule = RLemma{AxiomRef{ctx.find_known("dummy").value()}, "dummy"};
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {nPorB, C};
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({nPorB, C}));
+    CHECK(std::holds_alternative<ROr>(out.value()->rule));   // ROr permuted to root
+}
+
+// B4 binary RAnd: the cut formula sits in one ∧-sub-premise. The cut routes
+// into that premise (a real axiom), the other ∧-premise is untouched, and ∧
+// is re-applied below. effective_axiom then closes → Cut == 0.
+void test_b4_and_to_zero() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle B  = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+    FormulaHandle C  = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    FormulaHandle nPandB = b.to_nnf(b.make_and(nP, B));
+    RLemma lem{AxiomRef{ctx.find_known("dummy").value()}, "dummy"};
+    // left = RAnd{ap=0, lp={1}} ⊢ [(¬P)∧B, P]; Lchild [P, ¬P] (RAx{0,1}); Rchild [B].
+    auto Lchild = std::make_unique<Deriv>(); Lchild->conclusion = {P, nP}; Lchild->rule = RAx{0, 1};
+    auto Rchild = std::make_unique<Deriv>(); Rchild->conclusion = {B}; Rchild->rule = lem;
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {nPandB, P};
+    lefty->rule = RAnd{0, {1}, std::move(Lchild), std::move(Rchild)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, nP}; righty->rule = lem;
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {nPandB, C};
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({nPandB, C}));
+    CHECK(std::holds_alternative<RAnd>(out.value()->rule));   // ∧ permuted to root
+}
+
 }  // namespace
 
 int main() {
@@ -856,6 +913,8 @@ int main() {
     test_b4_exists_left();
     test_b4_forall_left();
     test_b4_weaken_right();
+    test_b4_or_chain_to_zero();
+    test_b4_and_to_zero();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
