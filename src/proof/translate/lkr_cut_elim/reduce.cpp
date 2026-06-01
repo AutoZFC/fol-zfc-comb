@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 namespace logic::proof::translate::lkr_cut_elim {
@@ -497,10 +498,140 @@ DerivPtr try_b2_and_or(const Deriv& cut_node, const RCut& cut) {
     return apply_swaps(std::move(cut2), swaps);
 }
 
+// --- B3: principal logical, ∀ vs ∃ (§5.3 + §6 capture-avoidance). --------
+//
+// Cut on ∀x.β where one premise ends in (∀) with eigenvar a producing
+// ⊢ Γ_fa, β[x:=a], and the other ends in (∃) with witness t on the dual
+// ∃x.β̄ producing ⊢ Γ_ex, β̄[x:=t]. Substitute a:=t throughout the (∀)
+// subderivation Lc (sound: a∉FV(Γ_fa)), giving ⊢ Γ_fa, β[x:=t]; then cut on
+// β[x:=t] (degree d(β) < d(∀x.β)) against the (∃) premise.
+//
+// §6 hazard: a:=t can capture if t mentions a fixed var that is also an
+// eigenvar deeper in Lc. We therefore RECTIFY as we substitute — every
+// eigenvar in Lc is renamed to a globally fresh index (> every fixed var in
+// Lc and t) via a scope-map, BEFORE the a:=t replacement at each formula.
+
+void collect_max_fixed_formula(FormulaHandle h, std::size_t& floor);
+void collect_max_fixed_term(const Term& t, std::size_t& floor) {
+    if (t.is_fixed()) floor = std::max(floor, t.as_variable() + 1);
+    if (t.is_description()) collect_max_fixed_formula(t.as_description().body, floor);
+}
+void collect_max_fixed_formula(FormulaHandle h, std::size_t& floor) {
+    const Formula& f = h.get();
+    if (f.is_schema_var()) return;
+    if (f.is_predicate()) {
+        for (const Term& t : f.as_predicate().args()) collect_max_fixed_term(t, floor);
+    } else if (f.is_compound()) {
+        const Compound& c = f.as_compound();
+        if (c.left.valid())  collect_max_fixed_formula(c.left, floor);
+        if (c.right.valid()) collect_max_fixed_formula(c.right, floor);
+    } else if (f.is_quantified()) {
+        collect_max_fixed_formula(f.as_quantified().body, floor);
+    }
+}
+
+using Rename = std::unordered_map<var_index, var_index>;
+
+FormulaHandle apply_fv(FormulaHandle h, const Rename& rn,
+                       var_index a, const Term& t, FormulaBuilder& b) {
+    for (const auto& kv : rn)
+        h = b.translate_term(h, Term::fixed(kv.first), Term::fixed(kv.second));
+    return b.subst_fixed_impl(h, a, t, 0);
+}
+Term apply_fv_term(Term w, const Rename& rn,
+                   var_index a, const Term& t, FormulaBuilder& b) {
+    for (const auto& kv : rn)
+        w = b.translate_in_term(w, Term::fixed(kv.first), Term::fixed(kv.second));
+    return b.subst_fixed_in_term(w, a, t, 0);
+}
+
+// Rename in-scope eigenvars (via `rn`) and substitute a:=t through `d`.
+DerivPtr freshen_subst(const Deriv& d, Rename rn, var_index a, const Term& t,
+                       var_index& fresh, FormulaBuilder& b) {
+    auto n = std::make_unique<Deriv>();
+    n->conclusion.reserve(d.conclusion.size());
+    for (FormulaHandle h : d.conclusion)
+        n->conclusion.push_back(apply_fv(h, rn, a, t, b));
+
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RAx> || std::is_same_v<T, ROne> ||
+                      std::is_same_v<T, RLemma>) {
+            n->rule = r;  // leaf; positions / closed targets unchanged.
+        } else if constexpr (std::is_same_v<T, RExchange>) {
+            n->rule = RExchange{r.i, r.j, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RWeaken>) {
+            n->rule = RWeaken{r.idx, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RDuplicate>) {
+            n->rule = RDuplicate{r.src, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RContract>) {
+            n->rule = RContract{r.i, r.j, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, ROr>) {
+            n->rule = ROr{r.principal, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RForall>) {
+            var_index e2 = fresh++;
+            Rename rn2 = rn; rn2[r.eigen] = e2;
+            n->rule = RForall{r.principal, e2, freshen_subst(*r.child, rn2, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            Term w2 = apply_fv_term(r.witness, rn, a, t, b);
+            n->rule = RExists{r.principal, w2, freshen_subst(*r.child, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RAnd>) {
+            n->rule = RAnd{r.principal, r.left_partition,
+                           freshen_subst(*r.left, rn, a, t, fresh, b),
+                           freshen_subst(*r.right, rn, a, t, fresh, b)};
+        } else if constexpr (std::is_same_v<T, RCut>) {
+            FormulaHandle cf = apply_fv(r.cut_formula, rn, a, t, b);
+            n->rule = RCut{cf, freshen_subst(*r.left, rn, a, t, fresh, b),
+                               freshen_subst(*r.right, rn, a, t, fresh, b)};
+        }
+    }, d.rule);
+    return n;
+}
+
+DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
+                              FormulaBuilder& b) {
+    const RForall* fa = std::get_if<RForall>(&cut.left->rule);
+    const RExists* ex = std::get_if<RExists>(&cut.right->rule);
+    const Deriv* faD = cut.left.get();
+    const Deriv* exD = cut.right.get();
+    bool fa_on_left = true;
+    if (!fa || !ex) {
+        fa = std::get_if<RForall>(&cut.right->rule);
+        ex = std::get_if<RExists>(&cut.left->rule);
+        faD = cut.right.get();
+        exD = cut.left.get();
+        fa_on_left = false;
+    }
+    if (!fa || !ex) return nullptr;
+    // Principal: the ∀ / ∃ is the cut slot (last position of its premise).
+    if (fa->principal != faD->conclusion.size() - 1) return nullptr;
+    if (ex->principal != exD->conclusion.size() - 1) return nullptr;
+
+    // Fresh floor: above every fixed var in Lc and the witness t.
+    std::size_t fresh = fa->eigen + 1;
+    for (FormulaHandle h : fa->child->conclusion) collect_max_fixed_formula(h, fresh);
+    collect_max_fixed_term(ex->witness, fresh);
+
+    // Lc' = Lc with a:=t (rectified). Concl = Γ_fa ++ {β[x:=t]}.
+    DerivPtr Lcp = freshen_subst(*fa->child, Rename{}, fa->eigen, ex->witness, fresh, b);
+    DerivPtr Rc  = clone(*ex->child);   // Γ_ex ++ {β̄[x:=t]}
+
+    auto out = std::make_unique<Deriv>();
+    out->conclusion = cut_node.conclusion;
+    if (fa_on_left) {
+        FormulaHandle cf = Lcp->conclusion.back();      // β[x:=t]
+        out->rule = RCut{cf, std::move(Lcp), std::move(Rc)};
+    } else {
+        FormulaHandle cf = Rc->conclusion.back();        // β̄[x:=t]
+        out->rule = RCut{cf, std::move(Rc), std::move(Lcp)};
+    }
+    return out;
+}
+
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
-util::Result<DerivPtr> dispatch_cut(FormulaBuilder& /*builder*/,
+util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
                                      const Deriv& cut_node,
                                      const RCut& cut) {
     // B1 — axiom / truth-literal non-principal on either side.
@@ -523,8 +654,12 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& /*builder*/,
     if (auto out = try_b2_and_or(cut_node, cut))
         return util::Result<DerivPtr>(std::move(out));
 
-    // TODO Step 4 continued: B1 principal ROne; B2 ∀ vs ∃ (needs B3
-    // capture-avoiding substitution); B4 permutation; B5 structural W/C/X.
+    // B3 — principal logical, ∀ vs ∃ (capture-avoiding witness substitution).
+    if (auto out = try_b3_forall_exists(cut_node, cut, builder))
+        return util::Result<DerivPtr>(std::move(out));
+
+    // TODO Step 4 continued: B1 principal ROne; B4 permutation; B5
+    // structural W/C/X.
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 

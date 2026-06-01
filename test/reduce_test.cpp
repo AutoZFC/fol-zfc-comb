@@ -622,6 +622,50 @@ void test_b2_or_on_left() {
     CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.P, a.Q, a.nP, a.nQ}));
 }
 
+// =========================================================================
+// Step 4 — B3 ∀/∃ principal (§5.3 + §6). A cut on ∀x.P(x) (left ends in ∀
+// with eigenvar a; right ends in ∃ with witness t) substitutes a:=t through
+// the ∀ subderivation and cuts on the lower-degree P(t). With the leaves as
+// (shape-only) axioms the residual P(t) cut is axiom-principal → Cut == 0.
+// =========================================================================
+void test_b3_forall_on_left() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle faF = b.to_nnf(parse_root(ctx, "forall x. P(x)"));   // ∀x.P(x)
+    FormulaHandle exF = b.to_nnf(b.make_not(faF));                     // ∃x.¬P(x)
+    FormulaHandle Pa    = b.instantiate_quantifier_body(faF.get().as_quantified().body, Term::fixed(5));  // P(a)
+    FormulaHandle Pt    = b.instantiate_quantifier_body(faF.get().as_quantified().body, Term::fixed(7));  // P(t)
+    FormulaHandle notPt = b.instantiate_quantifier_body(exF.get().as_quantified().body, Term::fixed(7));  // ¬P(t)
+
+    // Γ_fa = [¬P(t)], Γ_ex = [P(t)] — chosen so that after a:=t the ∀-child's
+    // RAx becomes a REAL axiom (¬P(t) dual to P(t)), letting the residual
+    // P(t) cut close via B1. a=5 ∉ FV(Γ_fa)={7} (eigenvar condition).
+    auto Lc = std::make_unique<Deriv>();
+    Lc->conclusion = {notPt, Pa}; Lc->rule = RAx{0, 1};   // real after a:=t
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {notPt, faF};
+    lefty->rule = RForall{1, 5, std::move(Lc)};
+    auto Rc = std::make_unique<Deriv>();
+    Rc->conclusion = {Pt, notPt}; Rc->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {Pt, exF};
+    righty->rule = RExists{1, Term::fixed(7), std::move(Rc)};
+
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {notPt, Pt};
+    cut->rule = RCut{faF, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({notPt, Pt}));
+}
+
 }  // namespace
 
 int main() {
@@ -637,6 +681,7 @@ int main() {
     test_b1_ax_principal_on_right();
     test_b2_and_on_left();
     test_b2_or_on_left();
+    test_b3_forall_on_left();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
