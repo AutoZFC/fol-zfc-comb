@@ -667,28 +667,100 @@ DerivPtr cut_out_and_reorder(const Deriv* prem, FormulaHandle phi,
     return apply_swaps(std::move(nc), selection_swaps(match_perm(nc->conclusion, target)));
 }
 
-DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut) {
-    const std::vector<FormulaHandle>& node = cut_node.conclusion;
+// Permute the cut past a UNARY rule R of `prem` (one premise of the cut),
+// where R's affected position ≠ the cut slot. `base` maps R's positions into
+// `node` (0 for the left premise, |Γ_L| for the right). `cut_formula` is the
+// formula to cut out of R's premise (φ on the left, φ̄ on the right); `other`
+// is the opposite cut premise. Returns the rebuilt R{…, cut} or nullptr.
+DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* prem,
+                      FormulaHandle cut_formula, const Deriv* other,
+                      std::size_t base, FormulaBuilder& b) {
+    const std::size_t cs = prem->conclusion.size() - 1;   // cut slot in prem
 
-    // ROr on the LEFT premise, non-principal.
-    if (const ROr* orr = std::get_if<ROr>(&cut.left->rule)) {
-        const std::size_t gl = cut.left->conclusion.size() - 1;  // cut slot
-        if (orr->principal != gl) {
-            const Formula& f = node[orr->principal].get();   // α∨β (in Γ_L prefix)
-            FormulaHandle alpha = f.as_compound().left;
-            FormulaHandle beta  = f.as_compound().right;
-            // R's premise shape on node: position p → α, β appended.
-            std::vector<FormulaHandle> target = node;
-            target[orr->principal] = alpha;
-            target.push_back(beta);
-            DerivPtr child = cut_out_and_reorder(orr->child.get(), cut.cut_formula,
-                                                 cut.right.get(), target);
-            auto out = std::make_unique<Deriv>();
-            out->conclusion = node;
-            out->rule = ROr{orr->principal, std::move(child)};
-            return out;
-        }
+    if (const ROr* r = std::get_if<ROr>(&prem->rule)) {
+        if (r->principal == cs) return nullptr;            // principal → B2
+        const Formula& f = node[base + r->principal].get();
+        std::vector<FormulaHandle> target = node;
+        target[base + r->principal] = f.as_compound().left;
+        target.push_back(f.as_compound().right);
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = ROr{base + r->principal, std::move(child)};
+        return out;
     }
+    if (const RExists* r = std::get_if<RExists>(&prem->rule)) {
+        if (r->principal == cs) return nullptr;            // principal → B3
+        const Formula& f = node[base + r->principal].get();   // ∃x.ψ
+        FormulaHandle inst = b.instantiate_quantifier_body(f.as_quantified().body, r->witness);
+        std::vector<FormulaHandle> target = node;
+        target[base + r->principal] = inst;
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RExists{base + r->principal, r->witness, std::move(child)};
+        return out;
+    }
+    if (const RForall* r = std::get_if<RForall>(&prem->rule)) {
+        if (r->principal == cs) return nullptr;            // principal → B3
+        // Rectify the eigenvar so it cannot be captured by `other`'s context.
+        std::size_t fresh = r->eigen + 1;
+        for (FormulaHandle h : node) collect_max_fixed_formula(h, fresh);
+        for (FormulaHandle h : other->conclusion) collect_max_fixed_formula(h, fresh);
+        for (FormulaHandle h : r->child->conclusion) collect_max_fixed_formula(h, fresh);
+        var_index e2 = fresh++;
+        DerivPtr Rc2 = freshen_subst(*r->child, Rename{}, r->eigen, Term::fixed(e2), fresh, b);
+        const Formula& f = node[base + r->principal].get();   // ∀x.ψ
+        FormulaHandle inst = b.instantiate_quantifier_body(f.as_quantified().body, Term::fixed(e2));
+        std::vector<FormulaHandle> target = node;
+        target[base + r->principal] = inst;
+        DerivPtr child = cut_out_and_reorder(Rc2.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RForall{base + r->principal, e2, std::move(child)};
+        return out;
+    }
+    if (const RWeaken* r = std::get_if<RWeaken>(&prem->rule)) {
+        if (r->idx == cs) return nullptr;                  // dropping φ → B5
+        std::vector<FormulaHandle> target = node;
+        target.erase(target.begin() + (base + r->idx));
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RWeaken{base + r->idx, std::move(child)};
+        return out;
+    }
+    if (const RContract* r = std::get_if<RContract>(&prem->rule)) {
+        if (r->i == cs || r->j == cs) return nullptr;
+        std::vector<FormulaHandle> target = node;
+        target.erase(target.begin() + (base + r->j));
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RContract{base + r->i, base + r->j, std::move(child)};
+        return out;
+    }
+    if (const RExchange* r = std::get_if<RExchange>(&prem->rule)) {
+        // Skip exchanges that touch the cut slot — those are the internal
+        // φ-to-last moves; permuting them would loop. Non-cut-slot exchanges
+        // are clean side permutations.
+        if (r->i == cs || r->j == cs) return nullptr;
+        std::vector<FormulaHandle> target = node;
+        std::swap(target[base + r->i], target[base + r->j]);
+        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
+        auto out = std::make_unique<Deriv>(); out->conclusion = node;
+        out->rule = RExchange{base + r->i, base + r->j, std::move(child)};
+        return out;
+    }
+    // RDuplicate (appending), RAnd (binary), leaves: handled elsewhere / TODO.
+    return nullptr;
+}
+
+DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& b) {
+    const std::vector<FormulaHandle>& node = cut_node.conclusion;
+    const std::size_t gl = cut.left->conclusion.size() - 1;
+    if (auto out = try_b4_unary(node, cut.left.get(), cut.cut_formula,
+                                cut.right.get(), 0, b))
+        return out;
+    FormulaHandle phibar = cut.right->conclusion.back();
+    if (auto out = try_b4_unary(node, cut.right.get(), phibar,
+                                cut.left.get(), gl, b))
+        return out;
     return nullptr;
 }
 
@@ -723,11 +795,11 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
         return util::Result<DerivPtr>(std::move(out));
 
     // B4 — permutation (cut formula is a side formula of a premise's rule).
-    if (auto out = try_b4_permute(cut_node, cut))
+    if (auto out = try_b4_permute(cut_node, cut, builder))
         return util::Result<DerivPtr>(std::move(out));
 
-    // TODO Step 4 continued: B1 principal ROne; B4 remaining rules
-    // (RForall/RExists/RAnd/structural, both sides); B5 structural W/C/X.
+    // TODO Step 4 continued: B1 principal ROne; B4 appending rules
+    // (ROr/RDuplicate full chain, RExchange-cut-slot) + RAnd; B5 W/C/X.
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 

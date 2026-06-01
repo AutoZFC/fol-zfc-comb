@@ -713,6 +713,127 @@ void test_b4_permute_or_left() {
     CHECK(std::holds_alternative<ROr>(out.value()->rule));     // ROr now at the root
 }
 
+// B4 left-side unary rules that leave φ at the premise's last position
+// (RExchange/RWeaken/RExists/RForall): a real axiom under the rule means that
+// after the cut permutes above it, B1 closes → Cut == 0.
+namespace {
+struct B4Atoms { FormulaHandle P, nP, A, B; };
+B4Atoms b4_atoms(GlobalContext& ctx, FormulaBuilder& b) {
+    return {b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right,
+            b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left,
+            b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right,
+            b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right};
+}
+RLemma lemma(GlobalContext& ctx) { return RLemma{AxiomRef{ctx.find_known("dummy").value()}, "dummy"}; }
+}  // namespace
+
+void test_b4_exchange_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left = RExchange{0,1} ⊢ [¬P, A, P]; child [A, ¬P, P] (RAx{1,2}).
+    auto Lc = std::make_unique<Deriv>(); Lc->conclusion = {a.A, a.nP, a.P}; Lc->rule = RAx{1, 2};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.nP, a.A, a.P};
+    lefty->rule = RExchange{0, 1, std::move(Lc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.nP, a.A, a.B};
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.nP, a.A, a.B}));
+}
+
+void test_b4_weaken_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left = RWeaken{0} ⊢ [A, ¬P, P]; child [¬P, P] (RAx{0,1}).
+    auto Lc = std::make_unique<Deriv>(); Lc->conclusion = {a.nP, a.P}; Lc->rule = RAx{0, 1};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.A, a.nP, a.P};
+    lefty->rule = RWeaken{0, std::move(Lc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.A, a.nP, a.B};
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.A, a.nP, a.B}));
+}
+
+void test_b4_exists_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    FormulaHandle exQ = b.to_nnf(parse_root(ctx, "exists x. Q(x)"));
+    FormulaHandle Qw  = b.instantiate_quantifier_body(exQ.get().as_quantified().body, Term::fixed(9));
+    // left = RExists{0,fixed(9)} ⊢ [∃x.Q(x), ¬P, P]; child [Q(w), ¬P, P] (RAx{1,2}).
+    auto Lc = std::make_unique<Deriv>(); Lc->conclusion = {Qw, a.nP, a.P}; Lc->rule = RAx{1, 2};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {exQ, a.nP, a.P};
+    lefty->rule = RExists{0, Term::fixed(9), std::move(Lc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {exQ, a.nP, a.B};
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({exQ, a.nP, a.B}));
+}
+
+void test_b4_forall_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    FormulaHandle faQ = b.to_nnf(parse_root(ctx, "forall x. Q(x)"));
+    FormulaHandle Qe  = b.instantiate_quantifier_body(faQ.get().as_quantified().body, Term::fixed(5));
+    // left = RForall{0,eigen 5} ⊢ [∀x.Q(x), ¬P, P]; child [Q(e), ¬P, P] (RAx{1,2}).
+    auto Lc = std::make_unique<Deriv>(); Lc->conclusion = {Qe, a.nP, a.P}; Lc->rule = RAx{1, 2};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {faQ, a.nP, a.P};
+    lefty->rule = RForall{0, 5, std::move(Lc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {faQ, a.nP, a.B};
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({faQ, a.nP, a.B}));
+}
+
+// Right-side permutation (base = |Γ_L| offset): the RWeaken is on the RIGHT
+// premise; left is an opaque RLemma so dispatch reaches the right side.
+void test_b4_weaken_right() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    FormulaHandle C = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    // left = RLemma ⊢ [C, P]; right = RWeaken{0} ⊢ [A, P, ¬P], child [P, ¬P] (RAx{0,1}).
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {C, a.P}; lefty->rule = lemma(ctx);
+    auto Rc = std::make_unique<Deriv>(); Rc->conclusion = {a.P, a.nP}; Rc->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.A, a.P, a.nP};
+    righty->rule = RWeaken{0, std::move(Rc)};
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {C, a.A, a.P};   // Γ_L=[C] ++ Γ_R=[A,P]
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({C, a.A, a.P}));
+}
+
 }  // namespace
 
 int main() {
@@ -730,6 +851,11 @@ int main() {
     test_b2_or_on_left();
     test_b3_forall_on_left();
     test_b4_permute_or_left();
+    test_b4_exchange_left();
+    test_b4_weaken_left();
+    test_b4_exists_left();
+    test_b4_forall_left();
+    test_b4_weaken_right();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

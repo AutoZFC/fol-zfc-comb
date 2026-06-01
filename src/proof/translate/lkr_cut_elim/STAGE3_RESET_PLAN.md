@@ -23,8 +23,8 @@ now targets KS1 (`memory: project_lkr_ks1_pivot_2026_05_31`); Stage 3 itself
 | 4 — B2 ∧ vs ∨ | both orientations → two lower-degree cuts + reorder | ✅ shipped |
 | 4 — B3 ∀ vs ∃ | witness subst with eigenvar rectification (§6) | ✅ shipped |
 | 4 — B3 capture-avoiding subst | needed by B2's ∀/∃ case | ⏳ pending |
-| 4 — B4 permutation (ROr left) | push cut above a non-principal ROr | ✅ shipped (machinery + 1st rule) |
-| 4 — B4 permutation (rest) | RForall/RExists/RAnd/structural, both sides | ⏳ pending |
+| 4 — B4 permutation (unary) | ROr/RExists/RForall/RWeaken/RContract/RExchange(≠cut-slot), BOTH sides; RForall rectified | ✅ shipped |
+| 4 — B4 permutation (rest) | appending ROr/RDuplicate full chain, RExchange-cut-slot, RAnd (binary) | ⏳ pending |
 | 4 — B5 structural | W dead-cut, C duplication, X | ⏳ blocked* |
 | 5 — Stage A | RLemma inlining | ⏳ pending |
 
