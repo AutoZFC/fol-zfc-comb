@@ -891,6 +891,107 @@ void test_b4_and_to_zero() {
     CHECK(std::holds_alternative<RAnd>(out.value()->rule));   // ∧ permuted to root
 }
 
+// =========================================================================
+// Step 4 — B5 structural (§5.5).
+// =========================================================================
+
+// B5-W dead cut, left premise: the cut formula P was WEAKENED into the left
+// premise (RWeaken at the cut slot). The cut is dead — discard the right
+// premise and weaken Γ_R into the W-premise's child. Cut → 0.
+void test_b5_weaken_dead_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left = RWeaken{1} ⊢ [A, P]; child [A] (opaque RLemma). P at cut slot 1.
+    auto Lc = std::make_unique<Deriv>(); Lc->conclusion = {a.A}; Lc->rule = lemma(ctx);
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.A, a.P};
+    lefty->rule = RWeaken{1, std::move(Lc)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP};
+    righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.A, a.B};  // Γ_L=[A] ++ Γ_R=[B]
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.A, a.B}));
+    CHECK(std::holds_alternative<RWeaken>(out.value()->rule));   // weakened Γ_R back in
+}
+
+// B5-W dead cut, right premise (base offset). The cut formula ¬P was weakened
+// into the right premise; discard the left and weaken Γ_L into the child.
+void test_b5_weaken_dead_right() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left opaque ⊢ [A, P]; right = RWeaken{1} ⊢ [B, ¬P], child [B]. ¬P at cut slot 1.
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.A, a.P}; lefty->rule = lemma(ctx);
+    auto Rc = std::make_unique<Deriv>(); Rc->conclusion = {a.B}; Rc->rule = lemma(ctx);
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP};
+    righty->rule = RWeaken{1, std::move(Rc)};
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.A, a.B};
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.A, a.B}));
+    CHECK(std::holds_alternative<RWeaken>(out.value()->rule));
+}
+
+// B5-C contraction on the RIGHT premise: ¬P was produced by a contraction
+// (RDuplicate{src=cut slot}). The reduction duplicates the left premise and
+// cuts twice against the contraction premise [P, ¬P, ¬P]; the residual cuts
+// are axiom-(non)principal, so the whole thing drives to Cut == 0.
+void test_b5_contraction_right() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left = O opaque ⊢ [A, P] (Γ_L=[A]). right = RDuplicate{1} ⊢ [P, ¬P];
+    //   child C2 = [P, ¬P, ¬P] RAx{0,1} (Γ_R=[P], two ¬P contracted).
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.A, a.P}; lefty->rule = lemma(ctx);
+    auto C2 = std::make_unique<Deriv>(); C2->conclusion = {a.P, a.nP, a.nP}; C2->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.P, a.nP};
+    righty->rule = RDuplicate{1, std::move(C2)};
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.A, a.P};  // Γ_L=[A] ++ Γ_R=[P]
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.A, a.P}));
+}
+
+// B5-C contraction on the LEFT premise: P was produced by a contraction.
+// Symmetric to the right case but the residual cut formula ends up mid-
+// sequence, exercising the rotate-to-back path. Drives to Cut == 0.
+void test_b5_contraction_left() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    auto a = b4_atoms(ctx, b);
+    // left = RDuplicate{1} ⊢ [¬P, P]; child C2 = [¬P, P, P] RAx{0,1} (Γ_L=[¬P]).
+    // right = O opaque ⊢ [B, ¬P] (Γ_R=[B]).
+    auto C2 = std::make_unique<Deriv>(); C2->conclusion = {a.nP, a.P, a.P}; C2->rule = RAx{0, 1};
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {a.nP, a.P};
+    lefty->rule = RDuplicate{1, std::move(C2)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {a.B, a.nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {a.nP, a.B};  // Γ_L=[¬P] ++ Γ_R=[B]
+    cut->rule = RCut{a.P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.nP, a.B}));
+}
+
 }  // namespace
 
 int main() {
@@ -915,6 +1016,10 @@ int main() {
     test_b4_weaken_right();
     test_b4_or_chain_to_zero();
     test_b4_and_to_zero();
+    test_b5_weaken_dead_left();
+    test_b5_weaken_dead_right();
+    test_b5_contraction_right();
+    test_b5_contraction_left();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
