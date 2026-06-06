@@ -80,10 +80,52 @@ void test_excluded_middle_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ (A∨¬A) ∧ (B∨¬B) : RAnd{0, ∅} over two ROr-over-RAx branches. A genuine
+// 2-axiom fonet — empty branch contexts, so no switch sequence:
+//   t —Tu→ t∧t —Ai(A)@Left→ (A∨¬A)∧t —Ai(B)@Right→ (A∨¬A)∧(B∨¬B).
+void test_conjunction_of_em_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle PA = ctx.add_predicate("A", 0);
+    PredicateHandle PB = ctx.add_predicate("B", 0);
+    FormulaHandle a = fb.predicate(PA, {}), na = fb.make_not(a);
+    FormulaHandle b = fb.predicate(PB, {}), nb = fb.make_not(b);
+    FormulaHandle aOr = fb.make_or(a, na);     // A∨¬A
+    FormulaHandle bOr = fb.make_or(b, nb);     // B∨¬B
+    FormulaHandle goal = fb.make_and(aOr, bOr);
+
+    auto branch = [&](FormulaHandle lit, FormulaHandle nlit, FormulaHandle orF) {
+        auto ax = std::make_unique<lce::Deriv>();
+        ax->conclusion = {lit, nlit};
+        ax->rule = lce::RAx{0, 1};
+        auto orr = std::make_unique<lce::Deriv>();
+        orr->conclusion = {orF};
+        orr->rule = lce::ROr{0, std::move(ax)};
+        return orr;
+    };
+
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::RAnd{/*principal=*/0, /*left_partition=*/{},
+                          branch(a, na, aOr), branch(b, nb, bOr)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
     test_excluded_middle_end_to_end();
+    test_conjunction_of_em_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

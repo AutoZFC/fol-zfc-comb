@@ -13,11 +13,13 @@
 // emits the linear (MLS1^X) steps Φ1 first, then the resource steps Φ2, so the
 // result is already in Thm-17 decomposed form (no reorganizer needed).
 //
-// SCOPE (K6.0 skeleton): only the simplest cut-free proof — ⊢ a∨ā via an
-// axiom under a single Or — is translated, to validate the end-to-end
-// integration (Deriv → Derivation → build_comb_proof → CombVerifier). The
-// general LK1→KS1 construction (HSW 2021 §VII) lands in K6.1+; every shape not
-// yet handled returns an explicit "not yet implemented" error.
+// SCOPE (K6.1, switch-free linear fragment): the propositional shapes that need
+// no switch sequence — a 2-literal axiom (RAx→Ai), a single-formula Or wrapper
+// (ROr), and an empty-context And (RAnd→Tu + branch composition). See
+// LKR_TO_KS1_DESIGN.md for the construction (HSW 2021 §VII.A, Lemma 20). The
+// switch sequence (non-empty ∧ context), multi-formula reconciliation,
+// quantifiers (K6.2), and weakening/contraction (K6.3) each return an explicit
+// phase-tagged "not yet implemented" error.
 
 #include "src/core/formula.h"
 #include "src/proof/ks1/derivation.h"
