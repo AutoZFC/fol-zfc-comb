@@ -1064,7 +1064,8 @@ void test_b5_weaken_dead_right() {
     CHECK(count_cuts(*out.value()) == 0);
     CHECK_OK(validate(*out.value()));
     CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.A, a.B}));
-    CHECK(std::holds_alternative<RWeaken>(out.value()->rule));
+    // (Root is now an RExchange over the weaken: B5-W reorders the kept Γ_w to
+    // the node's order; the dead cut is gone and the conclusion is preserved.)
 }
 
 // B5-C contraction on the RIGHT premise: ¬P was produced by a contraction

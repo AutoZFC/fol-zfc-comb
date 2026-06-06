@@ -212,6 +212,91 @@ void test_roundtrip_b2_and_or() {
     CHECK(roundtrip(ctx, b, G, *root));
 }
 
+// B2 UNDER EXCHANGE: the ∧-premise's principal A∧B is produced at position 0
+// and an RExchange moves it to the cut slot (last) — the shape NDtoLKR / prior
+// permutations produce. B2 must PEEL the exchange to see the ∧. (Red until
+// exchange-transparency lands; B2 looks at cut.left->rule = RExchange.)
+void test_roundtrip_b2_under_exchange() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle A  = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right;
+    FormulaHandle nA = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().left;
+    FormulaHandle B  = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().right;
+    FormulaHandle nB = b.to_nnf(parse_root(ctx, "B -> B")).get().as_compound().left;
+    FormulaHandle AandB  = b.to_nnf(b.make_and(A, B));
+    FormulaHandle nAornB = b.to_nnf(b.make_not(b.make_and(A, B)));
+    FormulaHandle AorB   = b.to_nnf(b.make_or(A, B));
+    FormulaHandle nBor   = b.to_nnf(b.make_or(nB, AorB));
+    FormulaHandle G      = b.to_nnf(b.make_or(nA, nBor));
+
+    // RAnd with A∧B at position 0 (principal 0); then exchange 0↔4 to the slot.
+    auto Lb = ax({nA, A}, 0, 1);
+    auto Lg = ax({nB, A, B, B}, 0, 2);
+    auto andN = std::make_unique<Deriv>();
+    andN->conclusion = {AandB, nB, A, B, nA};
+    andN->rule = RAnd{0, {4}, std::move(Lb), std::move(Lg)};
+    auto Lc = std::make_unique<Deriv>();
+    Lc->conclusion = {nA, nB, A, B, AandB};            // A∧B exchanged to last
+    Lc->rule = RExchange{0, 4, std::move(andN)};
+    auto Rc = std::make_unique<Deriv>();
+    Rc->conclusion = {nA, nB, A, B, nAornB};
+    Rc->rule = ROr{4, ax({nA, nB, A, B, nA, nB}, 2, 4)};
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {nA, nB, A, B};
+    cut->rule = RCut{AandB, std::move(Lc), std::move(Rc)};
+    auto c2 = std::make_unique<Deriv>();
+    c2->conclusion = {nA, nB, AorB};
+    c2->rule = ROr{2, std::move(cut)};
+    auto c1 = std::make_unique<Deriv>();
+    c1->conclusion = {nA, nBor};
+    c1->rule = ROr{1, std::move(c2)};
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {G};
+    root->rule = ROr{0, std::move(c1)};
+
+    CHECK(roundtrip(ctx, b, G, *root));
+}
+
+// B3 UNDER EXCHANGE: the ∀-premise's principal ∀x.P(x) is at position 0 and an
+// RExchange moves it to the cut slot. B3 must peel + rotate the instantiated
+// body from the ∀'s principal position to the cut slot.
+void test_roundtrip_b3_under_exchange() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle G    = parse_root(ctx, "forall y. (P(y) | ~P(y))");
+    FormulaHandle Gn   = b.to_nnf(G);
+    FormulaHandle bodyc = b.instantiate_quantifier_body(Gn.get().as_quantified().body, Term::fixed(0));
+    FormulaHandle Pc   = bodyc.get().as_compound().left;
+    FormulaHandle nPc  = bodyc.get().as_compound().right;
+    FormulaHandle faPx = b.to_nnf(parse_root(ctx, "forall x. P(x)"));
+    FormulaHandle Pd   = b.instantiate_quantifier_body(faPx.get().as_quantified().body, Term::fixed(1));
+    FormulaHandle exNPx = b.to_nnf(b.make_not(faPx));
+
+    // RForall with ∀x.P(x) at position 0; exchange 0↔2 to the cut slot.
+    auto La = ax({Pd, nPc, Pc}, 1, 2);
+    auto faN = std::make_unique<Deriv>();
+    faN->conclusion = {faPx, nPc, Pc};
+    faN->rule = RForall{0, 1, std::move(La)};
+    auto L = std::make_unique<Deriv>();
+    L->conclusion = {Pc, nPc, faPx};                   // ∀x.P(x) exchanged to last
+    L->rule = RExchange{0, 2, std::move(faN)};
+    auto Ra = ax({Pc, nPc, nPc}, 0, 1);
+    auto R  = std::make_unique<Deriv>();
+    R->conclusion = {Pc, nPc, exNPx};
+    R->rule = RExists{2, Term::fixed(0), std::move(Ra)};
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {Pc, nPc};
+    cut->rule = RCut{faPx, std::move(L), std::move(R)};
+    auto orN = std::make_unique<Deriv>();
+    orN->conclusion = {bodyc};
+    orN->rule = ROr{0, std::move(cut)};
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {Gn};
+    root->rule = RForall{0, 0, std::move(orN)};
+
+    CHECK(roundtrip(ctx, b, G, *root));
+}
+
 // Cut-free input round-trips unchanged (sanity: build/emit/verify baseline).
 void test_roundtrip_cut_free() {
     Runtime rt; rt.load("axiom dummy: forall x. P(x)");
@@ -233,6 +318,8 @@ int main() {
     test_roundtrip_b1_dead_cut();
     test_roundtrip_b2_and_or();
     test_roundtrip_b3_forall_exists();
+    test_roundtrip_b2_under_exchange();
+    test_roundtrip_b3_under_exchange();
     std::cout << "reduce_roundtrip_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

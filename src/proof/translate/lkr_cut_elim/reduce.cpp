@@ -4,6 +4,7 @@
 #include "src/proof/translate/lkr_cut_elim/validate.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
@@ -444,6 +445,54 @@ std::vector<std::size_t> match_perm(const std::vector<FormulaHandle>& src,
     return m;
 }
 
+// --- exchange peeling (shared by the principal cases B2/B3/B5 and B4) ----
+//
+// `remap`/`cs` carry a cut premise's geometry after PEELING any leading
+// exchanges: remap[k] = the node position of the underlying rule's conclusion
+// position k; cs = φ's position within it. remap[cs] is the kNoPos sentinel.
+// Seeing the rule UNDER a φ-to-last exchange chain — not just the bare top
+// rule — is what lets every case fire on the shapes NDtoLKR / prior
+// permutations produce.
+constexpr std::size_t kNoPos = static_cast<std::size_t>(-1);
+
+struct Peeled {
+    const Deriv*              cur;     // underlying rule (exchanges stripped)
+    std::vector<std::size_t>  remap;   // cur position → node position (kNoPos at cs)
+    std::size_t               cs;      // φ position in cur
+};
+
+inline Peeled peel_exchanges(const Deriv* prem, std::size_t base) {
+    std::vector<std::size_t> remap(prem->conclusion.size());
+    for (std::size_t k = 0; k < remap.size(); ++k) remap[k] = base + k;
+    std::size_t cs = prem->conclusion.size() - 1;   // φ is at the last position
+    remap[cs] = kNoPos;
+    const Deriv* cur = prem;
+    while (const RExchange* r = std::get_if<RExchange>(&cur->rule)) {
+        auto sw = [&](std::size_t x) { return x == r->i ? r->j : (x == r->j ? r->i : x); };
+        std::vector<std::size_t> nr(remap.size());
+        for (std::size_t k = 0; k < nr.size(); ++k) nr[k] = remap[sw(k)];
+        remap = std::move(nr);
+        cs = sw(cs);
+        cur = r->child.get();
+    }
+    return {cur, std::move(remap), cs};
+}
+
+// Bubble position `from` to the last position via adjacent exchanges (move a
+// rule's principal-position output to a premise's cut slot).
+inline DerivPtr rotate_to_back(DerivPtr d, std::size_t from) {
+    const std::size_t last = d->conclusion.size() - 1;
+    DerivPtr cur = std::move(d);
+    for (std::size_t k = from; k < last; ++k) {
+        auto node = std::make_unique<Deriv>();
+        node->conclusion = cur->conclusion;
+        std::swap(node->conclusion[k], node->conclusion[k + 1]);
+        node->rule = RExchange{k, k + 1, std::move(cur)};
+        cur = std::move(node);
+    }
+    return cur;
+}
+
 // --- B2: principal logical, ∧ vs ∨ (§5.3). -------------------------------
 //
 // Cut on φ where one premise ends in (∧) producing φ=β∧γ and the other ends
@@ -456,26 +505,40 @@ std::vector<std::size_t> match_perm(const std::vector<FormulaHandle>& src,
 // for both orientations (φ=∧ left, or φ=∨ left): only node order differs, and
 // the final reorder absorbs it. d(β),d(γ) < d(β∧γ). ✓
 DerivPtr try_b2_and_or(const Deriv& cut_node, const RCut& cut) {
-    const RAnd* andR = std::get_if<RAnd>(&cut.left->rule);
-    const ROr*  orR  = std::get_if<ROr>(&cut.right->rule);
-    const Deriv* andD = cut.left.get();
-    const Deriv* orD  = cut.right.get();
-    if (!andR || !orR) {                 // try the other orientation (φ=∨ left)
-        andR = std::get_if<RAnd>(&cut.right->rule);
-        orR  = std::get_if<ROr>(&cut.left->rule);
-        andD = cut.right.get();
-        orD  = cut.left.get();
+    // Peel φ-to-last exchanges so a ∧/∨ principal on the cut formula UNDER them
+    // is seen. cs = φ/φ̄ position within the peeled rule's conclusion.
+    Peeled pl = peel_exchanges(cut.left.get(),  0);
+    Peeled pr = peel_exchanges(cut.right.get(), 0);
+    const RAnd* andR = std::get_if<RAnd>(&pl.cur->rule);
+    const ROr*  orR  = std::get_if<ROr>(&pr.cur->rule);
+    std::size_t and_cs = pl.cs, or_cs = pr.cs;
+    if (!andR || !orR) {                 // other orientation (∨ left, ∧ right)
+        andR = std::get_if<RAnd>(&pr.cur->rule);
+        orR  = std::get_if<ROr>(&pl.cur->rule);
+        and_cs = pr.cs; or_cs = pl.cs;
     }
     if (!andR || !orR) return nullptr;   // not an ∧-vs-∨ principal cut.
 
-    // The ∧/∨ must be principal: it sits at the premise's last position (the
-    // cut slot). RAnd/ROr.principal is that slot iff it equals |Γ_side|.
-    if (andR->principal != andD->conclusion.size() - 1) return nullptr;
-    if (orR->principal  != orD->conclusion.size()  - 1) return nullptr;
+    if (andR->principal != and_cs) return nullptr;   // ∧ principal on φ
+    if (orR->principal  != or_cs)  return nullptr;   // ∨ principal on φ̄
 
     const Deriv* Lb = andR->left.get();      // Π₁ ++ {β}
     const Deriv* Lg = andR->right.get();     // Π₂ ++ {γ}
-    const Deriv* Oc = orR->child.get();      // C_∨ ++ {β̄, γ̄}
+
+    // Normalize the ∨-child to canonical C_∨ ++ {β̄, γ̄}: ROr puts β̄ at the
+    // principal position or_cs and γ̄ at the end; move β̄ to size-2 if needed.
+    const Deriv* OcRaw = orR->child.get();
+    const std::size_t ocsz = OcRaw->conclusion.size();
+    DerivPtr Oc_owned;
+    if (or_cs == ocsz - 2) {
+        Oc_owned = clone(*OcRaw);
+    } else {
+        Oc_owned = std::make_unique<Deriv>();
+        Oc_owned->conclusion = OcRaw->conclusion;
+        std::swap(Oc_owned->conclusion[or_cs], Oc_owned->conclusion[ocsz - 2]);
+        Oc_owned->rule = RExchange{or_cs, ocsz - 2, clone(*OcRaw)};
+    }
+    const Deriv* Oc = Oc_owned.get();        // C_∨ ++ {β̄, γ̄}
     const std::size_t cv = Oc->conclusion.size() - 2;   // |C_∨|
 
     const std::vector<FormulaHandle>& LbC = Lb->conclusion;
@@ -607,42 +670,54 @@ DerivPtr freshen_subst(const Deriv& d, Rename rn, var_index a, const Term& t,
 
 DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
                               FormulaBuilder& b) {
-    const RForall* fa = std::get_if<RForall>(&cut.left->rule);
-    const RExists* ex = std::get_if<RExists>(&cut.right->rule);
-    const Deriv* faD = cut.left.get();
-    const Deriv* exD = cut.right.get();
+    // Peel φ-to-last exchanges so a ∀/∃ principal under them is seen.
+    Peeled pl = peel_exchanges(cut.left.get(),  0);
+    Peeled pr = peel_exchanges(cut.right.get(), 0);
+    const RForall* fa = std::get_if<RForall>(&pl.cur->rule);
+    const RExists* ex = std::get_if<RExists>(&pr.cur->rule);
     bool fa_on_left = true;
     if (!fa || !ex) {
-        fa = std::get_if<RForall>(&cut.right->rule);
-        ex = std::get_if<RExists>(&cut.left->rule);
-        faD = cut.right.get();
-        exD = cut.left.get();
+        fa = std::get_if<RForall>(&pr.cur->rule);
+        ex = std::get_if<RExists>(&pl.cur->rule);
         fa_on_left = false;
     }
     if (!fa || !ex) return nullptr;
-    // Principal: the ∀ / ∃ is the cut slot (last position of its premise).
-    if (fa->principal != faD->conclusion.size() - 1) return nullptr;
-    if (ex->principal != exD->conclusion.size() - 1) return nullptr;
+    const std::size_t fa_cs = fa_on_left ? pl.cs : pr.cs;
+    const std::size_t ex_cs = fa_on_left ? pr.cs : pl.cs;
+    if (fa->principal != fa_cs) return nullptr;   // ∀ principal on φ
+    if (ex->principal != ex_cs) return nullptr;   // ∃ principal on φ̄
 
     // Fresh floor: above every fixed var in Lc and the witness t.
     std::size_t fresh = fa->eigen + 1;
     for (FormulaHandle h : fa->child->conclusion) collect_max_fixed_formula(h, fresh);
     collect_max_fixed_term(ex->witness, fresh);
 
-    // Lc' = Lc with a:=t (rectified). Concl = Γ_fa ++ {β[x:=t]}.
+    // Lc' = Lc with a:=t (rectified): the instantiated body β[x:=t] sits at the
+    // ∀'s principal position (fa->principal), NOT the end — rotate it to the
+    // cut slot. Likewise β̄[x:=t] is at the ∃'s principal in Rc.
     DerivPtr Lcp = freshen_subst(*fa->child, Rename{}, fa->eigen, ex->witness, fresh, b);
-    DerivPtr Rc  = clone(*ex->child);   // Γ_ex ++ {β̄[x:=t]}
+    Lcp = rotate_to_back(std::move(Lcp), fa->principal);
+    DerivPtr Rc  = clone(*ex->child);
+    Rc  = rotate_to_back(std::move(Rc), ex->principal);
 
+    // Build the residual cut with its NATURAL mult conclusion Γ_fa ++ Γ_ex,
+    // then reorder to cut_node.conclusion (the peeled exchanges permuted Γ).
     auto out = std::make_unique<Deriv>();
-    out->conclusion = cut_node.conclusion;
     if (fa_on_left) {
         FormulaHandle cf = Lcp->conclusion.back();      // β[x:=t]
+        out->conclusion.assign(Lcp->conclusion.begin(), Lcp->conclusion.end() - 1);
+        out->conclusion.insert(out->conclusion.end(),
+                               Rc->conclusion.begin(), Rc->conclusion.end() - 1);
         out->rule = RCut{cf, std::move(Lcp), std::move(Rc)};
     } else {
         FormulaHandle cf = Rc->conclusion.back();        // β̄[x:=t]
+        out->conclusion.assign(Rc->conclusion.begin(), Rc->conclusion.end() - 1);
+        out->conclusion.insert(out->conclusion.end(),
+                               Lcp->conclusion.begin(), Lcp->conclusion.end() - 1);
         out->rule = RCut{cf, std::move(Rc), std::move(Lcp)};
     }
-    return out;
+    auto swaps = selection_swaps(match_perm(out->conclusion, cut_node.conclusion));
+    return apply_swaps(std::move(out), swaps);
 }
 
 // --- B4: permutation / commutative case (§5.4). --------------------------
@@ -682,42 +757,6 @@ DerivPtr cut_out_and_reorder(const Deriv* prem, FormulaHandle phi,
                           other->conclusion.begin(), other->conclusion.end() - 1);
     nc->rule = RCut{phi, std::move(px), clone(*other)};
     return apply_swaps(std::move(nc), selection_swaps(match_perm(nc->conclusion, target)));
-}
-
-// `remap`/`cs` carry the cut premise's geometry after PEELING any leading
-// exchanges (see peel_exchanges): remap[k] = the node position of the under-
-// lying rule's conclusion position k; cs = φ's position within it. remap[cs]
-// is the invalid sentinel below (φ has no node position — it is the cut slot,
-// consumed by the cut). Permuting past the rule UNDER an exchange chain — not
-// just a bare top rule — is what lets B4 drive an appending rule (ROr / RAnd /
-// RDuplicate / quantifier) over a NON-axiom rule, the deep-chain case.
-constexpr std::size_t kNoPos = static_cast<std::size_t>(-1);
-
-struct Peeled {
-    const Deriv*              cur;     // underlying rule (exchanges stripped)
-    std::vector<std::size_t>  remap;   // cur position → node position (kNoPos at cs)
-    std::size_t               cs;      // φ position in cur
-};
-
-// Peel all leading RExchange nodes off `prem`, folding their permutations into
-// `remap`. `base` is the premise's offset into node (0 left, |Γ_L| right). The
-// φ-to-last exchanges inserted by cut_out_and_reorder, and any clean side
-// exchanges, are absorbed transparently — the cut permutes past them.
-Peeled peel_exchanges(const Deriv* prem, std::size_t base) {
-    std::vector<std::size_t> remap(prem->conclusion.size());
-    for (std::size_t k = 0; k < remap.size(); ++k) remap[k] = base + k;
-    std::size_t cs = prem->conclusion.size() - 1;   // φ is at the last position
-    remap[cs] = kNoPos;
-    const Deriv* cur = prem;
-    while (const RExchange* r = std::get_if<RExchange>(&cur->rule)) {
-        auto sw = [&](std::size_t x) { return x == r->i ? r->j : (x == r->j ? r->i : x); };
-        std::vector<std::size_t> nr(remap.size());
-        for (std::size_t k = 0; k < nr.size(); ++k) nr[k] = remap[sw(k)];
-        remap = std::move(nr);
-        cs = sw(cs);
-        cur = r->child.get();
-    }
-    return {cur, std::move(remap), cs};
 }
 
 // Permute the cut past a UNARY rule R = `cur`'s top rule (exchanges already
@@ -815,8 +854,8 @@ DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* cur,
     const Formula& f = node[remap[a->principal]].get();   // α∧γ
     FormulaHandle alpha = f.as_compound().left, gamma = f.as_compound().right;
 
-    bool cs_in_lp = false;
-    for (std::size_t p : a->left_partition) if (p == cs) { cs_in_lp = true; break; }
+    bool into_left = false;
+    for (std::size_t p : a->left_partition) if (p == cs) { into_left = true; break; }
 
     // node positions of `cur`'s left-partition slice.
     std::vector<bool> in_lp_node(node.size(), false);
@@ -825,30 +864,92 @@ DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* cur,
     // `other`'s Γ occupies a contiguous block: the end of node if `cur` is the
     // left premise, the start otherwise (cur's own Γ stays within its block).
     const std::size_t other_base = on_left ? (node.size() - og) : 0;
+    const std::size_t prin = remap[a->principal];
 
-    // Decide which branch the cut formula (and `other`'s Γ) flow into.
-    auto build = [&](bool into_left) -> DerivPtr {
-        const Deriv* into  = into_left ? a->left.get()  : a->right.get();
-        FormulaHandle tail = into_left ? alpha : gamma;
-        std::vector<std::size_t> part;          // = the new left_partition
-        std::vector<FormulaHandle> target;
-        for (std::size_t k = 0; k < node.size(); ++k) {
-            if (k == remap[a->principal]) continue;
-            bool in_left_branch = in_lp_node[k];
-            if (k >= other_base && k < other_base + og) in_left_branch = into_left;
-            if (in_left_branch) part.push_back(k);
-            if (in_left_branch == into_left) target.push_back(node[k]);
-        }
-        target.push_back(tail);
-        DerivPtr cutd = cut_out_and_reorder(into, cut_formula, other, target);
-        auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        if (into_left)
-            out->rule = RAnd{remap[a->principal], part, std::move(cutd), clone(*a->right)};
-        else
-            out->rule = RAnd{remap[a->principal], part, clone(*a->left), std::move(cutd)};
-        return out;
+    // Partition node's non-principal positions into the two branches: `other`'s
+    // Γ joins the cut formula's branch (into_left); the rest keep their side.
+    auto branch = [&](std::size_t k) -> bool {   // true = left branch
+        if (k >= other_base && k < other_base + og) return into_left;
+        return in_lp_node[k];
     };
-    return build(cs_in_lp);
+    std::vector<std::size_t> left_pos, right_pos;
+    std::vector<FormulaHandle> left_tgt, right_tgt;
+    for (std::size_t k = 0; k < node.size(); ++k) {
+        if (k == prin) continue;
+        if (branch(k)) { left_pos.push_back(k);  left_tgt.push_back(node[k]); }
+        else           { right_pos.push_back(k); right_tgt.push_back(node[k]); }
+    }
+    left_tgt.push_back(alpha);
+    right_tgt.push_back(gamma);
+
+    // The cut routes into the cut formula's branch (`into`); the OTHER branch is
+    // untouched but must be REORDERED to node order — validate reconstructs each
+    // child from the partition's NODE positions, which differ from the ∧'s own
+    // order once exchanges have been peeled (remap ≠ identity).
+    const Deriv* into = into_left ? a->left.get() : a->right.get();
+    const Deriv* keep = into_left ? a->right.get() : a->left.get();
+    const std::vector<FormulaHandle>& into_tgt = into_left ? left_tgt : right_tgt;
+    const std::vector<FormulaHandle>& keep_tgt = into_left ? right_tgt : left_tgt;
+
+    DerivPtr cutd = cut_out_and_reorder(into, cut_formula, other, into_tgt);
+    DerivPtr keptd = apply_swaps(clone(*keep),
+                       selection_swaps(match_perm(keep->conclusion, keep_tgt)));
+
+    auto out = std::make_unique<Deriv>(); out->conclusion = node;
+    if (into_left)
+        out->rule = RAnd{prin, left_pos, std::move(cutd), std::move(keptd)};
+    else
+        out->rule = RAnd{prin, left_pos, std::move(keptd), std::move(cutd)};
+    return out;
+}
+
+// Permute the cut past a binary RCut = `cur`'s top rule (a LOWER-degree cut in
+// a premise; exchanges peeled). The cut formula ψ sits in one positional side
+// (Γ_A | Γ_B) of the inner θ-cut; route the outer cut into that side, re-apply
+// the inner cut, reorder to `target_node`. Only fires when degree(θ) <
+// degree(ψ) — an equal/higher inner cut is a deeper max-degree cut, picked
+// first by find_topmost.
+DerivPtr try_b4_cut(const std::vector<FormulaHandle>& target_node, const Deriv* cur,
+                    std::size_t cs, FormulaHandle cut_formula, const Deriv* other) {
+    const RCut* tc = std::get_if<RCut>(&cur->rule);
+    if (!tc) return nullptr;
+    if (degree(tc->cut_formula) >= degree(cut_formula)) return nullptr;
+
+    const Deriv* A = tc->left.get();              // Γ_A ++ {θ}
+    const Deriv* B = tc->right.get();             // Γ_B ++ {θ̄}
+    const std::size_t ga = A->conclusion.size() - 1;
+    const FormulaHandle theta = tc->cut_formula;
+
+    const bool into_left = cs < ga;               // ψ in Γ_A?
+    const Deriv* into = into_left ? A : B;
+    const Deriv* keep = into_left ? B : A;
+    const std::size_t psi_pos = into_left ? cs : (cs - ga);   // ψ in into's context
+
+    // target_branch = (into context minus ψ) ++ Γ_O ++ {tail}, tail = θ / θ̄.
+    const FormulaHandle tail = into->conclusion.back();
+    std::vector<FormulaHandle> tb;
+    for (std::size_t k = 0; k + 1 < into->conclusion.size(); ++k)
+        if (k != psi_pos) tb.push_back(into->conclusion[k]);
+    for (std::size_t k = 0; k + 1 < other->conclusion.size(); ++k)
+        tb.push_back(other->conclusion[k]);
+    tb.push_back(tail);
+    DerivPtr nbr = cut_out_and_reorder(into, cut_formula, other, tb);
+
+    // Re-apply the inner cut; natural node = (branch minus tail) ++ Γ_keep.
+    std::vector<FormulaHandle> nb(nbr->conclusion.begin(), nbr->conclusion.end() - 1);
+    std::vector<FormulaHandle> kg(keep->conclusion.begin(), keep->conclusion.end() - 1);
+    auto out = std::make_unique<Deriv>();
+    if (into_left) {
+        out->conclusion = nb;
+        out->conclusion.insert(out->conclusion.end(), kg.begin(), kg.end());
+        out->rule = RCut{theta, std::move(nbr), clone(*keep)};
+    } else {
+        out->conclusion = kg;
+        out->conclusion.insert(out->conclusion.end(), nb.begin(), nb.end());
+        out->rule = RCut{theta, clone(*keep), std::move(nbr)};
+    }
+    auto swaps = selection_swaps(match_perm(out->conclusion, target_node));
+    return apply_swaps(std::move(out), swaps);
 }
 
 DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& b) {
@@ -863,6 +964,8 @@ DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& 
     if (auto out = try_b4_and(node, L.cur, L.remap, L.cs, cut.cut_formula,
                               cut.right.get(), /*on_left=*/true))
         return out;
+    if (auto out = try_b4_cut(node, L.cur, L.cs, cut.cut_formula, cut.right.get()))
+        return out;
 
     Peeled Rt = peel_exchanges(cut.right.get(), gl);
     if (auto out = try_b4_unary(node, Rt.cur, Rt.remap, Rt.cs, phibar,
@@ -870,6 +973,8 @@ DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& 
         return out;
     if (auto out = try_b4_and(node, Rt.cur, Rt.remap, Rt.cs, phibar,
                               cut.left.get(), /*on_left=*/false))
+        return out;
+    if (auto out = try_b4_cut(node, Rt.cur, Rt.cs, phibar, cut.left.get()))
         return out;
     return nullptr;
 }
@@ -889,55 +994,50 @@ DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& 
 // child up to the multiplicative conclusion Γ_L ++ Γ_R. The cut vanishes.
 DerivPtr try_b5_weaken_dead(const Deriv& cut_node, const RCut& cut,
                             bool w_on_left) {
-    const Deriv* w_side = w_on_left ? cut.left.get() : cut.right.get();
-    const RWeaken* w = std::get_if<RWeaken>(&w_side->rule);
+    // Peel φ-to-last exchanges so an RWeaken introducing the cut formula under
+    // them is seen.
+    Peeled pw = peel_exchanges(w_on_left ? cut.left.get() : cut.right.get(), 0);
+    const RWeaken* w = std::get_if<RWeaken>(&pw.cur->rule);
     if (!w) return nullptr;
-    const std::size_t cs = w_side->conclusion.size() - 1;   // cut slot
-    if (w->idx != cs) return nullptr;     // weakening a context formula → B4.
+    if (w->idx != pw.cs) return nullptr;   // weakening a context formula → B4.
 
-    const std::size_t gl = cut.left->conclusion.size() - 1;
-    const std::size_t gr = cut.right->conclusion.size() - 1;
-    const std::vector<FormulaHandle>& full = cut_node.conclusion;  // Γ_L ++ Γ_R
+    // The W-premise's child proves Γ_w (its context, peeled order); the cut is
+    // dead. Weaken Γ_w up to a permutation of cut_node.conclusion (adding the
+    // discarded side's Γ = the multiset difference), then reorder.
+    const Deriv* child = w->child.get();
+    const std::vector<FormulaHandle>& gamma_w = child->conclusion;
+    std::vector<FormulaHandle> to_add;
+    {
+        std::vector<bool> used(gamma_w.size(), false);
+        for (FormulaHandle h : cut_node.conclusion) {
+            bool matched = false;
+            for (std::size_t k = 0; k < gamma_w.size(); ++k)
+                if (!used[k] && gamma_w[k] == h) { used[k] = true; matched = true; break; }
+            if (!matched) to_add.push_back(h);
+        }
+    }
+    std::vector<FormulaHandle> N = gamma_w;                 // = Γ_w ++ to_add
+    N.insert(N.end(), to_add.begin(), to_add.end());
 
-    // The W-premise's child proves Γ_side; weaken in the OTHER side's Γ.
-    std::size_t lo, hi;
-    if (w_on_left) { lo = gl; hi = gl + gr; }   // keep Γ_L, weaken Γ_R back in
-    else           { lo = 0;  hi = gl;      }   // keep Γ_R, weaken Γ_L back in
-
-    std::vector<std::size_t> drop_idxs;          // descending
-    for (std::size_t i = hi; i-- > lo; ) drop_idxs.push_back(i);
-
+    std::vector<std::size_t> drop;                          // descending
+    for (std::size_t i = N.size(); i-- > gamma_w.size(); ) drop.push_back(i);
     std::vector<std::vector<FormulaHandle>> concls;
-    concls.push_back(full);
-    for (std::size_t d : drop_idxs) {
+    concls.push_back(N);
+    for (std::size_t d : drop) {
         std::vector<FormulaHandle> next = concls.back();
         next.erase(next.begin() + d);
         concls.push_back(std::move(next));
     }
-    // concls.back() == child->conclusion (Γ_side).
-
-    DerivPtr cur = clone(*w->child);
-    for (std::size_t k = drop_idxs.size(); k-- > 0; ) {
+    DerivPtr cur = clone(*child);
+    for (std::size_t k = drop.size(); k-- > 0; ) {
         auto node = std::make_unique<Deriv>();
         node->conclusion = concls[k];
-        node->rule = RWeaken{drop_idxs[k], std::move(cur)};
+        node->rule = RWeaken{drop[k], std::move(cur)};
         cur = std::move(node);
     }
-    return cur;   // conclusion == cut_node.conclusion
-}
-
-// Bubble position `from` to the last position via adjacent exchanges.
-DerivPtr rotate_to_back(DerivPtr d, std::size_t from) {
-    const std::size_t last = d->conclusion.size() - 1;
-    DerivPtr cur = std::move(d);
-    for (std::size_t k = from; k < last; ++k) {
-        auto node = std::make_unique<Deriv>();
-        node->conclusion = cur->conclusion;
-        std::swap(node->conclusion[k], node->conclusion[k + 1]);
-        node->rule = RExchange{k, k + 1, std::move(cur)};
-        cur = std::move(node);
-    }
-    return cur;
+    // cur.conclusion == N (a permutation of cut_node.conclusion); reorder.
+    auto swaps = selection_swaps(match_perm(cur->conclusion, cut_node.conclusion));
+    return apply_swaps(std::move(cur), swaps);
 }
 
 // --- B5-C: Contraction on the cut. ---------------------------------------
@@ -955,77 +1055,55 @@ DerivPtr rotate_to_back(DerivPtr d, std::size_t from) {
 // The two new cuts keep the degree but are pushed strictly upward (they cut
 // against C2, the contraction's premise — strictly smaller rank), so the
 // lexicographic (degree, rank) measure still descends.
-DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut,
-                            bool dup_on_left) {
-    const Deriv* dup_side = dup_on_left ? cut.left.get() : cut.right.get();
-    const RDuplicate* dup = std::get_if<RDuplicate>(&dup_side->rule);
-    if (!dup) return nullptr;
-    const std::size_t cs = dup_side->conclusion.size() - 1;   // cut slot
-    if (dup->src != cs) return nullptr;   // duplicating a context formula → B4.
-
-    const std::size_t gl = cut.left->conclusion.size() - 1;   // |Γ_L|
-    const std::size_t gr = cut.right->conclusion.size() - 1;  // |Γ_R|
-    const FormulaHandle phi = cut.cut_formula;
-    const Deriv* C2 = dup->child.get();    // proves Γ_C ++ {ψ, ψ}
-
-    if (dup_on_left) {
-        // Contraction on the LEFT premise: C2 = Γ_L ++ {φ, φ}, O = Γ_R ++ {φ̄}.
-        const Deriv* O = cut.right.get();
-        // cut1 = RCut{φ, C2, O}: node = Γ_L ++ {φ} ++ Γ_R (φ left in the middle).
-        std::vector<FormulaHandle> n1(C2->conclusion.begin(), C2->conclusion.end() - 1);
-        n1.insert(n1.end(), O->conclusion.begin(), O->conclusion.end() - 1);
-        auto cut1 = std::make_unique<Deriv>();
-        cut1->conclusion = std::move(n1);
-        cut1->rule = RCut{phi, clone(*C2), clone(*O)};
-        // Rotate the residual φ (at position gl) to the back → Γ_L ++ Γ_R ++ {φ}.
-        DerivPtr cut1r = rotate_to_back(std::move(cut1), gl);
-        // cut2 = RCut{φ, cut1r, O}: node = Γ_L ++ Γ_R ++ Γ_R (extra Γ_R at end).
-        std::vector<FormulaHandle> n2(cut1r->conclusion.begin(), cut1r->conclusion.end() - 1);
-        n2.insert(n2.end(), O->conclusion.begin(), O->conclusion.end() - 1);
-        auto cut2 = std::make_unique<Deriv>();
-        cut2->conclusion = std::move(n2);
-        cut2->rule = RCut{phi, std::move(cut1r), clone(*O)};
-        // Fold the trailing Γ_R copy into the kept Γ_R (positions gl..gl+gr-1).
-        DerivPtr cur = std::move(cut2);
-        for (std::size_t j = gr; j-- > 0; ) {
-            auto node = std::make_unique<Deriv>();
-            node->conclusion = cur->conclusion;
-            node->conclusion.pop_back();
-            node->rule = RDuplicate{gl + j, std::move(cur)};
-            cur = std::move(node);
-        }
-        return cur;   // conclusion == Γ_L ++ Γ_R
-    } else {
-        // Contraction on the RIGHT premise: C2 = Γ_R ++ {φ̄, φ̄}, O = Γ_L ++ {φ}.
-        const Deriv* O = cut.left.get();
-        // cut1 = RCut{φ, O, C2}: node = Γ_L ++ Γ_R ++ {φ̄} (φ̄ already at back).
-        std::vector<FormulaHandle> n1(O->conclusion.begin(), O->conclusion.end() - 1);
-        n1.insert(n1.end(), C2->conclusion.begin(), C2->conclusion.end() - 1);
-        auto cut1 = std::make_unique<Deriv>();
-        cut1->conclusion = std::move(n1);
-        cut1->rule = RCut{phi, clone(*O), clone(*C2)};
-        // cut2 = RCut{φ, O, cut1}: node = Γ_L ++ Γ_L ++ Γ_R (extra Γ_L in middle).
-        std::vector<FormulaHandle> n2(O->conclusion.begin(), O->conclusion.end() - 1);
-        n2.insert(n2.end(), cut1->conclusion.begin(), cut1->conclusion.end() - 1);
-        auto cut2 = std::make_unique<Deriv>();
-        cut2->conclusion = std::move(n2);
-        cut2->rule = RCut{phi, clone(*O), std::move(cut1)};
-        // Reorder Γ_L ++ Γ_L ++ Γ_R → Γ_L ++ Γ_R ++ Γ_L (extra Γ_L at the end).
-        std::vector<std::size_t> m(2 * gl + gr);
-        for (std::size_t t = 0; t < gl; ++t) m[t]           = t;            // keep Γ_L
-        for (std::size_t t = 0; t < gr; ++t) m[gl + t]      = 2 * gl + t;   // Γ_R block
-        for (std::size_t t = 0; t < gl; ++t) m[gl + gr + t] = gl + t;       // spare Γ_L
-        DerivPtr cur = apply_swaps(std::move(cut2), selection_swaps(m));
-        // Fold the trailing Γ_L copy into the kept Γ_L (positions 0..gl-1).
-        for (std::size_t j = gl; j-- > 0; ) {
-            auto node = std::make_unique<Deriv>();
-            node->conclusion = cur->conclusion;
-            node->conclusion.pop_back();
-            node->rule = RDuplicate{j, std::move(cur)};
-            cur = std::move(node);
-        }
-        return cur;   // conclusion == Γ_L ++ Γ_R
+DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
+    // Find the premise that ends in a contraction (RDuplicate{src==cut slot})
+    // under φ-to-last exchanges; the other premise is O. Unified across both
+    // orientations: the duplicated formula ψ (= φ or φ̄) is cut against O's dual
+    // ψ̄, and the natural result Γ_C ++ Γ_o is reordered to cut_node.conclusion.
+    Peeled pL = peel_exchanges(cut.left.get(),  0);
+    Peeled pR = peel_exchanges(cut.right.get(), 0);
+    const RDuplicate* dup = nullptr;
+    const Deriv* O = nullptr; std::size_t cs_dup = 0;
+    if (const auto* d = std::get_if<RDuplicate>(&pL.cur->rule); d && d->src == pL.cs) {
+        dup = d; cs_dup = pL.cs; O = cut.right.get();
+    } else if (const auto* d = std::get_if<RDuplicate>(&pR.cur->rule); d && d->src == pR.cs) {
+        dup = d; cs_dup = pR.cs; O = cut.left.get();
     }
+    if (!dup) return nullptr;
+
+    const Deriv* C2 = dup->child.get();           // Γ_C with ψ at cs_dup and last
+    const FormulaHandle psi = C2->conclusion.back();   // duplicated cut formula ψ
+    const std::size_t go = O->conclusion.size() - 1;   // |Γ_o|
+
+    // cut1 = RCut{ψ, C2, O}: consume C2's trailing ψ against O's ψ̄.
+    //   node1 = (C2 minus last ψ) ++ Γ_o = curD ++ Γ_o   (ψ still at cs_dup).
+    std::vector<FormulaHandle> n1(C2->conclusion.begin(), C2->conclusion.end() - 1);
+    n1.insert(n1.end(), O->conclusion.begin(), O->conclusion.end() - 1);
+    auto cut1 = std::make_unique<Deriv>();
+    cut1->conclusion = std::move(n1);
+    cut1->rule = RCut{psi, clone(*C2), clone(*O)};
+
+    // Rotate the residual ψ (at cs_dup) to the back, then cut it again against O.
+    DerivPtr cut1r = rotate_to_back(std::move(cut1), cs_dup);
+    std::vector<FormulaHandle> n2(cut1r->conclusion.begin(), cut1r->conclusion.end() - 1);
+    n2.insert(n2.end(), O->conclusion.begin(), O->conclusion.end() - 1);
+    auto cut2 = std::make_unique<Deriv>();
+    cut2->conclusion = std::move(n2);                   // (Γ_C ++ Γ_o) ++ Γ_o
+    cut2->rule = RCut{psi, std::move(cut1r), clone(*O)};
+
+    // Fold the trailing Γ_o copy into the kept one (kept block starts at |Γ_C|).
+    const std::size_t base_o = cut2->conclusion.size() - 2 * go;
+    DerivPtr cur = std::move(cut2);
+    for (std::size_t j = go; j-- > 0; ) {
+        auto node = std::make_unique<Deriv>();
+        node->conclusion = cur->conclusion;
+        node->conclusion.pop_back();
+        node->rule = RDuplicate{base_o + j, std::move(cur)};
+        cur = std::move(node);
+    }
+    // cur.conclusion == Γ_C ++ Γ_o (natural); reorder to cut_node.conclusion.
+    auto swaps = selection_swaps(match_perm(cur->conclusion, cut_node.conclusion));
+    return apply_swaps(std::move(cur), swaps);
 }
 
 // =========================================================================
@@ -1066,9 +1144,7 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
         return util::Result<DerivPtr>(std::move(out));
     if (auto out = try_b5_weaken_dead(cut_node, cut, /*w_on_left=*/false))
         return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b5_contraction(cut_node, cut, /*dup_on_left=*/true))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b5_contraction(cut_node, cut, /*dup_on_left=*/false))
+    if (auto out = try_b5_contraction(cut_node, cut))
         return util::Result<DerivPtr>(std::move(out));
 
     // B4 — permutation (cut formula is a side formula of a premise's rule).
@@ -1318,7 +1394,18 @@ util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root
 
     // Worklist loop: find topmost max-degree cut, attempt dispatch,
     // replace on success, give up on stub failure.
-    while (true) {
+    //
+    // Step cap (B6 backstop): Gentzen cut-elim is non-elementary worst-case and
+    // the contraction case (B5-C) duplicates subderivations, so a large proof
+    // can blow up or — if a permutation case ever cycles — loop. Cap the steps
+    // so eliminate_cuts always terminates; on the cap it returns the current
+    // valid (partially-reduced) tree. Override via LKR_CUT_ELIM_MAX_STEPS.
+    std::size_t max_steps = 200000;
+    if (const char* m = std::getenv("LKR_CUT_ELIM_MAX_STEPS")) {
+        long v = std::atol(m);
+        if (v > 0) max_steps = static_cast<std::size_t>(v);
+    }
+    for (std::size_t step = 0; step < max_steps; ++step) {
         auto cand = find_topmost_max_deg_cut(*current);
         if (!cand) break;  // no cuts remain.
 
@@ -1337,8 +1424,12 @@ util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root
 
         TRY_ASSIGN(new_tree, substitute_at(*current, cand->path,
                                             std::move(reduced).unwrap()));
+        // Fail-safe: a reduction must produce a structurally-valid tree. If a
+        // case has a bug on this shape, DON'T commit it — keep the last valid
+        // tree and stop (the residual cut stays; soundness preserved). Keeps
+        // eliminate_cuts total-and-sound while cases are being completed.
+        if (!validate(*new_tree).ok()) break;
         current = std::move(new_tree);
-        TRY(validate(*current));
     }
 
     // Any residual (irreducible, §7a) cut is still multiplicative; convert
