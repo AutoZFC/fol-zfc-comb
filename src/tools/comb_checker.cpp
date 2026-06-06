@@ -277,6 +277,14 @@ int main(int argc, char* argv[]) {
                      "[dep_header.fol.def ...] [-- dep_proof.fol.proof ...]\n";
         return 2;
     }
+
+    // Cut-elim is non-elementary worst-case (B5-C duplicates subderivations),
+    // so on big corpus proofs full elimination blows up. Default eliminate_cuts
+    // to a modest step budget for this bug-catcher tool so it stays interactive
+    // (it reports cutfree / residual / reverify_fail within the budget). Raise
+    // via LKR_CUT_ELIM_MAX_STEPS for deeper runs.
+    if (!std::getenv("LKR_CUT_ELIM_MAX_STEPS"))
+        setenv("LKR_CUT_ELIM_MAX_STEPS", "500", /*overwrite=*/0);
     std::string header_path = argv[1];
     std::string proof_path  = argv[2];
 
