@@ -323,6 +323,75 @@ void test_already_mult_passes_through() {
     CHECK(cut->cut_formula == Q);
 }
 
+// multiplicative_to_additive: a strict mult-Cut (Γ_L=[P], Γ_R=[R]) becomes an
+// additive cut on C=[P,R] whose premises are weakened up to C ++ {cut formula}.
+void test_mult_to_additive() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle P = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle R = b.to_nnf(parse_root(ctx, "R -> R")).get().as_compound().right;
+    FormulaHandle Q = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle dual_marker = P;   // validate ignores dual; reuse P.
+
+    // Mult-Cut: node=[P,R]; left=[P,Q]; right=[R, dual]; cut formula Q.
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {P, Q}; lefty->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {R, dual_marker}; righty->rule = RAx{0, 1};
+    auto mult_cut = std::make_unique<Deriv>();
+    mult_cut->conclusion = {P, R};   // Γ_L ++ Γ_R (strict mult, gl+gr = 2)
+    mult_cut->rule = RCut{Q, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*mult_cut));
+
+    auto out = multiplicative_to_additive(*mult_cut);
+    if (!out.ok()) {
+        std::cerr << "FAIL: m2a: " << out.error().to_string() << "\n";
+        ++g_failed; return;
+    }
+    auto* cut = std::get_if<RCut>(&out.value()->rule);
+    if (!cut) { std::cerr << "FAIL: m2a top is not a cut\n"; ++g_failed; return; }
+    // Additive shape: node concl unchanged; both premises = node ++ {cut/dual}.
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({P, R}));
+    CHECK(cut->cut_formula == Q);
+    CHECK(cut->left->conclusion  == std::vector<FormulaHandle>({P, R, Q}));
+    CHECK(cut->right->conclusion == std::vector<FormulaHandle>({P, R, dual_marker}));
+    // Premises reach their original concl via a Weakening (Γ_R / Γ_L dropped).
+    CHECK(std::holds_alternative<RWeaken>(cut->left->rule));
+    CHECK(std::holds_alternative<RWeaken>(cut->right->rule));
+    CHECK_OK(validate(*out.value()));
+    CHECK(count_cuts(*out.value()) == 1);
+}
+
+// Round-trip: additive → B0 (mult) → m2a (additive) is shape-stable and valid.
+void test_b0_then_m2a_roundtrip() {
+    Runtime rt;
+    rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context();
+    FormulaBuilder b(ctx);
+    FormulaHandle P = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle Q = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle dual_marker = P;
+
+    // Additive cut: node=[P]; left=[P,Q]; right=[P, dual].
+    auto lefty = std::make_unique<Deriv>();
+    lefty->conclusion = {P, Q}; lefty->rule = RAx{0, 1};
+    auto righty = std::make_unique<Deriv>();
+    righty->conclusion = {P, dual_marker}; righty->rule = RAx{0, 1};
+    auto add_cut = std::make_unique<Deriv>();
+    add_cut->conclusion = {P}; add_cut->rule = RCut{Q, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*add_cut));
+
+    auto mult = additive_to_multiplicative(*add_cut);
+    CHECK(mult.ok());
+    auto back = multiplicative_to_additive(*mult.value());
+    CHECK(back.ok());
+    CHECK_OK(validate(*back.value()));
+    CHECK(back.value()->conclusion == std::vector<FormulaHandle>({P}));
+    CHECK(count_cuts(*back.value()) == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -330,6 +399,8 @@ int main() {
     test_syllogism_cuts_become_mult();
     test_hand_built_additive_RCut_becomes_wrapped_mult();
     test_already_mult_passes_through();
+    test_mult_to_additive();
+    test_b0_then_m2a_roundtrip();
 
     std::cout << "b0_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

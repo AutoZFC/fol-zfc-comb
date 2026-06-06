@@ -41,4 +41,15 @@ namespace logic::proof::translate::lkr_cut_elim {
 
 util::Result<DerivPtr> additive_to_multiplicative(const Deriv& root);
 
+// Inverse of B0, for emit: rewrite every MULTIPLICATIVE RCut back to an
+// ADDITIVE one. The LKR (Cut) op the verifier replays is additive (both
+// premises share the conclusion's context), so a residual multiplicative cut
+// — the irreducible §7a residue eliminate_cuts leaves on axiom-citing proofs
+// — cannot be emitted directly. This pass weakens each mult premise up to the
+// shared context C = Γ_L ++ Γ_R (drop Γ_R from the left, Γ_L from the right)
+// and re-forms an additive RCut on C. Cut-free trees pass through unchanged.
+// Post-condition: every RCut in the output is additive; emit→LKRVerifier
+// accepts.
+util::Result<DerivPtr> multiplicative_to_additive(const Deriv& root);
+
 }  // namespace logic::proof::translate::lkr_cut_elim

@@ -1216,7 +1216,11 @@ util::Result<DerivPtr> splice_lemma(FormulaBuilder& b, const Deriv& node,
     for (std::size_t k = 0; k < C.size(); ++k)
         if (C[k] == phiL) { pos = k; break; }
     if (pos == C.size())
-        return MAKE_ERROR << "splice_lemma: φ_L not found in the citing sequent";
+        // The cached proof concludes a formula that does not appear in the
+        // citing sequent — the citation is of a different (e.g. wrapped-goal /
+        // axiom-dependent) form than this cut-free proof discharges. Treat as
+        // irreducible (§7a) rather than an error: leave the RLemma in place.
+        return util::Result<DerivPtr>(DerivPtr{});
 
     std::vector<FormulaHandle> gamma;            // C minus the φ_L slot (order kept)
     gamma.reserve(C.size() - 1);
@@ -1337,7 +1341,10 @@ util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root
         TRY(validate(*current));
     }
 
-    return util::Result<DerivPtr>(std::move(current));
+    // Any residual (irreducible, §7a) cut is still multiplicative; convert
+    // back to additive so the output emits to the additive LKR (Cut) and
+    // re-verifies. No-op when fully cut-free.
+    return multiplicative_to_additive(*current);
 }
 
 }  // namespace logic::proof::translate::lkr_cut_elim
