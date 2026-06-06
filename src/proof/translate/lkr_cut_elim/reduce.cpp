@@ -1110,6 +1110,201 @@ std::optional<CutCandidate> find_topmost_max_deg_cut(const Deriv& root) {
     return CutCandidate{std::move(result), max_deg};
 }
 
+// =========================================================================
+// Stage A — lemma inlining (CUT_ELIM_DESIGN §3, §7a).
+//
+// A proven theorem cited by RLemma carries a cached, cut-free, lemma-free
+// §11 proof of ⊢ φ_L. To discharge the citation, REPLAY that proof with the
+// citing node's other formulas Γ prepended as inert context: every spliced
+// sequent gains Γ; no rule inspects it; axioms/lemmas close ignoring it. The
+// result derives ⊢ Γ, φ_L with no Cut and no RLemma introduced.
+//
+// Axiom / schema citations (no cached proof) are IRREDUCIBLE (§7a) — left
+// untouched. They are the standard residue of the extended Hauptsatz.
+// =========================================================================
+
+namespace {
+
+// Greatest fixed-variable index used anywhere in `d` (conclusions, witnesses,
+// eigenvars), as a floor for fresh eigenvariable allocation during rectify.
+void collect_max_fixed_deriv(const Deriv& d, std::size_t& floor) {
+    for (FormulaHandle h : d.conclusion) collect_max_fixed_formula(h, floor);
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
+                      std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
+                      std::is_same_v<T, ROr> || std::is_same_v<T, RForall>) {
+            if constexpr (std::is_same_v<T, RForall>) floor = std::max(floor, r.eigen + 1);
+            collect_max_fixed_deriv(*r.child, floor);
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            collect_max_fixed_term(r.witness, floor);
+            collect_max_fixed_deriv(*r.child, floor);
+        } else if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
+            collect_max_fixed_deriv(*r.left, floor);
+            collect_max_fixed_deriv(*r.right, floor);
+        }
+        // RAx / ROne / RLemma: leaves, conclusion already scanned.
+    }, d.rule);
+}
+
+// Prepend `gamma` to every sequent of `d`, shifting all positional fields by
+// |gamma|. The §11 rules act on their (shifted) principal; gamma rides as
+// inert context. Binary rules (RAnd/RCut) route gamma entirely into the LEFT
+// premise (sound: context placement is free), so the right premise is cloned
+// unchanged. Lemma proofs are cut-free + lemma-free, so RCut/RLemma here are
+// for totality only.
+DerivPtr prepend_context(const Deriv& d, const std::vector<FormulaHandle>& gamma) {
+    const std::size_t g = gamma.size();
+    auto n = std::make_unique<Deriv>();
+    n->conclusion.reserve(g + d.conclusion.size());
+    n->conclusion.insert(n->conclusion.end(), gamma.begin(), gamma.end());
+    n->conclusion.insert(n->conclusion.end(), d.conclusion.begin(), d.conclusion.end());
+
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RAx>) {
+            n->rule = RAx{r.a + g, r.b + g};
+        } else if constexpr (std::is_same_v<T, ROne>) {
+            n->rule = ROne{r.idx + g};
+        } else if constexpr (std::is_same_v<T, RLemma>) {
+            n->rule = r;   // inert leaf; φ closes ignoring the shifted context.
+        } else if constexpr (std::is_same_v<T, RExchange>) {
+            n->rule = RExchange{r.i + g, r.j + g, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RWeaken>) {
+            n->rule = RWeaken{r.idx + g, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RDuplicate>) {
+            n->rule = RDuplicate{r.src + g, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RContract>) {
+            n->rule = RContract{r.i + g, r.j + g, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, ROr>) {
+            n->rule = ROr{r.principal + g, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RForall>) {
+            n->rule = RForall{r.principal + g, r.eigen, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            n->rule = RExists{r.principal + g, r.witness, prepend_context(*r.child, gamma)};
+        } else if constexpr (std::is_same_v<T, RAnd>) {
+            std::vector<std::size_t> part;
+            part.reserve(g + r.left_partition.size());
+            for (std::size_t k = 0; k < g; ++k) part.push_back(k);   // gamma → left branch
+            for (std::size_t p : r.left_partition) part.push_back(p + g);
+            n->rule = RAnd{r.principal + g, std::move(part),
+                           prepend_context(*r.left, gamma), clone(*r.right)};
+        } else if constexpr (std::is_same_v<T, RCut>) {
+            n->rule = RCut{r.cut_formula, prepend_context(*r.left, gamma), clone(*r.right)};
+        }
+    }, d.rule);
+    return n;
+}
+
+// Splice one proven-theorem RLemma node: replay `PL` (a cut-free proof of
+// ⊢ φ_L) with the node's other formulas as inert context, concluding the
+// node's own sequent. Returns nullptr if the citation is not inlinable
+// (schema / base-axiom — no cached proof).
+util::Result<DerivPtr> splice_lemma(FormulaBuilder& b, const Deriv& node,
+                                    const RLemma& lem, const LemmaProofs& lemmas) {
+    const AxiomRef* ax = std::get_if<AxiomRef>(&lem.target);
+    if (!ax) return util::Result<DerivPtr>(DerivPtr{});       // schema → irreducible.
+    auto it = lemmas.find(ax->sentence);
+    if (it == lemmas.end()) return util::Result<DerivPtr>(DerivPtr{});  // base axiom.
+    const Deriv* PL = it->second;
+    if (PL->conclusion.size() != 1)
+        return MAKE_ERROR << "splice_lemma: lemma proof goal is not a 1-formula sequent";
+    const FormulaHandle phiL = PL->conclusion[0];
+
+    const std::vector<FormulaHandle>& C = node.conclusion;
+    std::size_t pos = C.size();
+    for (std::size_t k = 0; k < C.size(); ++k)
+        if (C[k] == phiL) { pos = k; break; }
+    if (pos == C.size())
+        return MAKE_ERROR << "splice_lemma: φ_L not found in the citing sequent";
+
+    std::vector<FormulaHandle> gamma;            // C minus the φ_L slot (order kept)
+    gamma.reserve(C.size() - 1);
+    for (std::size_t k = 0; k < C.size(); ++k)
+        if (k != pos) gamma.push_back(C[k]);
+
+    // Rectify PL's eigenvars above every fixed var in gamma and PL, so the
+    // prepended context cannot capture an eigenvariable (§6). The a:=fixed(a)
+    // substitution is the identity; freshen_subst's job here is the renaming.
+    std::size_t fresh = 0;
+    for (FormulaHandle h : gamma) collect_max_fixed_formula(h, fresh);
+    collect_max_fixed_deriv(*PL, fresh);
+    DerivPtr rect = freshen_subst(*PL, Rename{}, /*a=*/0, Term::fixed(0), fresh, b);
+
+    DerivPtr spliced = prepend_context(*rect, gamma);   // concl = gamma ++ [φ_L]
+
+    // Reorder gamma ++ [φ_L] into C (move φ_L from the end to position `pos`).
+    const std::size_t n = C.size();
+    std::vector<std::size_t> m(n);
+    for (std::size_t t = 0; t < pos; ++t)       m[t] = t;
+    m[pos] = n - 1;                                       // φ_L (spliced last)
+    for (std::size_t t = pos + 1; t < n; ++t)   m[t] = t - 1;
+    return util::Result<DerivPtr>(apply_swaps(std::move(spliced), selection_swaps(m)));
+}
+
+// Rebuild `d`, splicing every inlinable proven-theorem RLemma. Cut-free lemma
+// proofs are themselves lemma-free, so one pass suffices (no fixpoint).
+util::Result<DerivPtr> inline_lemmas(FormulaBuilder& b, const Deriv& d,
+                                     const LemmaProofs& lemmas) {
+    if (const RLemma* lem = std::get_if<RLemma>(&d.rule)) {
+        TRY_ASSIGN(spliced, splice_lemma(b, d, *lem, lemmas));
+        if (spliced) return util::Result<DerivPtr>(std::move(spliced));
+        return util::Result<DerivPtr>(clone(d));          // not inlinable — keep.
+    }
+    auto n = std::make_unique<Deriv>();
+    n->conclusion = d.conclusion;
+    return std::visit([&](auto&& r) -> util::Result<DerivPtr> {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RAx> || std::is_same_v<T, ROne>) {
+            n->rule = r;
+        } else if constexpr (std::is_same_v<T, RExchange>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RExchange{r.i, r.j, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RWeaken>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RWeaken{r.idx, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RDuplicate>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RDuplicate{r.src, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RContract>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RContract{r.i, r.j, std::move(c)};
+        } else if constexpr (std::is_same_v<T, ROr>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = ROr{r.principal, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RForall>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RForall{r.principal, r.eigen, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            TRY_ASSIGN(c, inline_lemmas(b, *r.child, lemmas));
+            n->rule = RExists{r.principal, r.witness, std::move(c)};
+        } else if constexpr (std::is_same_v<T, RAnd>) {
+            TRY_ASSIGN(l, inline_lemmas(b, *r.left, lemmas));
+            TRY_ASSIGN(rr, inline_lemmas(b, *r.right, lemmas));
+            n->rule = RAnd{r.principal, r.left_partition, std::move(l), std::move(rr)};
+        } else if constexpr (std::is_same_v<T, RCut>) {
+            TRY_ASSIGN(l, inline_lemmas(b, *r.left, lemmas));
+            TRY_ASSIGN(rr, inline_lemmas(b, *r.right, lemmas));
+            n->rule = RCut{r.cut_formula, std::move(l), std::move(rr)};
+        } else {
+            n->rule = r;   // RLemma handled above.
+        }
+        return util::Result<DerivPtr>(std::move(n));
+    }, d.rule);
+}
+
+}  // namespace
+
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root,
+                                      const LemmaProofs& lemmas) {
+    TRY(validate(root));
+    // Stage A: inline proven-theorem lemma citations (§3). Run before B0/B so
+    // the surrounding cuts become logical and reduce.
+    TRY_ASSIGN(inlined, inline_lemmas(builder, root, lemmas));
+    TRY(validate(*inlined));
+    return eliminate_cuts(builder, *inlined);
+}
+
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
     TRY(validate(root));
     // B0: every additive Cut → multiplicative (CUT_ELIM_DESIGN §4). The §5

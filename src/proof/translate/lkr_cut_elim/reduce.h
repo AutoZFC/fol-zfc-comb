@@ -23,17 +23,30 @@
 
 #include <cstddef>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace logic::proof::translate::lkr_cut_elim {
 
-// Eliminate Cuts (and, when Stage A lands, RLemmas) from a Deriv via
-// Gentzen's Hauptsatz. Returns a fresh Deriv with the same end-sequent.
-// On hitting an unimplemented case, returns the tree as-is (soundness
-// preserved; completeness narrows).
+// Cut-free, lemma-free proofs of cited theorems, keyed by the theorem's
+// statement (the AxiomRef SentenceHandle a citing RLemma carries). Stage A
+// (CUT_ELIM_DESIGN §3) splices these in; citations absent from the map —
+// base axioms and schema instances — are irreducible (§7a) and left as-is.
+// The mapped Deriv must outlive the eliminate_cuts call.
+using LemmaProofs =
+    std::unordered_map<SentenceHandle, const Deriv*, SentenceHandleHash>;
+
+// Eliminate Cuts and (proven-theorem) RLemmas from a Deriv via Gentzen's
+// Hauptsatz: Stage A inlines lemma citations from `lemmas`, then B0 +
+// Stage B reduce the resulting logical cuts. Returns a fresh Deriv with the
+// same end-sequent. On hitting an unimplemented case, returns the tree as-is
+// (soundness preserved; completeness narrows).
 //
-// Preconditions: root passes validate(); caller should have run B0 so
-// all RCuts are multiplicative.
+// Preconditions: root passes validate().
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root,
+                                      const LemmaProofs& lemmas);
+
+// Convenience overload with no lemma citations to inline (pure cut-elim).
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root);
 
 // Structural complexity of a formula (CUT_ELIM_DESIGN.md §5.1).

@@ -87,6 +87,27 @@ size_t count_cuts(const Deriv& d) {
     return n;
 }
 
+size_t count_lemmas(const Deriv& d) {
+    size_t n = 0;
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RLemma>) {
+            n = 1;
+        } else if constexpr (std::is_same_v<T, RCut> || std::is_same_v<T, RAnd>) {
+            n = count_lemmas(*r.left) + count_lemmas(*r.right);
+        } else if constexpr (std::is_same_v<T, RExchange> ||
+                             std::is_same_v<T, RWeaken>   ||
+                             std::is_same_v<T, RDuplicate>||
+                             std::is_same_v<T, RContract> ||
+                             std::is_same_v<T, ROr>       ||
+                             std::is_same_v<T, RForall>   ||
+                             std::is_same_v<T, RExists>) {
+            n = count_lemmas(*r.child);
+        }
+    }, d.rule);
+    return n;
+}
+
 // =========================================================================
 // degree() on various formulas.
 // =========================================================================
@@ -1095,6 +1116,119 @@ void test_b5_contraction_left() {
     CHECK(out.value()->conclusion == std::vector<FormulaHandle>({a.nP, a.B}));
 }
 
+// =========================================================================
+// Stage A — lemma inlining (§3). A proven-theorem RLemma is replaced by its
+// cached cut-free proof, replayed with the citing sequent's other formulas as
+// inert context.
+// =========================================================================
+
+// Pure inlining: an RLemma closing [A, φ_L] for proven theorem L (φ_L = P∨¬P,
+// proof ROr→RAx) is spliced into a cut-free, lemma-free derivation of [A, φ_L].
+void test_stage_a_inline_basic() {
+    Runtime rt; rt.load("axiom lemEM: P | ~P");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle phiL = b.to_nnf(parse_root(ctx, "P | ~P"));   // P ∨ ¬P
+    FormulaHandle P    = phiL.get().as_compound().left;
+    FormulaHandle nP   = phiL.get().as_compound().right;
+    FormulaHandle A    = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right;
+    SentenceHandle sh  = ctx.find_known("lemEM").value();
+
+    // Cached cut-free proof of ⊢ φ_L: ROr{0} over [P, ¬P] RAx{0,1}.
+    auto plChild = std::make_unique<Deriv>(); plChild->conclusion = {P, nP}; plChild->rule = RAx{0, 1};
+    auto PL = std::make_unique<Deriv>(); PL->conclusion = {phiL}; PL->rule = ROr{0, std::move(plChild)};
+    CHECK_OK(validate(*PL));
+
+    // Citing node: RLemma closing [A, φ_L].
+    auto node = std::make_unique<Deriv>(); node->conclusion = {A, phiL};
+    node->rule = RLemma{AxiomRef{sh}, "lemEM"};
+    CHECK_OK(validate(*node));
+
+    LemmaProofs lemmas; lemmas[sh] = PL.get();
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *node, lemmas);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK(count_lemmas(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({A, phiL}));
+}
+
+// Inlining composes with cut-elim: a cut on atom P, whose LEFT premise closes
+// by proven theorem L (φ_L = Q∨¬Q present, P the cut formula riding as context)
+// and whose RIGHT premise cites a base axiom (NOT in the map → left as-is).
+// Stage A splices L; B4 permutes the cut down the spliced proof to its axiom
+// leaf; B1 closes (P non-principal), discarding the right premise. → Cut == 0,
+// RLemma == 0.
+void test_stage_a_inline_then_cut() {
+    Runtime rt; rt.load("axiom lemEM2: Q | ~Q\naxiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle phiL = b.to_nnf(parse_root(ctx, "Q | ~Q"));   // Q ∨ ¬Q
+    FormulaHandle Q    = phiL.get().as_compound().left;
+    FormulaHandle nQ   = phiL.get().as_compound().right;
+    FormulaHandle P    = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP   = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle C    = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    SentenceHandle shL = ctx.find_known("lemEM2").value();
+    SentenceHandle shD = ctx.find_known("dummy").value();
+
+    // Cached cut-free proof of ⊢ φ_L = Q∨¬Q.
+    auto plChild = std::make_unique<Deriv>(); plChild->conclusion = {Q, nQ}; plChild->rule = RAx{0, 1};
+    auto PL = std::make_unique<Deriv>(); PL->conclusion = {phiL}; PL->rule = ROr{0, std::move(plChild)};
+    CHECK_OK(validate(*PL));
+
+    // left = RLemma(L) ⊢ [φ_L, P] (P the cut slot); right = RLemma(dummy) ⊢ [C, ¬P].
+    auto lefty = std::make_unique<Deriv>(); lefty->conclusion = {phiL, P};
+    lefty->rule = RLemma{AxiomRef{shL}, "lemEM2"};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, nP};
+    righty->rule = RLemma{AxiomRef{shD}, "dummy"};
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {phiL, C};   // Γ_L=[φ_L] ++ Γ_R=[C]
+    cut->rule = RCut{P, std::move(lefty), std::move(righty)};
+    CHECK_OK(validate(*cut));
+
+    LemmaProofs lemmas; lemmas[shL] = PL.get();   // dummy intentionally absent
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut, lemmas);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK(count_lemmas(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({phiL, C}));
+}
+
+// Inlining a QUANTIFIED lemma: φ_L = ∀y.(Q(y)∨¬Q(y)), proof RForall→ROr→RAx.
+// Exercises the eigenvar-shifting / rectification path in prepend_context.
+void test_stage_a_inline_quantified() {
+    Runtime rt; rt.load("axiom lemAll: forall y. (Q(y) | ~Q(y))");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle phiL = b.to_nnf(parse_root(ctx, "forall y. (Q(y) | ~Q(y))"));
+    FormulaHandle body = b.instantiate_quantifier_body(phiL.get().as_quantified().body, Term::fixed(5));
+    FormulaHandle Qe   = body.get().as_compound().left;    // Q(e)
+    FormulaHandle nQe  = body.get().as_compound().right;   // ¬Q(e)
+    FormulaHandle A    = b.to_nnf(parse_root(ctx, "A -> A")).get().as_compound().right;
+    SentenceHandle sh  = ctx.find_known("lemAll").value();
+
+    // PL: RForall{0, eigen 5} over ROr{0} over [Q(e), ¬Q(e)] RAx{0,1}.
+    auto ax = std::make_unique<Deriv>(); ax->conclusion = {Qe, nQe}; ax->rule = RAx{0, 1};
+    auto orN = std::make_unique<Deriv>(); orN->conclusion = {body}; orN->rule = ROr{0, std::move(ax)};
+    auto PL = std::make_unique<Deriv>(); PL->conclusion = {phiL};
+    PL->rule = RForall{0, 5, std::move(orN)};
+    CHECK_OK(validate(*PL));
+
+    auto node = std::make_unique<Deriv>(); node->conclusion = {A, phiL};
+    node->rule = RLemma{AxiomRef{sh}, "lemAll"};
+    CHECK_OK(validate(*node));
+
+    LemmaProofs lemmas; lemmas[sh] = PL.get();
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *node, lemmas);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK(count_lemmas(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({A, phiL}));
+    CHECK(std::holds_alternative<RForall>(out.value()->rule));   // ∀ replayed at root
+}
+
 }  // namespace
 
 int main() {
@@ -1126,6 +1260,9 @@ int main() {
     test_b5_weaken_dead_right();
     test_b5_contraction_right();
     test_b5_contraction_left();
+    test_stage_a_inline_basic();
+    test_stage_a_inline_then_cut();
+    test_stage_a_inline_quantified();
 
     std::cout << "reduce_test: " << g_passed << " passed, "
               << g_failed << " failed\n";

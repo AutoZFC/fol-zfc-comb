@@ -45,6 +45,7 @@ cc_library(
         ":b0",
         ":deriv",
         "//src/core:formula",
+        "//src/proof:proof_value",
         "//src/util:error",
     ],
 )
