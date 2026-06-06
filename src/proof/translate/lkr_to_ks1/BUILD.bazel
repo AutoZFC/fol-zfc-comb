@@ -1,0 +1,17 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# lkr_to_ks1: cut-free LKR (Deriv tree) → decomposed KS1 derivation.
+# CUT_HANDLING_ROADMAP phase K6 — the front end that feeds the KS1→comb bridge.
+# See lkr_to_ks1.h. K6.0 skeleton (⊢ a∨ā); general LK1→KS1 (HSW §VII) is K6.1+.
+cc_library(
+    name = "lkr_to_ks1",
+    srcs = ["lkr_to_ks1.cpp"],
+    hdrs = ["lkr_to_ks1.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/ks1:checker",
+        "//src/proof/translate/lkr_cut_elim:deriv",
+        "//src/util:error",
+    ],
+)

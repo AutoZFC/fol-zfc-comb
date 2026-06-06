@@ -348,6 +348,21 @@ cc_test(
     ],
 )
 
+# K6 front end — cut-free LKR (Deriv) → KS1 → comb, end-to-end via CombVerifier.
+cc_test(
+    name = "lkr_to_ks1_test",
+    srcs = ["lkr_to_ks1_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/comb:verifier",
+        "//src/proof/ks1:checker",
+        "//src/proof/translate/ks1_to_comb:read_skew",
+        "//src/proof/translate/lkr_cut_elim:deriv",
+        "//src/proof/translate/lkr_to_ks1",
+    ],
+)
+
 # Stage 1 (nd_internalize) tests — Phases 1–6 on the typed IR.
 # Replaces the deleted axiom_rewrap_test (Q4 hard cutover).
 cc_test(
@@ -393,6 +408,7 @@ test_suite(
         ":ks1_equiv_test",
         ":ks1_read_fonet_test",
         ":ks1_validation_test",
+        ":lkr_to_ks1_test",
         ":lkr_verifier_test",
         ":nd_to_lkr_test",
         ":runtime_test",
