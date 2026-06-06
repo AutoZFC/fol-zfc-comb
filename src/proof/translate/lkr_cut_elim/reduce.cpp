@@ -558,6 +558,44 @@ void collect_max_fixed_deriv(const Deriv& d, std::size_t& floor) {
     }, d.rule);
 }
 
+// Collect every eigenvariable (each RForall's `eigen`) in `d`. The rectify
+// invariant (Hughes Def 10.10 / §6) is that these are GLOBALLY DISTINCT, and
+// the commutation (B4) / duplication (B5-C) cases must preserve it — that is
+// what keeps a later commutation from merging two subderivations that share an
+// eigenvar (capture). Witnesses are TERMS, not eigenvars, and may repeat, so
+// they are not collected here.
+void collect_eigenvars(const Deriv& d, std::vector<var_index>& out) {
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RForall>) {
+            out.push_back(r.eigen);
+            collect_eigenvars(*r.child, out);
+        } else if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
+                             std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
+                             std::is_same_v<T, ROr> || std::is_same_v<T, RExists>) {
+            collect_eigenvars(*r.child, out);
+        } else if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
+            collect_eigenvars(*r.left, out);
+            collect_eigenvars(*r.right, out);
+        }
+        // RAx / ROne / RLemma: leaves.
+    }, d.rule);
+}
+
+// True iff every eigenvariable in `d` is distinct — the rectify invariant.
+// A debug-time guard (see reduce_loop): the capture-class bug that cost this
+// project several sessions was a SILENT violation of this invariant that only
+// LKRVerifier could see, deep in a 5000-instr proof. Checking it here turns the
+// next such regression into an immediate, local failure.
+bool eigenvars_distinct(const Deriv& d) {
+    std::vector<var_index> evs;
+    collect_eigenvars(d, evs);
+    std::sort(evs.begin(), evs.end());
+    for (std::size_t i = 1; i < evs.size(); ++i)
+        if (evs[i] == evs[i - 1]) return false;
+    return true;
+}
+
 using Rename = std::unordered_map<var_index, var_index>;
 
 FormulaHandle apply_fv(FormulaHandle h, const Rename& rn,
@@ -617,7 +655,7 @@ DerivPtr freshen_subst(const Deriv& d, Rename rn, var_index a, const Term& t,
 }
 
 DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
-                              FormulaBuilder& b) {
+                              FormulaBuilder& b, var_index gfloor) {
     // Peel φ-to-last exchanges so a ∀/∃ principal under them is seen.
     Peeled pl = peel_exchanges(cut.left.get(),  0);
     Peeled pr = peel_exchanges(cut.right.get(), 0);
@@ -635,13 +673,12 @@ DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
     if (fa->principal != fa_cs) return nullptr;   // ∀ principal on φ
     if (ex->principal != ex_cs) return nullptr;   // ∃ principal on φ̄
 
-    // Fresh floor: above every fixed var ANYWHERE in the ∀-subderivation, the
-    // ∃-subderivation, and the witness t — not just their conclusions, else a
-    // renamed eigenvar can collide with one buried deeper (§6 capture).
-    std::size_t fresh = fa->eigen + 1;
-    collect_max_fixed_deriv(*fa->child, fresh);
-    collect_max_fixed_deriv(*ex->child, fresh);
-    collect_max_fixed_term(ex->witness, fresh);
+    // Fresh floor = the GLOBAL counter (≥ 1 + every var anywhere in the tree),
+    // not just this cut's subderivations + witness. A local floor avoids capture
+    // WITHIN the reduction but lets the renamed eigenvars collide with eigenvars
+    // ELSEWHERE in the tree, breaking the global-distinctness invariant a later
+    // commutation relies on (§6; the debug guard in reduce_loop catches it).
+    std::size_t fresh = gfloor;
 
     // Lc' = Lc with a:=t (rectified): the instantiated body β[x:=t] sits at the
     // ∀'s principal position (fa->principal), NOT the end — rotate it to the
@@ -717,7 +754,7 @@ DerivPtr cut_out_and_reorder(const Deriv* prem, FormulaHandle phi,
 DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* cur,
                       const std::vector<std::size_t>& remap, std::size_t cs,
                       FormulaHandle cut_formula, const Deriv* other,
-                      FormulaBuilder& b) {
+                      FormulaBuilder& b, var_index gfloor) {
     if (const ROr* r = std::get_if<ROr>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B2
         const Formula& f = node[remap[r->principal]].get();
@@ -742,14 +779,12 @@ DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* cur,
     }
     if (const RForall* r = std::get_if<RForall>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B3
-        // Rectify the eigenvar fresh above every fixed var ANYWHERE in `other`
-        // and the ∀-subderivation (whole subtrees, not just conclusions — a
-        // deep eigenvar in `other` is exactly what captured e2 on the corpus),
-        // and above node's vars.
-        std::size_t fresh = r->eigen + 1;
-        for (FormulaHandle h : node) collect_max_fixed_formula(h, fresh);
-        collect_max_fixed_deriv(*other, fresh);
-        collect_max_fixed_deriv(*r->child, fresh);
+        // Rectify the eigenvar fresh from the GLOBAL counter (≥ every var in the
+        // whole tree), not just `other`/the ∀-subderivation/node — a local floor
+        // avoids capture within the reduction but lets e2 (or the renamed deep
+        // eigenvars) collide with eigenvars ELSEWHERE, breaking the global
+        // distinctness a later commutation relies on (§6).
+        std::size_t fresh = gfloor;
         var_index e2 = fresh++;
         DerivPtr Rc2 = freshen_subst(*r->child, Rename{}, r->eigen, Term::fixed(e2), fresh, b);
         const Formula& f = node[remap[r->principal]].get();   // ∀x.ψ
@@ -906,21 +941,22 @@ DerivPtr try_b4_cut(const std::vector<FormulaHandle>& target_node, const Deriv* 
     return apply_swaps(std::move(out), swaps);
 }
 
-DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& b) {
+DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& b,
+                        var_index gfloor) {
     const std::vector<FormulaHandle>& node = cut_node.conclusion;
     const std::size_t gl = cut.left->conclusion.size() - 1;
     FormulaHandle phibar = cut.right->conclusion.back();
 
     Peeled L = peel_exchanges(cut.left.get(), 0);
     if (auto out = try_b4_unary(node, L.cur, L.remap, L.cs, cut.cut_formula,
-                                cut.right.get(), b)) { g_last_case = "B4-unary-L"; return out; }
+                                cut.right.get(), b, gfloor)) { g_last_case = "B4-unary-L"; return out; }
     if (auto out = try_b4_and(node, L.cur, L.remap, L.cs, cut.cut_formula,
                               cut.right.get(), /*on_left=*/true)) { g_last_case = "B4-and-L"; return out; }
     if (auto out = try_b4_cut(node, L.cur, L.cs, cut.cut_formula, cut.right.get())) { g_last_case = "B4-cut-L"; return out; }
 
     Peeled Rt = peel_exchanges(cut.right.get(), gl);
     if (auto out = try_b4_unary(node, Rt.cur, Rt.remap, Rt.cs, phibar,
-                                cut.left.get(), b)) { g_last_case = "B4-unary-R"; return out; }
+                                cut.left.get(), b, gfloor)) { g_last_case = "B4-unary-R"; return out; }
     if (auto out = try_b4_and(node, Rt.cur, Rt.remap, Rt.cs, phibar,
                               cut.left.get(), /*on_left=*/false)) { g_last_case = "B4-and-R"; return out; }
     if (auto out = try_b4_cut(node, Rt.cur, Rt.cs, phibar, cut.left.get())) { g_last_case = "B4-cut-R"; return out; }
@@ -1084,14 +1120,14 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
     // B2 — principal logical, ∧ vs ∨ (either orientation).
     DISPATCH_TRY("B2-and-or", try_b2_and_or(cut_node, cut))
     // B3 — principal logical, ∀ vs ∃ (capture-avoiding witness substitution).
-    DISPATCH_TRY("B3-forall-exists", try_b3_forall_exists(cut_node, cut, builder))
+    DISPATCH_TRY("B3-forall-exists", try_b3_forall_exists(cut_node, cut, builder, gfloor))
     // B5 — structural principal (W dead cut / C contraction). Before B4.
     DISPATCH_TRY("B5-weaken-L", try_b5_weaken_dead(cut_node, cut, true))
     DISPATCH_TRY("B5-weaken-R", try_b5_weaken_dead(cut_node, cut, false))
     DISPATCH_TRY("B5-contraction", try_b5_contraction(cut_node, cut, builder, gfloor))
     // B4 — permutation (cut formula is a side formula of a premise's rule).
     // try_b4_permute sets g_last_case to the specific sub-case itself.
-    if (auto out = try_b4_permute(cut_node, cut, builder))
+    if (auto out = try_b4_permute(cut_node, cut, builder, gfloor))
         return util::Result<DerivPtr>(std::move(out));
 #undef DISPATCH_TRY
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
@@ -1371,6 +1407,14 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
     std::size_t g_fresh = 0;
     collect_max_fixed_deriv(*current, g_fresh);
 
+    // Debug-time invariant guard: rectify made all eigenvars globally distinct;
+    // every reduction must preserve that. Checked after rectify and after each
+    // commit so a regression that breaks it surfaces immediately (with the step
+    // and the case that broke it) instead of as an opaque downstream non-dual.
+    if (dbg && !eigenvars_distinct(*current))
+        std::fprintf(stderr, "[cut-elim] INVARIANT BROKEN after rectify: "
+                             "eigenvars not globally distinct\n");
+
     for (std::size_t step = 0; step < max_steps; ++step) {
         auto cand = find_topmost_max_deg_cut(*current);
         if (!cand) break;  // no cuts remain.
@@ -1410,6 +1454,11 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
         }
         // Committed: bump the floor past any fresh vars in the new subtree only.
         collect_max_fixed_deriv(**slot, g_fresh);
+
+        if (dbg && !eigenvars_distinct(*current))
+            std::fprintf(stderr, "[cut-elim] INVARIANT BROKEN at step %zu "
+                         "(case %s): eigenvars no longer globally distinct\n",
+                         step, g_last_case);
     }
 
     // Any residual (irreducible) cut is still multiplicative; convert back to
