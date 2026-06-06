@@ -280,6 +280,41 @@ void test_drinker_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ (A∨¬A)∨B — weakening: B is weakened-in (no axiom link). Φ1 = t→A∨¬A (Ai),
+// Φ2 = W(B). Decomposed because B is added above all linear rules.
+//   proof: ROr{0} / RWeaken{idx=1} / ROr{0} / RAx.
+void test_weakening_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle PA = ctx.add_predicate("A", 0);
+    PredicateHandle PB = ctx.add_predicate("B", 0);
+    FormulaHandle a = fb.predicate(PA, {}), na = fb.make_not(a);
+    FormulaHandle b = fb.predicate(PB, {});
+    FormulaHandle aOr = fb.make_or(a, na);                 // A∨¬A
+    FormulaHandle goal = fb.make_or(aOr, b);               // (A∨¬A)∨B
+
+    auto ax = std::make_unique<lce::Deriv>();
+    ax->conclusion = {a, na}; ax->rule = lce::RAx{0, 1};
+    auto or1 = std::make_unique<lce::Deriv>();             // ⊢ A∨¬A
+    or1->conclusion = {aOr}; or1->rule = lce::ROr{0, std::move(ax)};
+    auto wk = std::make_unique<lce::Deriv>();              // ⊢ A∨¬A, B  (B weakened)
+    wk->conclusion = {aOr, b}; wk->rule = lce::RWeaken{/*idx=*/1, std::move(or1)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::ROr{0, std::move(wk)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
@@ -289,6 +324,7 @@ int main() {
     test_forall_end_to_end();
     test_exists_ks1_valid();
     test_drinker_end_to_end();
+    test_weakening_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

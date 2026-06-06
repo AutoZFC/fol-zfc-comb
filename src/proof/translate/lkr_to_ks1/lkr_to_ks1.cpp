@@ -240,8 +240,26 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
         return steps;
     }
 
-    return MAKE_ERROR << "lkr_to_ks1: K6.2/K6.3 — this rule not yet handled "
-                         "(RForall = K6.2 in progress, weakening/contraction = K6.3)";
+    // --- RWeaken: ⊢ Γ ⊢ Γ,φ (the weakened-in φ is at idx). ---------------
+    // Φ2 resource step: prove the linear core for the child (Γ without φ), then
+    // W in φ (S{A}/S{A∨B}) and reconcile to denote(node). This stays decomposed
+    // only when no linear rule sits between this weakening and the root (φ added
+    // "high"); otherwise the W lands mid-Φ1 and ks1::split rejects it — the
+    // rule-permutation that pushes weakening to the bottom (Thm 29) is K6.3b.
+    if (const auto* w = std::get_if<lce::RWeaken>(&d.rule)) {
+        const lce::Deriv* child = w->child.get();
+        FormulaHandle weakened = d.conclusion[w->idx];
+        TRY_ASSIGN(steps, tr(fb, *child));                 // Φ1: → denote(child)
+        ks1::Step ws; ws.rule = ks1::Rule::W; ws.f_param = weakened;  // ctx {}
+        steps.push_back(ws);                               // → denote(child)∨φ
+        FormulaHandle after = fb.make_or(denote(fb, child->conclusion), weakened);
+        TRY_ASSIGN(rec, equiv_steps(fb, after, denote(fb, d.conclusion)));
+        steps.insert(steps.end(), rec.begin(), rec.end());
+        return steps;
+    }
+
+    return MAKE_ERROR << "lkr_to_ks1: K6.3 — this rule not yet handled "
+                         "(contraction RContract/RDuplicate = K6.3b)";
 }
 
 }  // namespace
