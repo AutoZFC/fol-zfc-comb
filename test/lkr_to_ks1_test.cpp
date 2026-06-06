@@ -235,6 +235,51 @@ void test_exists_ks1_valid() {
     if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
 }
 
+// ⊢ ∀y.∃x.(¬p(x) ∨ p(y)) — the drinker. RForall over RExists with the witness
+// the universal eigenvar (x:=y), so ∃ comb-verifies (its dualizer image is the
+// universal binder y). Exercises nested-binder de Bruijn: the ∀'s eigenvar
+// becomes gen1 inside the ∃-body, gen0 at the witness/redex level.
+void test_drinker_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle P = ctx.add_predicate("p", 1);
+    Term g0 = Term::generalized(0), g1 = Term::generalized(1), c = Term::fixed(0);
+    // goal = ∀y.∃x.(¬p(x)∨p(y)); inside both binders x=gen0, y=gen1.
+    FormulaHandle inBody = fb.make_or(fb.make_not(fb.predicate(P, {g0})),
+                                      fb.predicate(P, {g1}));
+    FormulaHandle exFla  = fb.make_quantified(Op::Exists, inBody);       // ∃x.(…), y=gen0
+    FormulaHandle goal   = fb.make_quantified(Op::Forall, exFla);
+
+    // child of ∀ (eigenvar c): ∃x.(¬p(x)∨p(c)); ∃-body = ¬p(gen0)∨p(c).
+    FormulaHandle exBodyC = fb.make_or(fb.make_not(fb.predicate(P, {g0})),
+                                       fb.predicate(P, {c}));
+    FormulaHandle exFlaC  = fb.make_quantified(Op::Exists, exBodyC);
+    // instance (witness c): ¬p(c)∨p(c).
+    FormulaHandle pc = fb.predicate(P, {c}), npc = fb.make_not(pc);
+    FormulaHandle instF = fb.make_or(npc, pc);
+
+    auto ax = std::make_unique<lce::Deriv>();
+    ax->conclusion = {npc, pc}; ax->rule = lce::RAx{0, 1};       // duals ¬p(c),p(c)
+    auto orr = std::make_unique<lce::Deriv>();
+    orr->conclusion = {instF}; orr->rule = lce::ROr{0, std::move(ax)};
+    auto exd = std::make_unique<lce::Deriv>();
+    exd->conclusion = {exFlaC}; exd->rule = lce::RExists{0, c, std::move(orr)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::RForall{0, /*eigen=*/0, std::move(exd)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
@@ -243,6 +288,7 @@ int main() {
     test_and_with_context_end_to_end();
     test_forall_end_to_end();
     test_exists_ks1_valid();
+    test_drinker_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

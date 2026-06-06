@@ -179,12 +179,21 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
             return MAKE_ERROR << "lkr_to_ks1: RForall principal is not a ∀";
         TRY_ASSIGN(child_steps, tr(fb, *far->child));
         for (ks1::Step& s : child_steps) {
-            if (s.f_param.valid())
+            // De Bruijn index of the new ∀'s var, as seen from this step's
+            // redex = the number of binders (quantifier `Down`s) above it.
+            int depth = 0;
+            for (ks1::Dir dd : s.context) if (dd == ks1::Dir::Down) ++depth;
+            // Ex's f_param is the ∃-BODY — one binder deeper than the redex; its
+            // t_param (witness) sits at the redex level. All other params (Ai's
+            // literal, W's formula) sit at the redex level.
+            if (s.f_param.valid()) {
+                int fd = depth + (s.rule == ks1::Rule::Ex ? 1 : 0);
                 s.f_param = fb.translate_term(s.f_param, Term::fixed(far->eigen),
-                                              Term::generalized(0));
+                                              Term::generalized(fd));
+            }
             if (s.rule == ks1::Rule::Ex)
                 s.t_param = fb.translate_in_term(s.t_param, Term::fixed(far->eigen),
-                                                 Term::generalized(0));
+                                                 Term::generalized(depth));
             s.context.insert(s.context.begin(), ks1::Dir::Down);
         }
         ks1::Step fu; fu.rule = ks1::Rule::ForallUnit;       // t → ∀x.t  (ctx {})
