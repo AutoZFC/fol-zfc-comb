@@ -684,39 +684,73 @@ DerivPtr cut_out_and_reorder(const Deriv* prem, FormulaHandle phi,
     return apply_swaps(std::move(nc), selection_swaps(match_perm(nc->conclusion, target)));
 }
 
-// Permute the cut past a UNARY rule R of `prem` (one premise of the cut),
-// where R's affected position ≠ the cut slot. `base` maps R's positions into
-// `node` (0 for the left premise, |Γ_L| for the right). `cut_formula` is the
+// `remap`/`cs` carry the cut premise's geometry after PEELING any leading
+// exchanges (see peel_exchanges): remap[k] = the node position of the under-
+// lying rule's conclusion position k; cs = φ's position within it. remap[cs]
+// is the invalid sentinel below (φ has no node position — it is the cut slot,
+// consumed by the cut). Permuting past the rule UNDER an exchange chain — not
+// just a bare top rule — is what lets B4 drive an appending rule (ROr / RAnd /
+// RDuplicate / quantifier) over a NON-axiom rule, the deep-chain case.
+constexpr std::size_t kNoPos = static_cast<std::size_t>(-1);
+
+struct Peeled {
+    const Deriv*              cur;     // underlying rule (exchanges stripped)
+    std::vector<std::size_t>  remap;   // cur position → node position (kNoPos at cs)
+    std::size_t               cs;      // φ position in cur
+};
+
+// Peel all leading RExchange nodes off `prem`, folding their permutations into
+// `remap`. `base` is the premise's offset into node (0 left, |Γ_L| right). The
+// φ-to-last exchanges inserted by cut_out_and_reorder, and any clean side
+// exchanges, are absorbed transparently — the cut permutes past them.
+Peeled peel_exchanges(const Deriv* prem, std::size_t base) {
+    std::vector<std::size_t> remap(prem->conclusion.size());
+    for (std::size_t k = 0; k < remap.size(); ++k) remap[k] = base + k;
+    std::size_t cs = prem->conclusion.size() - 1;   // φ is at the last position
+    remap[cs] = kNoPos;
+    const Deriv* cur = prem;
+    while (const RExchange* r = std::get_if<RExchange>(&cur->rule)) {
+        auto sw = [&](std::size_t x) { return x == r->i ? r->j : (x == r->j ? r->i : x); };
+        std::vector<std::size_t> nr(remap.size());
+        for (std::size_t k = 0; k < nr.size(); ++k) nr[k] = remap[sw(k)];
+        remap = std::move(nr);
+        cs = sw(cs);
+        cur = r->child.get();
+    }
+    return {cur, std::move(remap), cs};
+}
+
+// Permute the cut past a UNARY rule R = `cur`'s top rule (exchanges already
+// peeled), where R's affected position ≠ the cut slot. `cut_formula` is the
 // formula to cut out of R's premise (φ on the left, φ̄ on the right); `other`
 // is the opposite cut premise. Returns the rebuilt R{…, cut} or nullptr.
-DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* prem,
+DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* cur,
+                      const std::vector<std::size_t>& remap, std::size_t cs,
                       FormulaHandle cut_formula, const Deriv* other,
-                      std::size_t base, FormulaBuilder& b) {
-    const std::size_t cs = prem->conclusion.size() - 1;   // cut slot in prem
-
-    if (const ROr* r = std::get_if<ROr>(&prem->rule)) {
+                      FormulaBuilder& b) {
+    if (const ROr* r = std::get_if<ROr>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B2
-        const Formula& f = node[base + r->principal].get();
+        const Formula& f = node[remap[r->principal]].get();
         std::vector<FormulaHandle> target = node;
-        target[base + r->principal] = f.as_compound().left;
+        target[remap[r->principal]] = f.as_compound().left;
         target.push_back(f.as_compound().right);
         DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = ROr{base + r->principal, std::move(child)};
+        out->rule = ROr{remap[r->principal], std::move(child)};
         return out;
     }
-    if (const RExists* r = std::get_if<RExists>(&prem->rule)) {
+    if (const RExists* r = std::get_if<RExists>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B3
-        const Formula& f = node[base + r->principal].get();   // ∃x.ψ
+        const Formula& f = node[remap[r->principal]].get();   // ∃x.ψ
         FormulaHandle inst = b.instantiate_quantifier_body(f.as_quantified().body, r->witness);
         std::vector<FormulaHandle> target = node;
-        target[base + r->principal] = inst;
+        target[remap[r->principal]] = inst;
         DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RExists{base + r->principal, r->witness, std::move(child)};
+        out->rule = RExists{remap[r->principal], r->witness, std::move(child)};
         return out;
     }
-    if (const RForall* r = std::get_if<RForall>(&prem->rule)) {
+    if (const RForall* r = std::get_if<RForall>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B3
         // Rectify the eigenvar so it cannot be captured by `other`'s context.
         std::size_t fresh = r->eigen + 1;
@@ -725,93 +759,81 @@ DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* prem,
         for (FormulaHandle h : r->child->conclusion) collect_max_fixed_formula(h, fresh);
         var_index e2 = fresh++;
         DerivPtr Rc2 = freshen_subst(*r->child, Rename{}, r->eigen, Term::fixed(e2), fresh, b);
-        const Formula& f = node[base + r->principal].get();   // ∀x.ψ
+        const Formula& f = node[remap[r->principal]].get();   // ∀x.ψ
         FormulaHandle inst = b.instantiate_quantifier_body(f.as_quantified().body, Term::fixed(e2));
         std::vector<FormulaHandle> target = node;
-        target[base + r->principal] = inst;
+        target[remap[r->principal]] = inst;
         DerivPtr child = cut_out_and_reorder(Rc2.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RForall{base + r->principal, e2, std::move(child)};
+        out->rule = RForall{remap[r->principal], e2, std::move(child)};
         return out;
     }
-    if (const RWeaken* r = std::get_if<RWeaken>(&prem->rule)) {
+    if (const RWeaken* r = std::get_if<RWeaken>(&cur->rule)) {
         if (r->idx == cs) return nullptr;                  // dropping φ → B5
         std::vector<FormulaHandle> target = node;
-        target.erase(target.begin() + (base + r->idx));
+        target.erase(target.begin() + remap[r->idx]);
         DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RWeaken{base + r->idx, std::move(child)};
+        out->rule = RWeaken{remap[r->idx], std::move(child)};
         return out;
     }
-    if (const RContract* r = std::get_if<RContract>(&prem->rule)) {
+    if (const RContract* r = std::get_if<RContract>(&cur->rule)) {
         if (r->i == cs || r->j == cs) return nullptr;
         std::vector<FormulaHandle> target = node;
-        target.erase(target.begin() + (base + r->j));
+        target.erase(target.begin() + remap[r->j]);
         DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RContract{base + r->i, base + r->j, std::move(child)};
+        out->rule = RContract{remap[r->i], remap[r->j], std::move(child)};
         return out;
     }
-    if (const RExchange* r = std::get_if<RExchange>(&prem->rule)) {
-        // Skip exchanges that touch the cut slot — those are the internal
-        // φ-to-last moves; permuting them would loop. Non-cut-slot exchanges
-        // are clean side permutations.
-        if (r->i == cs || r->j == cs) return nullptr;
-        std::vector<FormulaHandle> target = node;
-        std::swap(target[base + r->i], target[base + r->j]);
-        DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
-        auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RExchange{base + r->i, base + r->j, std::move(child)};
-        return out;
-    }
-    if (const RDuplicate* r = std::get_if<RDuplicate>(&prem->rule)) {
+    if (const RDuplicate* r = std::get_if<RDuplicate>(&cur->rule)) {
         if (r->src == cs) return nullptr;        // duplicating φ → contraction-of-cut (B5)
         std::vector<FormulaHandle> target = node;
-        target.push_back(node[base + r->src]);
+        target.push_back(node[remap[r->src]]);
         DerivPtr child = cut_out_and_reorder(r->child.get(), cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
-        out->rule = RDuplicate{base + r->src, std::move(child)};
+        out->rule = RDuplicate{remap[r->src], std::move(child)};
         return out;
     }
-    // RAnd (binary) handled separately; leaves are B1.
+    // RExchange is impossible here (peeled). RAnd handled separately; leaves B1.
     return nullptr;
 }
 
-// Permute the cut past a binary RAnd on premise `andD` (cut.left or cut.right).
+// Permute the cut past a binary RAnd = `cur`'s top rule (exchanges peeled).
 // The cut formula sits in exactly one of the ∧'s two sub-premises (determined
 // by the partition); cut it into THAT sub-premise, leave the other untouched,
 // and re-apply (∧) below — routing the other cut side's Γ into the same branch.
-// `base` = 0 if andD is the left premise, |Γ_L| if it is the right.
-DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* andD,
-                    FormulaHandle cut_formula, const Deriv* other, std::size_t base) {
-    const RAnd* a = std::get_if<RAnd>(&andD->rule);
+// `on_left` = whether `cur` is the cut's LEFT premise (fixes where `other`'s Γ
+// sits in node).
+DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* cur,
+                    const std::vector<std::size_t>& remap, std::size_t cs,
+                    FormulaHandle cut_formula, const Deriv* other, bool on_left) {
+    const RAnd* a = std::get_if<RAnd>(&cur->rule);
     if (!a) return nullptr;
-    const std::size_t cs = andD->conclusion.size() - 1;   // cut slot in andD
     if (a->principal == cs) return nullptr;               // ∧ is the cut formula → B2
     const std::size_t og = other->conclusion.size() - 1;  // |Γ_other|
-    const Formula& f = node[base + a->principal].get();   // α∧γ
+    const Formula& f = node[remap[a->principal]].get();   // α∧γ
     FormulaHandle alpha = f.as_compound().left, gamma = f.as_compound().right;
 
     bool cs_in_lp = false;
     for (std::size_t p : a->left_partition) if (p == cs) { cs_in_lp = true; break; }
 
-    // node positions in `andD`'s Γ slice and `other`'s Γ slice.
+    // node positions of `cur`'s left-partition slice.
     std::vector<bool> in_lp_node(node.size(), false);
     for (std::size_t p : a->left_partition)
-        if (p != cs) in_lp_node[base + p] = true;            // map partition → node (p < cs)
-    // `other`'s Γ occupies [other_base, other_base+og).
-    const std::size_t other_base = (base == 0) ? (node.size() - og) : 0;
+        if (p != cs) in_lp_node[remap[p]] = true;
+    // `other`'s Γ occupies a contiguous block: the end of node if `cur` is the
+    // left premise, the start otherwise (cur's own Γ stays within its block).
+    const std::size_t other_base = on_left ? (node.size() - og) : 0;
 
     // Decide which branch the cut formula (and `other`'s Γ) flow into.
     auto build = [&](bool into_left) -> DerivPtr {
         const Deriv* into  = into_left ? a->left.get()  : a->right.get();
         FormulaHandle tail = into_left ? alpha : gamma;
-        // Branch membership in node: the partition entries keep their side; the
-        // cut formula's side (= `into`) also absorbs `other`'s Γ.
         std::vector<std::size_t> part;          // = the new left_partition
         std::vector<FormulaHandle> target;
         for (std::size_t k = 0; k < node.size(); ++k) {
-            if (k == base + a->principal) continue;
+            if (k == remap[a->principal]) continue;
             bool in_left_branch = in_lp_node[k];
             if (k >= other_base && k < other_base + og) in_left_branch = into_left;
             if (in_left_branch) part.push_back(k);
@@ -821,9 +843,9 @@ DerivPtr try_b4_and(const std::vector<FormulaHandle>& node, const Deriv* andD,
         DerivPtr cutd = cut_out_and_reorder(into, cut_formula, other, target);
         auto out = std::make_unique<Deriv>(); out->conclusion = node;
         if (into_left)
-            out->rule = RAnd{base + a->principal, part, std::move(cutd), clone(*a->right)};
+            out->rule = RAnd{remap[a->principal], part, std::move(cutd), clone(*a->right)};
         else
-            out->rule = RAnd{base + a->principal, part, clone(*a->left), std::move(cutd)};
+            out->rule = RAnd{remap[a->principal], part, clone(*a->left), std::move(cutd)};
         return out;
     };
     return build(cs_in_lp);
@@ -833,15 +855,21 @@ DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& 
     const std::vector<FormulaHandle>& node = cut_node.conclusion;
     const std::size_t gl = cut.left->conclusion.size() - 1;
     FormulaHandle phibar = cut.right->conclusion.back();
-    if (auto out = try_b4_unary(node, cut.left.get(), cut.cut_formula,
-                                cut.right.get(), 0, b))
+
+    Peeled L = peel_exchanges(cut.left.get(), 0);
+    if (auto out = try_b4_unary(node, L.cur, L.remap, L.cs, cut.cut_formula,
+                                cut.right.get(), b))
         return out;
-    if (auto out = try_b4_unary(node, cut.right.get(), phibar,
-                                cut.left.get(), gl, b))
+    if (auto out = try_b4_and(node, L.cur, L.remap, L.cs, cut.cut_formula,
+                              cut.right.get(), /*on_left=*/true))
         return out;
-    if (auto out = try_b4_and(node, cut.left.get(), cut.cut_formula, cut.right.get(), 0))
+
+    Peeled Rt = peel_exchanges(cut.right.get(), gl);
+    if (auto out = try_b4_unary(node, Rt.cur, Rt.remap, Rt.cs, phibar,
+                                cut.left.get(), b))
         return out;
-    if (auto out = try_b4_and(node, cut.right.get(), phibar, cut.left.get(), gl))
+    if (auto out = try_b4_and(node, Rt.cur, Rt.remap, Rt.cs, phibar,
+                              cut.left.get(), /*on_left=*/false))
         return out;
     return nullptr;
 }

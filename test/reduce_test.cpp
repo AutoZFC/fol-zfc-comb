@@ -891,6 +891,109 @@ void test_b4_and_to_zero() {
     CHECK(std::holds_alternative<RAnd>(out.value()->rule));   // ∧ permuted to root
 }
 
+// B4 DEEP chain: an appending rule (ROr) over a NON-axiom rule (another ROr)
+// over the axiom. The cut must permute past BOTH ROr's — seeing through the
+// φ-to-last exchange the first permutation inserts — before B1 closes at the
+// bottom axiom. P rides as non-principal context all the way down.
+void test_b4_or_over_or_to_zero() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle Q  = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle nQ = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().left;
+    FormulaHandle R  = b.to_nnf(parse_root(ctx, "R -> R")).get().as_compound().right;
+    FormulaHandle C  = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    FormulaHandle DQ = b.to_nnf(b.make_or(nQ, Q));   // ¬Q ∨ Q
+    FormulaHandle DD = b.to_nnf(b.make_or(DQ, R));    // (¬Q∨Q) ∨ R
+    // bottom axiom [¬Q, P, R, Q] RAx{0,3}; inner ROr{0}⊢[DQ,P,R]; outer ROr{0}⊢[DD,P].
+    auto bottom = std::make_unique<Deriv>(); bottom->conclusion = {nQ, P, R, Q}; bottom->rule = RAx{0, 3};
+    auto inner = std::make_unique<Deriv>(); inner->conclusion = {DQ, P, R};
+    inner->rule = ROr{0, std::move(bottom)};
+    auto outer = std::make_unique<Deriv>(); outer->conclusion = {DD, P};
+    outer->rule = ROr{0, std::move(inner)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left};
+    righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {DD, C};
+    cut->rule = RCut{P, std::move(outer), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({DD, C}));
+}
+
+// B4 DEEP chain: ROr over RForall over axiom. Exercises the eigenvariable
+// rectification path under the see-through-exchange permutation.
+void test_b4_or_over_forall_to_zero() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle R  = b.to_nnf(parse_root(ctx, "R -> R")).get().as_compound().right;
+    FormulaHandle C  = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    FormulaHandle faQ = b.to_nnf(parse_root(ctx, "forall y. Q(y)"));
+    FormulaHandle Qe  = b.instantiate_quantifier_body(faQ.get().as_quantified().body, Term::fixed(7));
+    FormulaHandle DD = b.to_nnf(b.make_or(faQ, R));   // (∀y.Q(y)) ∨ R
+    // bottom axiom [Q(e), ¬P, P, R] RAx{1,2}; forall ⊢[∀y.Q,¬P,P,R] eigen 7;
+    // outer ROr{0} ⊢ [DD, ¬P, P] — wait, keep P at cut slot. Build bottom→forall→ROr.
+    auto bottom = std::make_unique<Deriv>(); bottom->conclusion = {Qe, nP, P, R}; bottom->rule = RAx{1, 2};
+    auto fa = std::make_unique<Deriv>(); fa->conclusion = {faQ, nP, P, R};
+    fa->rule = RForall{0, 7, std::move(bottom)};
+    auto outer = std::make_unique<Deriv>(); outer->conclusion = {DD, nP, P};
+    outer->rule = ROr{0, std::move(fa)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {DD, nP, C};   // Γ_L=[DD,¬P] ++ Γ_R=[C]
+    cut->rule = RCut{P, std::move(outer), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({DD, nP, C}));
+}
+
+// B4 DEEP chain through a BINARY rule: the cut routes into an ∧-branch that
+// itself ends in a non-axiom rule (ROr). After try_b4_and the cut permutes
+// into the branch, then must see through the φ-to-last exchange to the branch's
+// ROr and continue down to the axiom. Exercises try_b4_and + peel together.
+void test_b4_and_over_or_to_zero() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle Z  = b.to_nnf(parse_root(ctx, "Z -> Z")).get().as_compound().right;
+    FormulaHandle nZ = b.to_nnf(parse_root(ctx, "Z -> Z")).get().as_compound().left;
+    FormulaHandle Y  = b.to_nnf(parse_root(ctx, "Y -> Y")).get().as_compound().right;
+    FormulaHandle nY = b.to_nnf(parse_root(ctx, "Y -> Y")).get().as_compound().left;
+    FormulaHandle U  = b.to_nnf(parse_root(ctx, "U -> U")).get().as_compound().right;
+    FormulaHandle V  = b.to_nnf(parse_root(ctx, "V -> V")).get().as_compound().right;
+    FormulaHandle C  = b.to_nnf(parse_root(ctx, "C -> C")).get().as_compound().right;
+    FormulaHandle DR = b.to_nnf(b.make_or(nZ, Z));     // ¬Z ∨ Z
+    FormulaHandle AC = b.to_nnf(b.make_and(U, V));     // U ∧ V
+    // left ∧-branch `into` = ROr{0} ⊢ [DR, P, U]; child [¬Z, P, U, Z] RAx{0,3}.
+    auto orChild = std::make_unique<Deriv>(); orChild->conclusion = {nZ, P, U, Z}; orChild->rule = RAx{0, 3};
+    auto into = std::make_unique<Deriv>(); into->conclusion = {DR, P, U};
+    into->rule = ROr{0, std::move(orChild)};
+    // right ∧-branch ⊢ [¬Y, Y, V] RAx{0,1}.
+    auto andR = std::make_unique<Deriv>(); andR->conclusion = {nY, Y, V}; andR->rule = RAx{0, 1};
+    // andNode ⊢ [DR, ¬Y, Y, AC, P]: principal=3 (AC), left_partition={0,4} (DR,P).
+    auto andNode = std::make_unique<Deriv>(); andNode->conclusion = {DR, nY, Y, AC, P};
+    andNode->rule = RAnd{3, {0, 4}, std::move(into), std::move(andR)};
+    auto righty = std::make_unique<Deriv>(); righty->conclusion = {C, nP}; righty->rule = lemma(ctx);
+    auto cut = std::make_unique<Deriv>(); cut->conclusion = {DR, nY, Y, AC, C};  // Γ_L ++ Γ_R=[C]
+    cut->rule = RCut{P, std::move(andNode), std::move(righty)};
+    CHECK_OK(validate(*cut));
+    FormulaBuilder builder = b;
+    auto out = eliminate_cuts(builder, *cut);
+    if (!out.ok()) { std::cerr << "FAIL: " << out.error().to_string() << "\n"; ++g_failed; return; }
+    CHECK(count_cuts(*out.value()) == 0);
+    CHECK_OK(validate(*out.value()));
+    CHECK(out.value()->conclusion == std::vector<FormulaHandle>({DR, nY, Y, AC, C}));
+}
+
 // =========================================================================
 // Step 4 — B5 structural (§5.5).
 // =========================================================================
@@ -1016,6 +1119,9 @@ int main() {
     test_b4_weaken_right();
     test_b4_or_chain_to_zero();
     test_b4_and_to_zero();
+    test_b4_or_over_or_to_zero();
+    test_b4_or_over_forall_to_zero();
+    test_b4_and_over_or_to_zero();
     test_b5_weaken_dead_left();
     test_b5_weaken_dead_right();
     test_b5_contraction_right();
