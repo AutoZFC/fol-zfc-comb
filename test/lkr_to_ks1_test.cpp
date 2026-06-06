@@ -121,11 +121,58 @@ void test_conjunction_of_em_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ ((a∧b) ∨ ¬a) ∨ ¬b — the canonical MLL tautology with ∧-and-context. Two
+// axioms (a/¬a, b/¬b) combined by an RAnd with NON-empty branch contexts, so
+// the switch sequence + ≡-reconciliation both fire.
+//   proof: ROr / ROr / RAnd{0, partition={2}, ax[¬a,a], ax[¬b,b]}.
+void test_and_with_context_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle PA = ctx.add_predicate("A", 0);
+    PredicateHandle PB = ctx.add_predicate("B", 0);
+    FormulaHandle a = fb.predicate(PA, {}), na = fb.make_not(a);
+    FormulaHandle b = fb.predicate(PB, {}), nb = fb.make_not(b);
+    FormulaHandle aAndB = fb.make_and(a, b);
+    FormulaHandle inner = fb.make_or(aAndB, na);          // (a∧b)∨¬a
+    FormulaHandle goal  = fb.make_or(inner, nb);          // ((a∧b)∨¬a)∨¬b
+
+    auto axiom = [&](FormulaHandle neg, FormulaHandle pos) {
+        auto ax = std::make_unique<lce::Deriv>();
+        ax->conclusion = {neg, pos};
+        ax->rule = lce::RAx{0, 1};                         // duals at 0,1
+        return ax;
+    };
+    // RAnd node sequent [a∧b, ¬b, ¬a]; principal 0; ¬a (pos 2) → left, ¬b → right.
+    auto andNode = std::make_unique<lce::Deriv>();
+    andNode->conclusion = {aAndB, nb, na};
+    andNode->rule = lce::RAnd{/*principal=*/0, /*left_partition=*/{2},
+                              axiom(na, a), axiom(nb, b)};
+    // ROr grouping (a∧b)∨¬a: child [a∧b, ¬b, ¬a].
+    auto or1 = std::make_unique<lce::Deriv>();
+    or1->conclusion = {inner, nb};
+    or1->rule = lce::ROr{0, std::move(andNode)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::ROr{0, std::move(or1)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
     test_excluded_middle_end_to_end();
     test_conjunction_of_em_end_to_end();
+    test_and_with_context_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

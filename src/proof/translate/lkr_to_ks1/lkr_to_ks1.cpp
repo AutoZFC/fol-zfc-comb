@@ -1,5 +1,7 @@
 #include "src/proof/translate/lkr_to_ks1/lkr_to_ks1.h"
 
+#include "src/proof/translate/lkr_to_ks1/reconcile.h"
+
 #include <variant>
 #include <vector>
 
@@ -17,11 +19,29 @@ bool is_negative_literal(FormulaHandle h) {
     return f.is_compound() && f.as_compound().op == Op::Not;
 }
 
+// (Γ) — the formula of a sequent: the LEFT-associated disjunction of its
+// entries (HSW §II.B). The contract of `tr` is "ends at denote(Γ)".
+FormulaHandle denote(FormulaBuilder& fb, const std::vector<FormulaHandle>& g) {
+    FormulaHandle acc = g[0];
+    for (std::size_t i = 1; i < g.size(); ++i) acc = fb.make_or(acc, g[i]);
+    return acc;
+}
+
 // Prepend `d` to every step's context — composes a sub-derivation (t ⟶ X)
 // inside the context S{·} = [d, …] (e.g. the Left branch of an ∧). See
 // LKR_TO_KS1_DESIGN.md.
 void prefix_context(std::vector<ks1::Step>& steps, ks1::Dir d) {
     for (ks1::Step& s : steps) s.context.insert(s.context.begin(), d);
+}
+
+ks1::Step eqv_step(ks1::EqRule eq, ks1::Path ctx) {
+    ks1::Step s;
+    s.rule = ks1::Rule::Eqv; s.eq = eq; s.dir = ks1::EqDir::Forward;
+    s.context = std::move(ctx);
+    return s;
+}
+ks1::Step sw_step(ks1::Path ctx) {
+    ks1::Step s; s.rule = ks1::Rule::Sw; s.context = std::move(ctx); return s;
 }
 
 ks1::Step ai_step(FormulaHandle positive_atom) {
@@ -31,13 +51,7 @@ ks1::Step ai_step(FormulaHandle positive_atom) {
     return s;
 }
 
-ks1::Step comm_or_root() {
-    ks1::Step s;
-    s.rule = ks1::Rule::Eqv;
-    s.eq   = ks1::EqRule::CommOr;
-    s.dir  = ks1::EqDir::Forward;     // A∨B → B∨A
-    return s;
-}
+ks1::Step comm_or_root() { return eqv_step(ks1::EqRule::CommOr, {}); }
 
 ks1::Step tu_root() {
     ks1::Step s;
@@ -69,40 +83,84 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
         return steps;
     }
 
-    // --- ROr: single-formula Or wrapper ⊢ φ∨ψ over child ⊢ φ,ψ. ----------
-    // (child) = φ∨ψ = (node) already (the ∨ grouping is free). Multi-formula
-    // Or reconciliation is K6.1b.
+    // --- ROr / RExchange: the sequent's (Γ) is an ≡-reshape of the child's.
+    // Recurse, then reconcile denote(child) ⟶ denote(node) with Eqv steps. ---
     if (const auto* orr = std::get_if<lce::ROr>(&d.rule)) {
-        if (d.conclusion.size() != 1)
-            return MAKE_ERROR << "lkr_to_ks1: K6.1 Or supports only a single-formula "
-                                 "goal sequent; multi-formula reconciliation is K6.1b";
-        const Formula& f = d.conclusion[0].get();
-        if (!(f.is_compound() && f.as_compound().op == Op::Or))
-            return MAKE_ERROR << "lkr_to_ks1: ROr goal is not a disjunction";
-        // The child sequent denotes the same formula; just recurse.
-        return tr(fb, *orr->child);
+        TRY_ASSIGN(steps, tr(fb, *orr->child));
+        TRY_ASSIGN(rec, equiv_steps(fb, denote(fb, orr->child->conclusion),
+                                    denote(fb, d.conclusion)));
+        steps.insert(steps.end(), rec.begin(), rec.end());
+        return steps;
+    }
+    if (const auto* ex = std::get_if<lce::RExchange>(&d.rule)) {
+        TRY_ASSIGN(steps, tr(fb, *ex->child));
+        TRY_ASSIGN(rec, equiv_steps(fb, denote(fb, ex->child->conclusion),
+                                    denote(fb, d.conclusion)));
+        steps.insert(steps.end(), rec.begin(), rec.end());
+        return steps;
     }
 
-    // --- RAnd: empty-context conjunction ⊢ φ∧ψ over ⊢ φ and ⊢ ψ. ---------
-    // Γ_L = Γ_R = ∅, so no switch sequence: t —Tu→ t∧t, then the two branch
-    // derivations in the Left/Right contexts. Non-empty context (the switch
-    // sequence of Lemma 20) is K6.1b.
+    // --- RAnd: ⊢ Γ_L,φ and ⊢ Γ_R,ψ ⊢ Γ_L,Γ_R,φ∧ψ. ---------------------
+    // Build t ⟶ (P∨φ)∧(Q∨ψ) [P=(Γ_L), Q=(Γ_R)], then the switch sequence to
+    // ((φ∧ψ)∨P)∨Q, then reconcile to denote(node). Empty contexts (P and/or Q
+    // absent) skip the switches entirely (LKR_TO_KS1_DESIGN.md §RAnd).
     if (const auto* andr = std::get_if<lce::RAnd>(&d.rule)) {
-        if (d.conclusion.size() != 1)
-            return MAKE_ERROR << "lkr_to_ks1: K6.1 And supports only the empty-context "
-                                 "case (single-formula goal); the switch sequence is K6.1b";
         const lce::Deriv* L = andr->left.get();
         const lce::Deriv* R = andr->right.get();
-        if (L->conclusion.size() != 1 || R->conclusion.size() != 1)
-            return MAKE_ERROR << "lkr_to_ks1: K6.1 And requires empty branch contexts "
-                                 "(each premise a single formula); switch sequence is K6.1b";
-        TRY_ASSIGN(stepsL, tr(fb, *L));
-        TRY_ASSIGN(stepsR, tr(fb, *R));
+        const bool emptyL = L->conclusion.size() == 1;   // Γ_L = ∅ (just φ)
+        const bool emptyR = R->conclusion.size() == 1;   // Γ_R = ∅ (just ψ)
+
+        TRY_ASSIGN(stepsL, tr(fb, *L));   // t ⟶ P∨φ (or φ if Γ_L=∅)
+        TRY_ASSIGN(stepsR, tr(fb, *R));   // t ⟶ Q∨ψ (or ψ if Γ_R=∅)
         prefix_context(stepsL, ks1::Dir::Left);
         prefix_context(stepsR, ks1::Dir::Right);
-        std::vector<ks1::Step> steps{tu_root()};           // t → t∧t
-        steps.insert(steps.end(), stepsL.begin(), stepsL.end());   // left t → φ
-        steps.insert(steps.end(), stepsR.begin(), stepsR.end());   // right t → ψ
+        std::vector<ks1::Step> steps{tu_root()};                    // t → t∧t
+        steps.insert(steps.end(), stepsL.begin(), stepsL.end());    // → (P∨φ)∧t
+        steps.insert(steps.end(), stepsR.begin(), stepsR.end());    // → (P∨φ)∧(Q∨ψ)
+
+        FormulaHandle phi = L->conclusion.back();
+        FormulaHandle psi = R->conclusion.back();
+        using P = ks1::Path; using D = ks1::Dir; using E = ks1::EqRule;
+        if (!emptyL && !emptyR) {
+            // (P∨φ)∧(Q∨ψ) ⟶ ((φ∧ψ)∨P)∨Q  (design doc steps 4–9).
+            steps.push_back(eqv_step(E::CommOr, P{D::Right}));       // (Q∨ψ)→(ψ∨Q)
+            steps.push_back(sw_step({}));                           // → ((P∨φ)∧ψ)∨Q
+            steps.push_back(eqv_step(E::CommOr, P{D::Left, D::Left}));// (P∨φ)→(φ∨P)
+            steps.push_back(eqv_step(E::CommAnd, P{D::Left}));       // → (ψ∧(φ∨P))∨Q
+            steps.push_back(sw_step(P{D::Left}));                   // → ((ψ∧φ)∨P)∨Q
+            steps.push_back(eqv_step(E::CommAnd, P{D::Left, D::Left}));// (ψ∧φ)→(φ∧ψ)
+        } else if (emptyL && !emptyR) {
+            // φ∧(Q∨ψ) ⟶ (φ∧ψ)∨Q
+            steps.push_back(eqv_step(E::CommOr, P{D::Right}));       // (Q∨ψ)→(ψ∨Q)
+            steps.push_back(sw_step({}));                           // → (φ∧ψ)∨Q
+        } else if (!emptyL && emptyR) {
+            // (P∨φ)∧ψ ⟶ (φ∧ψ)∨P
+            steps.push_back(eqv_step(E::CommOr, P{D::Left}));        // (P∨φ)→(φ∨P)
+            steps.push_back(eqv_step(E::CommAnd, {}));               // → ψ∧(φ∨P)
+            steps.push_back(sw_step({}));                           // → (ψ∧φ)∨P
+            steps.push_back(eqv_step(E::CommAnd, P{D::Left}));       // (ψ∧φ)→(φ∧ψ)
+        }
+        // else emptyL && emptyR: cur = φ∧ψ already; no switches.
+
+        // cur is now an ≡-reshape of denote(node); reconcile.
+        FormulaHandle cur;
+        if (emptyL && emptyR)       cur = fb.make_and(phi, psi);
+        else {
+            FormulaHandle conj = fb.make_and(phi, psi);
+            if (!emptyL && !emptyR) {
+                FormulaHandle Pf = denote(fb, {L->conclusion.begin(), L->conclusion.end() - 1});
+                FormulaHandle Qf = denote(fb, {R->conclusion.begin(), R->conclusion.end() - 1});
+                cur = fb.make_or(fb.make_or(conj, Pf), Qf);
+            } else if (emptyL) {
+                FormulaHandle Qf = denote(fb, {R->conclusion.begin(), R->conclusion.end() - 1});
+                cur = fb.make_or(conj, Qf);
+            } else {
+                FormulaHandle Pf = denote(fb, {L->conclusion.begin(), L->conclusion.end() - 1});
+                cur = fb.make_or(conj, Pf);
+            }
+        }
+        TRY_ASSIGN(rec, equiv_steps(fb, cur, denote(fb, d.conclusion)));
+        steps.insert(steps.end(), rec.begin(), rec.end());
         return steps;
     }
 

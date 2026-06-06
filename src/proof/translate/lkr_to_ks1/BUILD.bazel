@@ -1,5 +1,20 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
+# reconcile: emit Eqv (≡) steps reshaping one ∧/∨-bracketing into an equivalent
+# one (CUT_HANDLING_ROADMAP K6.1b). The reconciliation primitive the LK1→KS1
+# translation uses for the Or rule and the And switch tail. See reconcile.h.
+cc_library(
+    name = "reconcile",
+    srcs = ["reconcile.cpp"],
+    hdrs = ["reconcile.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/ks1:checker",
+        "//src/util:error",
+    ],
+)
+
 # lkr_to_ks1: cut-free LKR (Deriv tree) → decomposed KS1 derivation.
 # CUT_HANDLING_ROADMAP phase K6 — the front end that feeds the KS1→comb bridge.
 # See lkr_to_ks1.h. K6.0 skeleton (⊢ a∨ā); general LK1→KS1 (HSW §VII) is K6.1+.
@@ -9,6 +24,7 @@ cc_library(
     hdrs = ["lkr_to_ks1.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconcile",
         "//src/core:formula",
         "//src/proof/ks1:checker",
         "//src/proof/translate/lkr_cut_elim:deriv",
