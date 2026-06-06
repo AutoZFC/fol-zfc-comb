@@ -1083,7 +1083,8 @@ DerivPtr try_b5_weaken_dead(const Deriv& cut_node, const RCut& cut,
 // The two new cuts keep the degree but are pushed strictly upward (they cut
 // against C2, the contraction's premise — strictly smaller rank), so the
 // lexicographic (degree, rank) measure still descends.
-DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
+DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut,
+                            FormulaBuilder& b, var_index gfloor) {
     // Find the premise that ends in a contraction (RDuplicate{src==cut slot})
     // under φ-to-last exchanges; the other premise is O. Unified across both
     // orientations: the duplicated formula ψ (= φ or φ̄) is cut against O's dual
@@ -1115,9 +1116,15 @@ DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
     DerivPtr cut1r = rotate_to_back(std::move(cut1), cs_dup);
     std::vector<FormulaHandle> n2(cut1r->conclusion.begin(), cut1r->conclusion.end() - 1);
     n2.insert(n2.end(), O->conclusion.begin(), O->conclusion.end() - 1);
+    // The SECOND copy of O must have eigenvars distinct from the first (and from
+    // everything): O is DUPLICATED here, breaking global eigenvar distinctness;
+    // rectify the copy fresh above the whole current tree (gfloor) so a later
+    // commutation that merges the two O-branches cannot capture (§6).
+    var_index fresh = gfloor;
+    DerivPtr O2 = freshen_subst(*O, Rename{}, /*a=*/0, Term::fixed(0), fresh, b);
     auto cut2 = std::make_unique<Deriv>();
     cut2->conclusion = std::move(n2);                   // (Γ_C ++ Γ_o) ++ Γ_o
-    cut2->rule = RCut{psi, std::move(cut1r), clone(*O)};
+    cut2->rule = RCut{psi, std::move(cut1r), std::move(O2)};
 
     // Fold the trailing Γ_o copy into the kept one (kept block starts at |Γ_C|).
     const std::size_t base_o = cut2->conclusion.size() - 2 * go;
@@ -1139,7 +1146,8 @@ DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
 // =========================================================================
 util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
                                      const Deriv& cut_node,
-                                     const RCut& cut) {
+                                     const RCut& cut,
+                                     var_index gfloor) {
 #define DISPATCH_TRY(NAME, EXPR)                              \
     if (auto out = (EXPR)) {                                  \
         g_last_case = NAME;                                   \
@@ -1160,7 +1168,7 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
     // B5 — structural principal (W dead cut / C contraction). Before B4.
     DISPATCH_TRY("B5-weaken-L", try_b5_weaken_dead(cut_node, cut, true))
     DISPATCH_TRY("B5-weaken-R", try_b5_weaken_dead(cut_node, cut, false))
-    DISPATCH_TRY("B5-contraction", try_b5_contraction(cut_node, cut))
+    DISPATCH_TRY("B5-contraction", try_b5_contraction(cut_node, cut, builder, gfloor))
     // B4 — permutation (cut formula is a side formula of a premise's rule).
     // try_b4_permute sets g_last_case to the specific sub-case itself.
     if (auto out = try_b4_permute(cut_node, cut, builder))
@@ -1446,7 +1454,14 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
         if (!cut)
             return MAKE_ERROR << "eliminate_cuts: at_path returned non-cut";
 
-        auto reduced = dispatch_cut(builder, *cut_node, *cut);
+        // Fresh-eigenvar floor above EVERY fixed var in the whole current tree,
+        // recomputed each step. B5-C draws its duplicate's rename from this so
+        // the copy is globally distinct (maintains the variable-condition
+        // invariant established by the entry rectify).
+        std::size_t gfloor = 0;
+        collect_max_fixed_deriv(*current, gfloor);
+
+        auto reduced = dispatch_cut(builder, *cut_node, *cut, gfloor);
         if (!reduced.ok()) break;   // no §5 case applies — give up (residual).
 
         TRY_ASSIGN(new_tree, substitute_at(*current, cand->path,
