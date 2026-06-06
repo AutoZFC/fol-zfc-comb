@@ -274,6 +274,20 @@ cc_test(
 )
 
 cc_test(
+    name = "reduce_roundtrip_test",
+    srcs = ["reduce_roundtrip_test.cpp"],
+    deps = [
+        "//src/core:formula",
+        "//src/parser",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:verifier",
+        "//src/proof/translate/lkr_cut_elim:deriv",
+        "//src/proof/translate/lkr_cut_elim:reduce",
+        "//src/runtime",
+    ],
+)
+
+cc_test(
     name = "ks1_equiv_test",
     srcs = ["ks1_equiv_test.cpp"],
     deps = [
@@ -371,6 +385,7 @@ test_suite(
         ":deriv_invariants_test",
         ":b0_test",
         ":reduce_test",
+        ":reduce_roundtrip_test",
         ":iota_translator_test",
         ":ks1_checker_test",
         ":ks1_decompose_test",
