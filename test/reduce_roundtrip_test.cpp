@@ -297,6 +297,150 @@ void test_roundtrip_b3_under_exchange() {
     CHECK(roundtrip(ctx, b, G, *root));
 }
 
+// B3 with NESTED quantifiers: cut on ∀x.∀w.R(x,w) (degree 2) whose ∀-premise
+// is RForall(a) over RForall(b) — so B3's a:=witness substitution must recurse
+// (freshen_subst) THROUGH the inner ∀w, renaming its eigenvar. This is the
+// shape the corpus pair_eq_a/b reverify-fail on; it exercises the eigenvar
+// rectification path that `validate` cannot check.
+void test_roundtrip_b3_nested_quantifier() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle G   = parse_root(ctx, "forall y. forall z. (R(y,z) | ~R(y,z))");
+    FormulaHandle Gn  = b.to_nnf(G);
+    FormulaHandle Gz  = b.instantiate_quantifier_body(Gn.get().as_quantified().body, Term::fixed(0));      // ∀z.(R(0,z)∨¬R(0,z))
+    FormulaHandle disj = b.instantiate_quantifier_body(Gz.get().as_quantified().body, Term::fixed(1));      // R(0,1)∨¬R(0,1)
+    FormulaHandle Rce = disj.get().as_compound().left;     // R(0,1)
+    FormulaHandle nRce = disj.get().as_compound().right;   // ¬R(0,1)
+    FormulaHandle faxw = b.to_nnf(parse_root(ctx, "forall x. forall w. R(x,w)"));
+    FormulaHandle faw_a = b.instantiate_quantifier_body(faxw.get().as_quantified().body, Term::fixed(2));   // ∀w.R(2,w)
+    FormulaHandle Rab = b.instantiate_quantifier_body(faw_a.get().as_quantified().body, Term::fixed(3));    // R(2,3)
+    FormulaHandle exxw = b.to_nnf(b.make_not(faxw));        // ∃x.∃w.¬R(x,w)
+    FormulaHandle exw_c = b.instantiate_quantifier_body(exxw.get().as_quantified().body, Term::fixed(0));   // ∃w.¬R(0,w)
+
+    // ∀-premise: RForall(a=2) over RForall(b=3) over [Rce,nRce,R(a,b)] RAx.
+    auto La = ax({Rce, nRce, Rab}, 0, 1);
+    auto Linner = std::make_unique<Deriv>();
+    Linner->conclusion = {Rce, nRce, faw_a};
+    Linner->rule = RForall{2, 3, std::move(La)};
+    auto L = std::make_unique<Deriv>();
+    L->conclusion = {Rce, nRce, faxw};
+    L->rule = RForall{2, 2, std::move(Linner)};
+    // ∃-premise: RExists(c=0) over RExists(e=1) over [Rce,nRce,¬R(c,e)] RAx.
+    auto Ra = ax({Rce, nRce, nRce}, 0, 1);
+    auto Rinner = std::make_unique<Deriv>();
+    Rinner->conclusion = {Rce, nRce, exw_c};
+    Rinner->rule = RExists{2, Term::fixed(1), std::move(Ra)};
+    auto R = std::make_unique<Deriv>();
+    R->conclusion = {Rce, nRce, exxw};
+    R->rule = RExists{2, Term::fixed(0), std::move(Rinner)};
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {Rce, nRce};
+    cut->rule = RCut{faxw, std::move(L), std::move(R)};
+    auto orN = std::make_unique<Deriv>();
+    orN->conclusion = {disj};
+    orN->rule = ROr{0, std::move(cut)};
+    auto zfa = std::make_unique<Deriv>();
+    zfa->conclusion = {Gz};
+    zfa->rule = RForall{0, 1, std::move(orN)};
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {Gn};
+    root->rule = RForall{0, 0, std::move(zfa)};
+
+    CHECK(roundtrip(ctx, b, G, *root));
+}
+
+// try_b4_cut: an outer cut on ψ=¬P∨P (degree 1) whose left premise ends in a
+// LOWER-degree inner cut on Q (degree 0), with ψ a side formula of the inner
+// cut. B4 must permute the outer cut past the inner cut into ψ's branch. (No
+// §8 coverage existed for this case — it is the one the corpus reverify-fails.)
+void test_roundtrip_b4_cut() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle Q  = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle nQ = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().left;
+    FormulaHandle psi    = b.to_nnf(b.make_or(nP, P));     // ¬P ∨ P
+    FormulaHandle psibar = b.to_nnf(b.make_not(psi));      // P ∧ ¬P
+    FormulaHandle QorR   = b.to_nnf(b.make_or(Q, psi));    // Q ∨ (¬P∨P)
+    FormulaHandle G      = b.to_nnf(b.make_or(nQ, QorR));  // ¬Q ∨ (Q ∨ (¬P∨P))
+
+    // left = inner cut on Q: [¬Q,Q,ψ] from LA=[¬Q,Q] and LB=[Q,ψ,¬Q] (ψ in Γ_LB).
+    auto LA = ax({nQ, Q}, 0, 1);
+    auto LB = ax({Q, psi, nQ}, 0, 2);
+    auto left = std::make_unique<Deriv>();
+    left->conclusion = {nQ, Q, psi};
+    left->rule = RCut{Q, std::move(LA), std::move(LB)};
+    // right = RAnd on ψ̄=P∧¬P: [¬P,P,ψ̄].
+    auto Rb = ax({nP, P}, 0, 1);
+    auto Rg = ax({P, nP}, 0, 1);
+    auto right = std::make_unique<Deriv>();
+    right->conclusion = {nP, P, psibar};
+    right->rule = RAnd{2, {0}, std::move(Rb), std::move(Rg)};
+    // outer cut on ψ.
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {nQ, Q, nP, P};
+    cut->rule = RCut{psi, std::move(left), std::move(right)};
+    // ROr-chain expanding G to [¬Q,Q,¬P,P].
+    auto c2 = std::make_unique<Deriv>();
+    c2->conclusion = {nQ, Q, psi};
+    c2->rule = ROr{2, std::move(cut)};
+    auto c1 = std::make_unique<Deriv>();
+    c1->conclusion = {nQ, QorR};
+    c1->rule = ROr{1, std::move(c2)};
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {G};
+    root->rule = ROr{0, std::move(c1)};
+
+    CHECK(roundtrip(ctx, b, G, *root));
+}
+
+// try_b4_cut UNDER EXCHANGE: same as above but the inner θ-cut's ψ is at a
+// non-last position and an RExchange moves it to the outer cut slot — so B4
+// must peel the exchange to find the θ-cut. (Corpus θ-cuts are exchange-wrapped.)
+void test_roundtrip_b4_cut_under_exchange() {
+    Runtime rt; rt.load("axiom dummy: forall x. P(x)");
+    GlobalContext& ctx = rt.context(); FormulaBuilder b(ctx);
+    FormulaHandle P  = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().right;
+    FormulaHandle nP = b.to_nnf(parse_root(ctx, "P -> P")).get().as_compound().left;
+    FormulaHandle Q  = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().right;
+    FormulaHandle nQ = b.to_nnf(parse_root(ctx, "Q -> Q")).get().as_compound().left;
+    FormulaHandle psi    = b.to_nnf(b.make_or(nP, P));
+    FormulaHandle psibar = b.to_nnf(b.make_not(psi));
+    FormulaHandle QorR   = b.to_nnf(b.make_or(Q, psi));
+    FormulaHandle G      = b.to_nnf(b.make_or(nQ, QorR));
+
+    // inner θ-cut on Q: node [¬Q, ψ, Q] (ψ at position 1, not last).
+    auto LA = ax({nQ, Q}, 0, 1);
+    auto LB = ax({psi, Q, nQ}, 1, 2);
+    auto tcut = std::make_unique<Deriv>();
+    tcut->conclusion = {nQ, psi, Q};
+    tcut->rule = RCut{Q, std::move(LA), std::move(LB)};
+    // exchange ψ (pos 1) to the cut slot (last).
+    auto left = std::make_unique<Deriv>();
+    left->conclusion = {nQ, Q, psi};
+    left->rule = RExchange{1, 2, std::move(tcut)};
+    auto Rb = ax({nP, P}, 0, 1);
+    auto Rg = ax({P, nP}, 0, 1);
+    auto right = std::make_unique<Deriv>();
+    right->conclusion = {nP, P, psibar};
+    right->rule = RAnd{2, {0}, std::move(Rb), std::move(Rg)};
+    auto cut = std::make_unique<Deriv>();
+    cut->conclusion = {nQ, Q, nP, P};
+    cut->rule = RCut{psi, std::move(left), std::move(right)};
+    auto c2 = std::make_unique<Deriv>();
+    c2->conclusion = {nQ, Q, psi};
+    c2->rule = ROr{2, std::move(cut)};
+    auto c1 = std::make_unique<Deriv>();
+    c1->conclusion = {nQ, QorR};
+    c1->rule = ROr{1, std::move(c2)};
+    auto root = std::make_unique<Deriv>();
+    root->conclusion = {G};
+    root->rule = ROr{0, std::move(c1)};
+
+    CHECK(roundtrip(ctx, b, G, *root));
+}
+
 // Cut-free input round-trips unchanged (sanity: build/emit/verify baseline).
 void test_roundtrip_cut_free() {
     Runtime rt; rt.load("axiom dummy: forall x. P(x)");
@@ -320,6 +464,9 @@ int main() {
     test_roundtrip_b3_forall_exists();
     test_roundtrip_b2_under_exchange();
     test_roundtrip_b3_under_exchange();
+    test_roundtrip_b3_nested_quantifier();
+    test_roundtrip_b4_cut();
+    test_roundtrip_b4_cut_under_exchange();
     std::cout << "reduce_roundtrip_test: " << g_passed << " passed, "
               << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

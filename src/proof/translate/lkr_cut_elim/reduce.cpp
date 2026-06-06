@@ -1109,50 +1109,36 @@ DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
+// Name of the §5 case that last fired (debug diagnostics only; see reduce_loop).
+const char* g_last_case = "";
+
 util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
                                      const Deriv& cut_node,
                                      const RCut& cut) {
+#define DISPATCH_TRY(NAME, EXPR)                              \
+    if (auto out = (EXPR)) {                                  \
+        g_last_case = NAME;                                   \
+        return util::Result<DerivPtr>(std::move(out));        \
+    }
     // B1 — axiom / truth-literal non-principal on either side.
-    if (auto out = try_b1_ax_nonprincipal(cut_node, cut, /*ax_on_left=*/true))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b1_ax_nonprincipal(cut_node, cut, /*ax_on_left=*/false))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b1_one_nonprincipal(cut_node, cut, /*one_on_left=*/true))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b1_one_nonprincipal(cut_node, cut, /*one_on_left=*/false))
-        return util::Result<DerivPtr>(std::move(out));
-
+    DISPATCH_TRY("B1-ax-nonprin-L", try_b1_ax_nonprincipal(cut_node, cut, true))
+    DISPATCH_TRY("B1-ax-nonprin-R", try_b1_ax_nonprincipal(cut_node, cut, false))
+    DISPATCH_TRY("B1-one-nonprin-L", try_b1_one_nonprincipal(cut_node, cut, true))
+    DISPATCH_TRY("B1-one-nonprin-R", try_b1_one_nonprincipal(cut_node, cut, false))
     // B1 — axiom principal (cut formula IS one of the axiom's literals).
-    if (auto out = try_b1_ax_principal(cut_node, cut, /*ax_on_left=*/true))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b1_ax_principal(cut_node, cut, /*ax_on_left=*/false))
-        return util::Result<DerivPtr>(std::move(out));
-
+    DISPATCH_TRY("B1-ax-prin-L", try_b1_ax_principal(cut_node, cut, true))
+    DISPATCH_TRY("B1-ax-prin-R", try_b1_ax_principal(cut_node, cut, false))
     // B2 — principal logical, ∧ vs ∨ (either orientation).
-    if (auto out = try_b2_and_or(cut_node, cut))
-        return util::Result<DerivPtr>(std::move(out));
-
+    DISPATCH_TRY("B2-and-or", try_b2_and_or(cut_node, cut))
     // B3 — principal logical, ∀ vs ∃ (capture-avoiding witness substitution).
-    if (auto out = try_b3_forall_exists(cut_node, cut, builder))
-        return util::Result<DerivPtr>(std::move(out));
-
-    // B5 — structural principal: the cut formula was introduced by (W) [dead
-    // cut] or produced by a contraction (RDuplicate at the cut slot). Tried
-    // before B4 so the cheap structural reduction wins over a generic
-    // permutation; B5/B4 are disjoint anyway (cut-slot vs non-cut-slot).
-    if (auto out = try_b5_weaken_dead(cut_node, cut, /*w_on_left=*/true))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b5_weaken_dead(cut_node, cut, /*w_on_left=*/false))
-        return util::Result<DerivPtr>(std::move(out));
-    if (auto out = try_b5_contraction(cut_node, cut))
-        return util::Result<DerivPtr>(std::move(out));
-
+    DISPATCH_TRY("B3-forall-exists", try_b3_forall_exists(cut_node, cut, builder))
+    // B5 — structural principal (W dead cut / C contraction). Before B4.
+    DISPATCH_TRY("B5-weaken-L", try_b5_weaken_dead(cut_node, cut, true))
+    DISPATCH_TRY("B5-weaken-R", try_b5_weaken_dead(cut_node, cut, false))
+    DISPATCH_TRY("B5-contraction", try_b5_contraction(cut_node, cut))
     // B4 — permutation (cut formula is a side formula of a premise's rule).
-    if (auto out = try_b4_permute(cut_node, cut, builder))
-        return util::Result<DerivPtr>(std::move(out));
-
-    // TODO Step 4 continued: B1 principal ROne; B4 appending rules over
-    // non-axiom chains (φ-position-aware permutation); Stage A RLemma inlining.
+    DISPATCH_TRY("B4-permute", try_b4_permute(cut_node, cut, builder))
+#undef DISPATCH_TRY
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
 
@@ -1375,36 +1361,56 @@ util::Result<DerivPtr> inline_lemmas(FormulaBuilder& b, const Deriv& d,
 
 }  // namespace
 
-util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root,
-                                      const LemmaProofs& lemmas) {
-    TRY(validate(root));
-    // Stage A: inline proven-theorem lemma citations (§3). Run before B0/B so
-    // the surrounding cuts become logical and reduce.
-    TRY_ASSIGN(inlined, inline_lemmas(builder, root, lemmas));
-    TRY(validate(*inlined));
-    return eliminate_cuts(builder, *inlined);
+namespace {
+
+// Debug dump of a Deriv subtree (LKR_CUT_ELIM_DEBUG): rule + key fields + the
+// node's conclusion as formula strings. Used to capture the exact cut a buggy
+// reduction was applied to, for building a focused §8 repro.
+void dump_deriv(const Deriv& d, int indent) {
+    std::string pad(static_cast<std::size_t>(indent) * 2, ' ');
+    std::string concl;
+    for (FormulaHandle h : d.conclusion)
+        concl += (concl.empty() ? "" : ", ") + h.get().to_string();
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        const char* nm =
+            std::is_same_v<T, RAx> ? "Ax" : std::is_same_v<T, ROne> ? "One" :
+            std::is_same_v<T, RLemma> ? "Lemma" : std::is_same_v<T, RExchange> ? "Exch" :
+            std::is_same_v<T, RWeaken> ? "Weak" : std::is_same_v<T, RDuplicate> ? "Dup" :
+            std::is_same_v<T, RContract> ? "Contr" : std::is_same_v<T, RAnd> ? "And" :
+            std::is_same_v<T, ROr> ? "Or" : std::is_same_v<T, RForall> ? "Forall" :
+            std::is_same_v<T, RExists> ? "Exists" : "Cut";
+        std::fprintf(stderr, "%s%s |- %s\n", pad.c_str(), nm, concl.c_str());
+        if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
+                      std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
+                      std::is_same_v<T, ROr> || std::is_same_v<T, RForall> ||
+                      std::is_same_v<T, RExists>) {
+            dump_deriv(*r.child, indent + 1);
+        } else if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
+            dump_deriv(*r.left, indent + 1);
+            dump_deriv(*r.right, indent + 1);
+        }
+    }, d.rule);
 }
 
-util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
-    TRY(validate(root));
-    // B0: every additive Cut → multiplicative (CUT_ELIM_DESIGN §4). The §5
-    // cases below assume the multiplicative shape (node = Γ_L ++ Γ_R).
-    // Idempotent on already-multiplicative / cut-free trees.
-    TRY_ASSIGN(current, additive_to_multiplicative(root));
+// The B-stage worklist loop (B0 then §5 reductions, then mult→additive). The
+// optional `verify_step` is an extra per-step gate beyond the structural
+// validate (see reduce.h); on a rejected reduction the last valid tree is kept.
+util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
+                                   const VerifyStep& verify_step) {
+    TRY_ASSIGN(current, additive_to_multiplicative(start));
 
-    // Worklist loop: find topmost max-degree cut, attempt dispatch,
-    // replace on success, give up on stub failure.
-    //
     // Step cap (B6 backstop): Gentzen cut-elim is non-elementary worst-case and
-    // the contraction case (B5-C) duplicates subderivations, so a large proof
-    // can blow up or — if a permutation case ever cycles — loop. Cap the steps
-    // so eliminate_cuts always terminates; on the cap it returns the current
-    // valid (partially-reduced) tree. Override via LKR_CUT_ELIM_MAX_STEPS.
+    // B5-C duplicates subderivations, so a large proof can blow up. Cap steps so
+    // eliminate_cuts always terminates; on the cap it returns the current valid
+    // (partially-reduced) tree. Override via LKR_CUT_ELIM_MAX_STEPS.
     std::size_t max_steps = 200000;
     if (const char* m = std::getenv("LKR_CUT_ELIM_MAX_STEPS")) {
         long v = std::atol(m);
         if (v > 0) max_steps = static_cast<std::size_t>(v);
     }
+    const bool dbg = std::getenv("LKR_CUT_ELIM_DEBUG") != nullptr;
+
     for (std::size_t step = 0; step < max_steps; ++step) {
         auto cand = find_topmost_max_deg_cut(*current);
         if (!cand) break;  // no cuts remain.
@@ -1417,25 +1423,47 @@ util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root
             return MAKE_ERROR << "eliminate_cuts: at_path returned non-cut";
 
         auto reduced = dispatch_cut(builder, *cut_node, *cut);
-        if (!reduced.ok()) {
-            // Step 3 scaffold: all cases are stubs. Give up.
-            break;
-        }
+        if (!reduced.ok()) break;   // no §5 case applies — give up (residual).
 
         TRY_ASSIGN(new_tree, substitute_at(*current, cand->path,
                                             std::move(reduced).unwrap()));
-        // Fail-safe: a reduction must produce a structurally-valid tree. If a
-        // case has a bug on this shape, DON'T commit it — keep the last valid
-        // tree and stop (the residual cut stays; soundness preserved). Keeps
-        // eliminate_cuts total-and-sound while cases are being completed.
-        if (!validate(*new_tree).ok()) break;
+        // Fail-safe: every reduction must produce a structurally-valid tree and
+        // (if verify_step is set) survive the full verifier. Reject a buggy
+        // reduction — keep the last valid tree, stop. Soundness preserved.
+        if (!validate(*new_tree).ok() ||
+            (verify_step && !verify_step(*new_tree))) {
+            if (dbg) {
+                std::fprintf(stderr, "[cut-elim] reduction REJECTED at step %zu "
+                             "(case %s); offending cut (input to dispatch):\n",
+                             step, g_last_case);
+                dump_deriv(*cut_node, 1);
+            }
+            break;
+        }
         current = std::move(new_tree);
     }
 
-    // Any residual (irreducible, §7a) cut is still multiplicative; convert
-    // back to additive so the output emits to the additive LKR (Cut) and
-    // re-verifies. No-op when fully cut-free.
+    // Any residual (irreducible) cut is still multiplicative; convert back to
+    // additive so the output emits to the additive LKR (Cut). No-op if cut-free.
     return multiplicative_to_additive(*current);
+}
+
+}  // namespace
+
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root,
+                                      const LemmaProofs& lemmas,
+                                      const VerifyStep& verify_step) {
+    TRY(validate(root));
+    // Stage A: inline proven-theorem lemma citations (§3). Run before B0/B so
+    // the surrounding cuts become logical and reduce.
+    TRY_ASSIGN(inlined, inline_lemmas(builder, root, lemmas));
+    TRY(validate(*inlined));
+    return reduce_loop(builder, *inlined, verify_step);
+}
+
+util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root) {
+    TRY(validate(root));
+    return reduce_loop(builder, root, {});
 }
 
 }  // namespace logic::proof::translate::lkr_cut_elim

@@ -22,6 +22,7 @@
 #include "src/util/error.h"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -36,15 +37,25 @@ namespace logic::proof::translate::lkr_cut_elim {
 using LemmaProofs =
     std::unordered_map<SentenceHandle, const Deriv*, SentenceHandleHash>;
 
+// Optional per-step soundness gate. If set, eliminate_cuts calls it on each
+// reduction's output BEFORE committing; a `false` return rejects that reduction
+// (the last valid tree is kept). Lets a caller inject the full LKRVerifier
+// (emit→verify) — stronger than the structural `validate` — so eliminate_cuts
+// never returns verify-failing output even while a case has a latent bug. Null
+// = structural validate only.
+using VerifyStep = std::function<bool(const Deriv&)>;
+
 // Eliminate Cuts and (proven-theorem) RLemmas from a Deriv via Gentzen's
 // Hauptsatz: Stage A inlines lemma citations from `lemmas`, then B0 +
 // Stage B reduce the resulting logical cuts. Returns a fresh Deriv with the
 // same end-sequent. On hitting an unimplemented case, returns the tree as-is
-// (soundness preserved; completeness narrows).
+// (soundness preserved; completeness narrows). `verify_step` (optional) is the
+// per-step gate above.
 //
 // Preconditions: root passes validate().
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root,
-                                      const LemmaProofs& lemmas);
+                                      const LemmaProofs& lemmas,
+                                      const VerifyStep& verify_step = {});
 
 // Convenience overload with no lemma citations to inline (pure cut-elim).
 util::Result<DerivPtr> eliminate_cuts(FormulaBuilder& builder, const Deriv& root);
