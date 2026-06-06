@@ -50,62 +50,61 @@ DerivPtr clone(const Deriv& d) {
     return n;
 }
 
-// --- find max degree across all cuts; track whether any cut exists ---
-void scan_cuts(const Deriv& d, std::size_t& max_deg, bool& any) {
-    std::visit([&](auto&& r) {
+// --- Single-pass topmost-max-degree cut selection (B6). ------------------
+//
+// The driver needs the TOPMOST cut of MAXIMAL degree: a max-degree cut with
+// no other max-degree cut strictly above it (= deepest in the IR, since the
+// proof grows toward the leaves). This is the order Gentzen's reduction
+// requires, and is essential for the structural cases (B5), whose reduction
+// nests a fresh same-degree cut inside a premise that cannot reduce until the
+// inner (deeper) cut is gone.
+//
+// Previously this took TWO full traversals — scan_cuts (global max degree)
+// then find_topmost (descend to it). One bottom-up pass suffices: each call
+// returns its subtree's max cut-degree and the (relative) path to the topmost
+// cut achieving it. The invariant that makes this correct: we only ever follow
+// a branch whose local max equals the combined max, so "topmost of local max"
+// in that branch IS "topmost of the global max". Tie-breaks (prefer a child
+// over self, prefer left over right) match the old DFS pre-order exactly.
+struct TopmostScan {
+    bool        has_cut = false;
+    std::size_t max_deg = 0;
+    CutPath     path;          // from this node to the chosen cut.
+};
+TopmostScan scan_topmost(const Deriv& d) {
+    return std::visit([&](auto&& r) -> TopmostScan {
         using T = std::decay_t<decltype(r)>;
         if constexpr (std::is_same_v<T, RCut>) {
-            any = true;
+            TopmostScan L = scan_topmost(*r.left);
+            TopmostScan R = scan_topmost(*r.right);
             std::size_t dg = degree(r.cut_formula);
-            if (dg > max_deg) max_deg = dg;
-            scan_cuts(*r.left, max_deg, any);
-            scan_cuts(*r.right, max_deg, any);
+            std::size_t m = dg;
+            if (L.has_cut) m = std::max(m, L.max_deg);
+            if (R.has_cut) m = std::max(m, R.max_deg);
+            TopmostScan out; out.has_cut = true; out.max_deg = m;
+            if (L.has_cut && L.max_deg == m) {            // deeper, prefer left.
+                out.path.push_back(0);
+                out.path.insert(out.path.end(), L.path.begin(), L.path.end());
+            } else if (R.has_cut && R.max_deg == m) {
+                out.path.push_back(1);
+                out.path.insert(out.path.end(), R.path.begin(), R.path.end());
+            }   // else this cut itself is the topmost of degree m (empty path).
+            return out;
         } else if constexpr (std::is_same_v<T, RAnd>) {
-            scan_cuts(*r.left, max_deg, any);
-            scan_cuts(*r.right, max_deg, any);
-        } else if constexpr (std::is_same_v<T, RExchange> ||
-                             std::is_same_v<T, RWeaken>   ||
-                             std::is_same_v<T, RDuplicate>||
-                             std::is_same_v<T, RContract> ||
-                             std::is_same_v<T, ROr>       ||
-                             std::is_same_v<T, RForall>   ||
-                             std::is_same_v<T, RExists>) {
-            scan_cuts(*r.child, max_deg, any);
-        }
-    }, d.rule);
-}
-
-// --- DFS for a max-degree RCut that is TOPMOST in the proof: no cut of the
-// same (maximal) degree strictly above it = none among its descendants in
-// the IR. We therefore descend FIRST and only accept a node once its subtree
-// has no qualifying cut. This is the order Gentzen's reduction requires —
-// a max-degree cut whose two subderivations are free of max-degree cuts —
-// and it is essential for the structural cases (B5), whose reduction nests a
-// fresh same-degree cut inside a premise that cannot reduce until the inner
-// (deeper) cut is gone.
-bool find_topmost(const Deriv& d, std::size_t target_deg,
-                  CutPath& path_so_far, CutPath& result) {
-    return std::visit([&](auto&& r) -> bool {
-        using T = std::decay_t<decltype(r)>;
-        if constexpr (std::is_same_v<T, RCut>) {
-            path_so_far.push_back(0);
-            if (find_topmost(*r.left,  target_deg, path_so_far, result)) return true;
-            path_so_far.back() = 1;
-            if (find_topmost(*r.right, target_deg, path_so_far, result)) return true;
-            path_so_far.pop_back();
-            if (degree(r.cut_formula) == target_deg) {
-                result = path_so_far;   // no deeper max-degree cut — accept this one.
-                return true;
+            TopmostScan L = scan_topmost(*r.left);
+            TopmostScan R = scan_topmost(*r.right);
+            if (!L.has_cut && !R.has_cut) return TopmostScan{};
+            std::size_t m = std::max(L.has_cut ? L.max_deg : 0,
+                                     R.has_cut ? R.max_deg : 0);
+            TopmostScan out; out.has_cut = true; out.max_deg = m;
+            if (L.has_cut && L.max_deg == m) {
+                out.path.push_back(0);
+                out.path.insert(out.path.end(), L.path.begin(), L.path.end());
+            } else {
+                out.path.push_back(1);
+                out.path.insert(out.path.end(), R.path.begin(), R.path.end());
             }
-            return false;
-        } else if constexpr (std::is_same_v<T, RAnd>) {
-            path_so_far.push_back(0);
-            if (find_topmost(*r.left,  target_deg, path_so_far, result)) return true;
-            path_so_far.pop_back();
-            path_so_far.push_back(1);
-            if (find_topmost(*r.right, target_deg, path_so_far, result)) return true;
-            path_so_far.pop_back();
-            return false;
+            return out;
         } else if constexpr (std::is_same_v<T, RExchange> ||
                              std::is_same_v<T, RWeaken>   ||
                              std::is_same_v<T, RDuplicate>||
@@ -113,24 +112,32 @@ bool find_topmost(const Deriv& d, std::size_t target_deg,
                              std::is_same_v<T, ROr>       ||
                              std::is_same_v<T, RForall>   ||
                              std::is_same_v<T, RExists>) {
-            path_so_far.push_back(0);
-            if (find_topmost(*r.child, target_deg, path_so_far, result)) return true;
-            path_so_far.pop_back();
-            return false;
+            TopmostScan c = scan_topmost(*r.child);
+            if (!c.has_cut) return TopmostScan{};
+            TopmostScan out; out.has_cut = true; out.max_deg = c.max_deg;
+            out.path.push_back(0);
+            out.path.insert(out.path.end(), c.path.begin(), c.path.end());
+            return out;
         }
-        return false;
+        return TopmostScan{};   // RAx / ROne / RLemma: no cut.
     }, d.rule);
 }
 
 // --- Read the subtree at a path (no ownership transfer). ---
-const Deriv* at_path(const Deriv& tree, const CutPath& path) {
-    const Deriv* cur = &tree;
+// Mutable pointer to the owning DerivPtr slot at `path` (the slot in `root`'s
+// own pointer for the empty path, else a child slot of the node above the
+// target). Returning the OWNING slot lets the driver splice a reduction in
+// place — `*slot = reduction` — instead of rebuilding the spine and cloning
+// every sibling subtree, which is the O(tree) copy substitute_at paid every
+// step (B6). Returns nullptr if the path runs off a leaf.
+DerivPtr* slot_at_path(DerivPtr& root, const CutPath& path) {
+    DerivPtr* slot = &root;
     for (int step : path) {
-        const Deriv* next = nullptr;
+        DerivPtr* next = nullptr;
         std::visit([&](auto&& r) {
             using T = std::decay_t<decltype(r)>;
             if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
-                next = (step == 0) ? r.left.get() : r.right.get();
+                next = (step == 0) ? &r.left : &r.right;
             } else if constexpr (std::is_same_v<T, RExchange> ||
                                  std::is_same_v<T, RWeaken>   ||
                                  std::is_same_v<T, RDuplicate>||
@@ -138,100 +145,13 @@ const Deriv* at_path(const Deriv& tree, const CutPath& path) {
                                  std::is_same_v<T, ROr>       ||
                                  std::is_same_v<T, RForall>   ||
                                  std::is_same_v<T, RExists>) {
-                next = r.child.get();
+                next = &r.child;
             }
-        }, cur->rule);
+        }, (*slot)->rule);
         if (!next) return nullptr;
-        cur = next;
+        slot = next;
     }
-    return cur;
-}
-
-// --- Substitute a new subtree at the given path; returns a fresh tree. ---
-util::Result<DerivPtr> substitute_at(const Deriv& tree, const CutPath& path,
-                                      DerivPtr new_subtree,
-                                      std::size_t depth = 0) {
-    if (depth == path.size())
-        return util::Result<DerivPtr>(std::move(new_subtree));
-
-    int step = path[depth];
-    auto n = std::make_unique<Deriv>();
-    n->conclusion = tree.conclusion;
-
-    return std::visit([&](auto&& r) -> util::Result<DerivPtr> {
-        using T = std::decay_t<decltype(r)>;
-        if constexpr (std::is_same_v<T, RAnd>) {
-            if (step == 0) {
-                TRY_ASSIGN(nl, substitute_at(*r.left, path,
-                                             std::move(new_subtree), depth + 1));
-                n->rule = RAnd{r.principal, r.left_partition,
-                               std::move(nl), clone(*r.right)};
-            } else {
-                TRY_ASSIGN(nr, substitute_at(*r.right, path,
-                                             std::move(new_subtree), depth + 1));
-                n->rule = RAnd{r.principal, r.left_partition,
-                               clone(*r.left), std::move(nr)};
-            }
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RCut>) {
-            if (step == 0) {
-                TRY_ASSIGN(nl, substitute_at(*r.left, path,
-                                             std::move(new_subtree), depth + 1));
-                n->rule = RCut{r.cut_formula, std::move(nl), clone(*r.right)};
-            } else {
-                TRY_ASSIGN(nr, substitute_at(*r.right, path,
-                                             std::move(new_subtree), depth + 1));
-                n->rule = RCut{r.cut_formula, clone(*r.left), std::move(nr)};
-            }
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RExchange>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RExchange{r.i, r.j, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RWeaken>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RWeaken{r.idx, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RDuplicate>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RDuplicate{r.src, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RContract>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RContract{r.i, r.j, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, ROr>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = ROr{r.principal, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RForall>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RForall{r.principal, r.eigen, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else if constexpr (std::is_same_v<T, RExists>) {
-            TRY_ASSIGN(nc, substitute_at(*r.child, path,
-                                         std::move(new_subtree), depth + 1));
-            n->rule = RExists{r.principal, r.witness, std::move(nc)};
-            return util::Result<DerivPtr>(std::move(n));
-        }
-        else {
-            return MAKE_ERROR << "substitute_at: cannot descend into leaf rule at path";
-        }
-    }, tree.rule);
+    return slot;
 }
 
 // =========================================================================
@@ -1198,13 +1118,9 @@ std::size_t degree(FormulaHandle f) {
 }
 
 std::optional<CutCandidate> find_topmost_max_deg_cut(const Deriv& root) {
-    std::size_t max_deg = 0;
-    bool any = false;
-    scan_cuts(root, max_deg, any);
-    if (!any) return std::nullopt;
-    CutPath path, result;
-    if (!find_topmost(root, max_deg, path, result)) return std::nullopt;
-    return CutCandidate{std::move(result), max_deg};
+    TopmostScan s = scan_topmost(root);
+    if (!s.has_cut) return std::nullopt;
+    return CutCandidate{std::move(s.path), s.max_deg};
 }
 
 // =========================================================================
@@ -1443,43 +1359,57 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
     }
     const bool dbg = std::getenv("LKR_CUT_ELIM_DEBUG") != nullptr;
 
+    // Monotonic fresh-eigenvar floor (B6): rather than re-scan the whole tree
+    // each step, maintain `g_fresh` >= 1 + (max fixed/eigen var anywhere in
+    // `current`) as an INVARIANT. Initialized once over the rectified tree; B5-C
+    // draws its duplicate's rename from it; after each committed reduction it is
+    // bumped past any fresh vars the reduction minted by scanning ONLY the
+    // spliced subtree (the rest of `current` is unchanged, so its vars are still
+    // below the old floor). Monotone non-decreasing ⇒ eigenvars stay globally
+    // distinct across the whole run (Hughes Def 10.10), and gfloor is always a
+    // safe (indeed conservative) floor for the duplication case.
+    std::size_t g_fresh = 0;
+    collect_max_fixed_deriv(*current, g_fresh);
+
     for (std::size_t step = 0; step < max_steps; ++step) {
         auto cand = find_topmost_max_deg_cut(*current);
         if (!cand) break;  // no cuts remain.
 
-        const Deriv* cut_node = at_path(*current, cand->path);
-        if (!cut_node)
+        DerivPtr* slot = slot_at_path(current, cand->path);
+        if (!slot || !*slot)
             return MAKE_ERROR << "eliminate_cuts: lost cut node at path";
+        const Deriv* cut_node = slot->get();
         const auto* cut = std::get_if<RCut>(&cut_node->rule);
         if (!cut)
-            return MAKE_ERROR << "eliminate_cuts: at_path returned non-cut";
+            return MAKE_ERROR << "eliminate_cuts: slot_at_path returned non-cut";
 
-        // Fresh-eigenvar floor above EVERY fixed var in the whole current tree,
-        // recomputed each step. B5-C draws its duplicate's rename from this so
-        // the copy is globally distinct (maintains the variable-condition
-        // invariant established by the entry rectify).
-        std::size_t gfloor = 0;
-        collect_max_fixed_deriv(*current, gfloor);
-
-        auto reduced = dispatch_cut(builder, *cut_node, *cut, gfloor);
+        // dispatch_cut takes the cut node by const ref and only CLONES what it
+        // keeps (never moves out of cut_node), so cut_node stays intact here.
+        auto reduced = dispatch_cut(builder, *cut_node, *cut, g_fresh);
         if (!reduced.ok()) break;   // no §5 case applies — give up (residual).
 
-        TRY_ASSIGN(new_tree, substitute_at(*current, cand->path,
-                                            std::move(reduced).unwrap()));
+        // Splice the reduction in place. Detach (not clone) the old cut subtree
+        // into `saved` first so the fail-safe can restore it in O(1) — the rest
+        // of the tree is never copied (the B6 win over substitute_at). `cut_node`
+        // still points into `saved` (same pointee) and stays valid this step.
+        DerivPtr saved = std::move(*slot);
+        *slot = std::move(reduced).unwrap();
         // Fail-safe: every reduction must produce a structurally-valid tree and
         // (if verify_step is set) survive the full verifier. Reject a buggy
-        // reduction — keep the last valid tree, stop. Soundness preserved.
-        if (!validate(*new_tree).ok() ||
-            (verify_step && !verify_step(*new_tree))) {
+        // reduction — restore the last valid subtree, stop. Soundness preserved.
+        if (!validate(*current).ok() ||
+            (verify_step && !verify_step(*current))) {
             if (dbg) {
                 std::fprintf(stderr, "[cut-elim] reduction REJECTED at step %zu "
                              "(case %s); offending cut (input to dispatch):\n",
                              step, g_last_case);
                 dump_deriv(*cut_node, 1);
             }
+            *slot = std::move(saved);   // restore — current is again last-valid.
             break;
         }
-        current = std::move(new_tree);
+        // Committed: bump the floor past any fresh vars in the new subtree only.
+        collect_max_fixed_deriv(**slot, g_fresh);
     }
 
     // Any residual (irreducible) cut is still multiplicative; convert back to
