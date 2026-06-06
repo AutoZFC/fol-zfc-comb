@@ -104,20 +104,12 @@ std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
 
     lce::LemmaProofs lemmas;
     for (auto& [k, v] : cache) lemmas[k] = v.get();
-    // Per-step sound gate: normalize (mult→additive) → emit → LKRVerifier. A
-    // reduction whose output fails the full verifier is rejected (kept as
-    // residual) — so eliminate_cuts never returns verify-failing output, and a
-    // buggy case is caught immediately rather than corrupting downstream.
-    lce::VerifyStep verify_step = [&](const lce::Deriv& d) -> bool {
-        auto a = lce::multiplicative_to_additive(d);
-        if (!a.ok()) return false;
-        auto p = lce::emit(*a.value());
-        if (!p.ok()) return false;
-        Proof pf{System::LKR, p.value()};
-        lkr::LKRVerifier vv;
-        return vv.verify(ctx, wrapped_goal, pf).ok();
-    };
-    auto elim_r = lce::eliminate_cuts(fb, *deriv_r.value(), lemmas, verify_step);
+    // No per-step verify gate: the reductions are correct, so the final
+    // emit→LKRVerifier below is the (faithful) check — a reduction bug surfaces
+    // as reverify_fail rather than being silently masked into residual. (The
+    // optional VerifyStep gate in eliminate_cuts remains for the back-end, which
+    // needs guaranteed soundness on untrusted input.)
+    auto elim_r = lce::eliminate_cuts(fb, *deriv_r.value(), lemmas);
     if (!elim_r.ok()) return "elim_err: " + elim_r.error().to_string();
     lce::DerivPtr cutfree = std::move(elim_r).unwrap();
 

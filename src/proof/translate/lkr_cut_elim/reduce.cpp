@@ -14,6 +14,9 @@ namespace logic::proof::translate::lkr_cut_elim {
 
 namespace {
 
+// Name of the §5 case/sub-case that last fired (debug diagnostics only).
+const char* g_last_case = "";
+
 DerivPtr clone(const Deriv& d) {
     auto n = std::make_unique<Deriv>();
     n->conclusion = d.conclusion;
@@ -610,6 +613,31 @@ void collect_max_fixed_formula(FormulaHandle h, std::size_t& floor) {
     }
 }
 
+// Greatest fixed-var index used ANYWHERE in `d` — every conclusion formula, ∃
+// witness, and ∀ eigenvar, recursively. The correct floor for allocating a
+// fresh eigenvariable that must avoid capture against a whole subderivation
+// (§6): scanning only `d.conclusion` misses eigenvars/witnesses buried deeper,
+// which is exactly the capture bug B3 / B4-unary-∀ hit on large proofs.
+void collect_max_fixed_deriv(const Deriv& d, std::size_t& floor) {
+    for (FormulaHandle h : d.conclusion) collect_max_fixed_formula(h, floor);
+    std::visit([&](auto&& r) {
+        using T = std::decay_t<decltype(r)>;
+        if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
+                      std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
+                      std::is_same_v<T, ROr> || std::is_same_v<T, RForall>) {
+            if constexpr (std::is_same_v<T, RForall>) floor = std::max(floor, r.eigen + 1);
+            collect_max_fixed_deriv(*r.child, floor);
+        } else if constexpr (std::is_same_v<T, RExists>) {
+            collect_max_fixed_term(r.witness, floor);
+            collect_max_fixed_deriv(*r.child, floor);
+        } else if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
+            collect_max_fixed_deriv(*r.left, floor);
+            collect_max_fixed_deriv(*r.right, floor);
+        }
+        // RAx / ROne / RLemma: leaves, conclusion already scanned.
+    }, d.rule);
+}
+
 using Rename = std::unordered_map<var_index, var_index>;
 
 FormulaHandle apply_fv(FormulaHandle h, const Rename& rn,
@@ -687,9 +715,12 @@ DerivPtr try_b3_forall_exists(const Deriv& cut_node, const RCut& cut,
     if (fa->principal != fa_cs) return nullptr;   // ∀ principal on φ
     if (ex->principal != ex_cs) return nullptr;   // ∃ principal on φ̄
 
-    // Fresh floor: above every fixed var in Lc and the witness t.
+    // Fresh floor: above every fixed var ANYWHERE in the ∀-subderivation, the
+    // ∃-subderivation, and the witness t — not just their conclusions, else a
+    // renamed eigenvar can collide with one buried deeper (§6 capture).
     std::size_t fresh = fa->eigen + 1;
-    for (FormulaHandle h : fa->child->conclusion) collect_max_fixed_formula(h, fresh);
+    collect_max_fixed_deriv(*fa->child, fresh);
+    collect_max_fixed_deriv(*ex->child, fresh);
     collect_max_fixed_term(ex->witness, fresh);
 
     // Lc' = Lc with a:=t (rectified): the instantiated body β[x:=t] sits at the
@@ -791,11 +822,14 @@ DerivPtr try_b4_unary(const std::vector<FormulaHandle>& node, const Deriv* cur,
     }
     if (const RForall* r = std::get_if<RForall>(&cur->rule)) {
         if (r->principal == cs) return nullptr;            // principal → B3
-        // Rectify the eigenvar so it cannot be captured by `other`'s context.
+        // Rectify the eigenvar fresh above every fixed var ANYWHERE in `other`
+        // and the ∀-subderivation (whole subtrees, not just conclusions — a
+        // deep eigenvar in `other` is exactly what captured e2 on the corpus),
+        // and above node's vars.
         std::size_t fresh = r->eigen + 1;
         for (FormulaHandle h : node) collect_max_fixed_formula(h, fresh);
-        for (FormulaHandle h : other->conclusion) collect_max_fixed_formula(h, fresh);
-        for (FormulaHandle h : r->child->conclusion) collect_max_fixed_formula(h, fresh);
+        collect_max_fixed_deriv(*other, fresh);
+        collect_max_fixed_deriv(*r->child, fresh);
         var_index e2 = fresh++;
         DerivPtr Rc2 = freshen_subst(*r->child, Rename{}, r->eigen, Term::fixed(e2), fresh, b);
         const Formula& f = node[remap[r->principal]].get();   // ∀x.ψ
@@ -959,23 +993,17 @@ DerivPtr try_b4_permute(const Deriv& cut_node, const RCut& cut, FormulaBuilder& 
 
     Peeled L = peel_exchanges(cut.left.get(), 0);
     if (auto out = try_b4_unary(node, L.cur, L.remap, L.cs, cut.cut_formula,
-                                cut.right.get(), b))
-        return out;
+                                cut.right.get(), b)) { g_last_case = "B4-unary-L"; return out; }
     if (auto out = try_b4_and(node, L.cur, L.remap, L.cs, cut.cut_formula,
-                              cut.right.get(), /*on_left=*/true))
-        return out;
-    if (auto out = try_b4_cut(node, L.cur, L.cs, cut.cut_formula, cut.right.get()))
-        return out;
+                              cut.right.get(), /*on_left=*/true)) { g_last_case = "B4-and-L"; return out; }
+    if (auto out = try_b4_cut(node, L.cur, L.cs, cut.cut_formula, cut.right.get())) { g_last_case = "B4-cut-L"; return out; }
 
     Peeled Rt = peel_exchanges(cut.right.get(), gl);
     if (auto out = try_b4_unary(node, Rt.cur, Rt.remap, Rt.cs, phibar,
-                                cut.left.get(), b))
-        return out;
+                                cut.left.get(), b)) { g_last_case = "B4-unary-R"; return out; }
     if (auto out = try_b4_and(node, Rt.cur, Rt.remap, Rt.cs, phibar,
-                              cut.left.get(), /*on_left=*/false))
-        return out;
-    if (auto out = try_b4_cut(node, Rt.cur, Rt.cs, phibar, cut.left.get()))
-        return out;
+                              cut.left.get(), /*on_left=*/false)) { g_last_case = "B4-and-R"; return out; }
+    if (auto out = try_b4_cut(node, Rt.cur, Rt.cs, phibar, cut.left.get())) { g_last_case = "B4-cut-R"; return out; }
     return nullptr;
 }
 
@@ -1109,9 +1137,6 @@ DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut) {
 // =========================================================================
 // dispatch_cut — try cases in order. nullptr-or-error from each case.
 // =========================================================================
-// Name of the §5 case that last fired (debug diagnostics only; see reduce_loop).
-const char* g_last_case = "";
-
 util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
                                      const Deriv& cut_node,
                                      const RCut& cut) {
@@ -1137,7 +1162,9 @@ util::Result<DerivPtr> dispatch_cut(FormulaBuilder& builder,
     DISPATCH_TRY("B5-weaken-R", try_b5_weaken_dead(cut_node, cut, false))
     DISPATCH_TRY("B5-contraction", try_b5_contraction(cut_node, cut))
     // B4 — permutation (cut formula is a side formula of a premise's rule).
-    DISPATCH_TRY("B4-permute", try_b4_permute(cut_node, cut, builder))
+    // try_b4_permute sets g_last_case to the specific sub-case itself.
+    if (auto out = try_b4_permute(cut_node, cut, builder))
+        return util::Result<DerivPtr>(std::move(out));
 #undef DISPATCH_TRY
     return MAKE_ERROR << "dispatch_cut: §5 case not yet implemented (Step 4 in progress)";
 }
@@ -1186,28 +1213,6 @@ std::optional<CutCandidate> find_topmost_max_deg_cut(const Deriv& root) {
 // =========================================================================
 
 namespace {
-
-// Greatest fixed-variable index used anywhere in `d` (conclusions, witnesses,
-// eigenvars), as a floor for fresh eigenvariable allocation during rectify.
-void collect_max_fixed_deriv(const Deriv& d, std::size_t& floor) {
-    for (FormulaHandle h : d.conclusion) collect_max_fixed_formula(h, floor);
-    std::visit([&](auto&& r) {
-        using T = std::decay_t<decltype(r)>;
-        if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
-                      std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
-                      std::is_same_v<T, ROr> || std::is_same_v<T, RForall>) {
-            if constexpr (std::is_same_v<T, RForall>) floor = std::max(floor, r.eigen + 1);
-            collect_max_fixed_deriv(*r.child, floor);
-        } else if constexpr (std::is_same_v<T, RExists>) {
-            collect_max_fixed_term(r.witness, floor);
-            collect_max_fixed_deriv(*r.child, floor);
-        } else if constexpr (std::is_same_v<T, RAnd> || std::is_same_v<T, RCut>) {
-            collect_max_fixed_deriv(*r.left, floor);
-            collect_max_fixed_deriv(*r.right, floor);
-        }
-        // RAx / ROne / RLemma: leaves, conclusion already scanned.
-    }, d.rule);
-}
 
 // Prepend `gamma` to every sequent of `d`, shifting all positional fields by
 // |gamma|. The §11 rules act on their (shifted) principal; gamma rides as
@@ -1393,12 +1398,31 @@ void dump_deriv(const Deriv& d, int indent) {
     }, d.rule);
 }
 
-// The B-stage worklist loop (B0 then §5 reductions, then mult→additive). The
-// optional `verify_step` is an extra per-step gate beyond the structural
+// Rectify (Hughes Def 10.10 / CUT_ELIM_DESIGN §6): α-rename EVERY eigenvariable
+// to a globally-distinct fresh index (above all fixed vars; identity on free
+// vars). This establishes the variable condition as an INVARIANT: with all
+// eigenvars unique across the whole derivation, the commutation cases (B4) that
+// relocate/merge subderivations can never make one eigenvar denote two things
+// (capture). Without it, an eigenvar reused in two independent subproofs
+// collides once a cut is permuted to bring them into one context — the
+// verifier then instantiates a quantifier body wrongly and a downstream axiom
+// sees non-duals. (Duplication — B5-C — still re-rectifies its copy; see there.)
+DerivPtr rectify_eigenvars(const Deriv& d, FormulaBuilder& b) {
+    std::size_t fresh = 0;
+    collect_max_fixed_deriv(d, fresh);     // 1 + max fixed var anywhere
+    // Identity substitution (0:=fixed(0)); freshen_subst's job here is purely
+    // the eigenvar renaming.
+    return freshen_subst(d, Rename{}, /*a=*/0, Term::fixed(0), fresh, b);
+}
+
+// The B-stage worklist loop (rectify, B0, §5 reductions, then mult→additive).
+// The optional `verify_step` is an extra per-step gate beyond the structural
 // validate (see reduce.h); on a rejected reduction the last valid tree is kept.
 util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
                                    const VerifyStep& verify_step) {
-    TRY_ASSIGN(current, additive_to_multiplicative(start));
+    // Variable-condition invariant for the commutation cases (§6).
+    DerivPtr rectified = rectify_eigenvars(start, builder);
+    TRY_ASSIGN(current, additive_to_multiplicative(*rectified));
 
     // Step cap (B6 backstop): Gentzen cut-elim is non-elementary worst-case and
     // B5-C duplicates subderivations, so a large proof can blow up. Cap steps so
