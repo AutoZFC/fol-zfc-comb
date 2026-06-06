@@ -86,8 +86,13 @@ returns `(Φ1, goal, [])` (empty resource phase). Weakening/contraction (Φ2) is
 
 - **K6.0** ✓ — skeleton: `⊢ a∨ā` only, validates the integration path end-to-end.
 - **K6.1** — propositional linear fragment: `RAx, ROne, ROr, RExchange, RAnd` (this doc).
-- **K6.2** — quantifiers: `RForall→ForallUnit` (prefix-by-∀ + `Eqv(DistForall)`, Lemma 20's
-  shown case), `RExists→Ex`.
+- **K6.2** — quantifiers (single-formula goal, Γ empty): `RForall→ForallUnit` then the child
+  under `[Down]` with the eigenvar rebound `fixed(eigen)→gen0`; `RExists→Ex` (isolate the
+  instance φ[t] rightmost, `Ex`, reconcile). DONE for the Γ-empty / single-binder case.
+  K6.2b: the `Eqv(DistForall)` pull-out for a non-empty context (∀x.((Δ)∨φ) ⟶ (Δ)∨∀x.φ,
+  Lemma 20's shown case), nested-binder de Bruijn depth (the eigenvar must shift under inner
+  binders — literal `gen0` is only right when the child has no binders below the new one),
+  and full comb verification of ∃ via a universal witness (the drinker needs an enclosing ∀).
 - **K6.3** — resource phase: `RWeaken→W/WForall`, `RContract/RDuplicate→ medials + Ac/CForall`
   (Theorem 29 + Lemmas 25/26); compute the linearized `A'`. The hard part.
 - **K6.4** — wire into `comb_checker` after `eliminate_cuts`; corpus coverage.

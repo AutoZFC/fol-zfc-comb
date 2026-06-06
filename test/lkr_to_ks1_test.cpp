@@ -167,12 +167,82 @@ void test_and_with_context_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ ∀y.(p(y) ∨ ¬p(y)) — RForall (eigenvar c) over ⊢ p(c)∨¬p(c). The clean
+// quantifier case (trivial dualizer, no existential witness):
+//   t —ForallUnit→ ∀x.t —Ai(p(x))@Down→ ∀x.(p(x)∨¬p(x)).
+void test_forall_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle P = ctx.add_predicate("p", 1);
+    Term c = Term::fixed(0);
+    FormulaHandle pc  = fb.predicate(P, {c}),  npc = fb.make_not(pc);
+    FormulaHandle body = fb.make_or(fb.predicate(P, {Term::generalized(0)}),
+                                    fb.make_not(fb.predicate(P, {Term::generalized(0)})));
+    FormulaHandle goal = fb.make_quantified(Op::Forall, body);   // ∀y.(p(y)∨¬p(y))
+
+    auto ax = std::make_unique<lce::Deriv>();
+    ax->conclusion = {pc, npc};
+    ax->rule = lce::RAx{0, 1};
+    auto inst = std::make_unique<lce::Deriv>();      // ⊢ p(c)∨¬p(c)
+    inst->conclusion = {fb.make_or(pc, npc)};
+    inst->rule = lce::ROr{0, std::move(ax)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::RForall{/*principal=*/0, /*eigen=*/0, std::move(inst)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
+// RExists translation produces a VALID KS1 derivation (ks1::check). We gate on
+// ks1::check rather than CombVerifier because a CLOSED ∃ with a fixed witness
+// is not a fonet (Hughes Def 5.2 needs existential images to be universal
+// binders); full comb verification of ∃ needs a universal witness from an
+// enclosing ∀ (the drinker) and nested-binder de Bruijn — K6.2b.
+//   ⊢ ∃x.(p(x)∨¬p(x)) :  t —Ai(p(c))→ p(c)∨¬p(c) —Ex(body,c)→ ∃x.(p(x)∨¬p(x)).
+void test_exists_ks1_valid() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle P = ctx.add_predicate("p", 1);
+    Term c = Term::fixed(0);
+    FormulaHandle pc = fb.predicate(P, {c}), npc = fb.make_not(pc);
+    FormulaHandle body = fb.make_or(fb.predicate(P, {Term::generalized(0)}),
+                                    fb.make_not(fb.predicate(P, {Term::generalized(0)})));
+    FormulaHandle goal = fb.make_quantified(Op::Exists, body);
+
+    auto ax = std::make_unique<lce::Deriv>();
+    ax->conclusion = {pc, npc}; ax->rule = lce::RAx{0, 1};
+    auto inst = std::make_unique<lce::Deriv>();
+    inst->conclusion = {fb.make_or(pc, npc)};
+    inst->rule = lce::ROr{0, std::move(ax)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::RExists{0, c, std::move(inst)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());     // valid KS1 derivation
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+}
+
 }  // namespace
 
 int main() {
     test_excluded_middle_end_to_end();
     test_conjunction_of_em_end_to_end();
     test_and_with_context_end_to_end();
+    test_forall_end_to_end();
+    test_exists_ks1_valid();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

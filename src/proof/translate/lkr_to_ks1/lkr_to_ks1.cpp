@@ -164,8 +164,75 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
         return steps;
     }
 
-    return MAKE_ERROR << "lkr_to_ks1: K6.1 does not yet handle this rule "
-                         "(quantifiers = K6.2, weakening/contraction = K6.3)";
+    // --- RForall: ⊢ Γ, φ[eigen] ⊢ Γ, ∀x.φ. ------------------------------
+    // ForallUnit gives ∀x.t; the child derivation runs under [Down] with the
+    // eigenvariable rebound to the ∀'s bound var (fixed(eigen) → gen0), so the
+    // body becomes φ. K6.2 first cut: Γ empty (single-formula goal); the
+    // DistForall pull-out for a non-empty context, and nested-binder de Bruijn
+    // depth, are K6.2b.
+    if (const auto* far = std::get_if<lce::RForall>(&d.rule)) {
+        if (d.conclusion.size() != 1)
+            return MAKE_ERROR << "lkr_to_ks1: K6.2 RForall supports only a "
+                                 "single-formula goal (Γ empty); DistForall context = K6.2b";
+        const Formula& qf = d.conclusion[0].get();
+        if (!(qf.is_quantified() && qf.as_quantified().op == Op::Forall))
+            return MAKE_ERROR << "lkr_to_ks1: RForall principal is not a ∀";
+        TRY_ASSIGN(child_steps, tr(fb, *far->child));
+        for (ks1::Step& s : child_steps) {
+            if (s.f_param.valid())
+                s.f_param = fb.translate_term(s.f_param, Term::fixed(far->eigen),
+                                              Term::generalized(0));
+            if (s.rule == ks1::Rule::Ex)
+                s.t_param = fb.translate_in_term(s.t_param, Term::fixed(far->eigen),
+                                                 Term::generalized(0));
+            s.context.insert(s.context.begin(), ks1::Dir::Down);
+        }
+        ks1::Step fu; fu.rule = ks1::Rule::ForallUnit;       // t → ∀x.t  (ctx {})
+        std::vector<ks1::Step> steps{fu};
+        steps.insert(steps.end(), child_steps.begin(), child_steps.end());
+        return steps;
+    }
+
+    // --- RExists: ⊢ Γ, φ[x:=t] ⊢ Γ, ∃x.φ. -------------------------------
+    // Isolate the instance φ[t] as the rightmost disjunct, apply Ex there
+    // (S{A[x/t]}/S{∃x.A}), then reconcile to denote(node).
+    if (const auto* exr = std::get_if<lce::RExists>(&d.rule)) {
+        const lce::Deriv* child = exr->child.get();
+        const std::size_t pr = exr->principal;
+        FormulaHandle quant = d.conclusion[pr];                  // ∃x.φ
+        const Formula& qf = quant.get();
+        if (!(qf.is_quantified() && qf.as_quantified().op == Op::Exists))
+            return MAKE_ERROR << "lkr_to_ks1: RExists principal is not an ∃";
+        FormulaHandle body = qf.as_quantified().body;            // φ with gen0
+        FormulaHandle inst = fb.instantiate_gen(body, exr->witness);  // φ[t]
+
+        TRY_ASSIGN(steps, tr(fb, *child));                       // → denote(child)
+        const bool single = child->conclusion.size() == 1;
+        FormulaHandle iso, after_ex;
+        ks1::Path ex_ctx;
+        if (single) {
+            iso = inst; after_ex = quant; ex_ctx = {};
+        } else {
+            std::vector<FormulaHandle> rest;
+            for (std::size_t i = 0; i < child->conclusion.size(); ++i)
+                if (i != pr) rest.push_back(child->conclusion[i]);
+            FormulaHandle restF = denote(fb, rest);
+            iso = fb.make_or(restF, inst);
+            after_ex = fb.make_or(restF, quant);
+            ex_ctx = {ks1::Dir::Right};
+        }
+        TRY_ASSIGN(r1, equiv_steps(fb, denote(fb, child->conclusion), iso));
+        steps.insert(steps.end(), r1.begin(), r1.end());
+        ks1::Step ex; ex.rule = ks1::Rule::Ex; ex.f_param = body;
+        ex.t_param = exr->witness; ex.context = ex_ctx;
+        steps.push_back(ex);
+        TRY_ASSIGN(r2, equiv_steps(fb, after_ex, denote(fb, d.conclusion)));
+        steps.insert(steps.end(), r2.begin(), r2.end());
+        return steps;
+    }
+
+    return MAKE_ERROR << "lkr_to_ks1: K6.2/K6.3 — this rule not yet handled "
+                         "(RForall = K6.2 in progress, weakening/contraction = K6.3)";
 }
 
 }  // namespace
