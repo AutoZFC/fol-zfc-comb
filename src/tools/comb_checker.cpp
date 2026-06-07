@@ -29,6 +29,7 @@
 #include "src/proof/translate/lkr_cut_elim/b0.h"
 #include "src/proof/translate/lkr_cut_elim/deriv.h"
 #include "src/proof/translate/lkr_cut_elim/reduce.h"
+#include "src/proof/ks1/checker.h"
 #include "src/proof/translate/lkr_to_ks1/lkr_to_ks1.h"
 #include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
@@ -140,6 +141,13 @@ std::string run_comb_backend(GlobalContext& ctx, FormulaHandle goal_nnf,
     if (!ks1_r.ok()) return "comb_l2k_err: " + ks1_r.error().to_string();
     if (std::getenv("COMB_CHECKER_DERIV_STATS"))
         std::cerr << "[ks1] steps=" << ks1_r.value().steps.size() << std::endl;
+    {   // Gate: the lkr_to_ks1 output must be a VALID (replayable, modulo-≡) KS1
+        // derivation before the bridge consumes it. Catches lkr_to_ks1 bugs
+        // directly instead of letting them surface downstream as opaque bridge
+        // failures (the bug this gate first caught).
+        auto chk = logic::proof::ks1::check(fb, ks1_r.value());
+        if (!chk.ok()) return "comb_ks1check_err: " + chk.error().to_string();
+    }
     if (prog) std::cerr << "[progress]   comb: build_comb_proof" << std::endl;
     auto cp = k2c::build_comb_proof(fb, ks1_r.value());
     if (!cp.ok()) return "comb_bridge_err: " + cp.error().to_string();

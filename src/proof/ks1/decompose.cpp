@@ -2,6 +2,8 @@
 
 #include "src/proof/ks1/checker.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -60,24 +62,19 @@ size_t boundary_index(const Derivation& d) {
 
 bool is_decomposed(const Derivation& d) {
     size_t b = boundary_index(d);
-    // Everything before the boundary must be MLS1^X; everything from it on
-    // must be resource.
+    // The bridge needs only the MLS1^X / resource BOUNDARY: every step before the
+    // first resource-only step is MLS1^X (linear or ≡), every step from it on is
+    // resource (or ≡). The paper's finer intra-half phase order (Axioms<Linear<
+    // Inst, Medial<Contraction<Weakening) is NOT required — read_fonet (Φ1) and
+    // read_skew (Φ2) each replay their half in order, robust to intra-half
+    // arrangement, and CombVerifier is the soundness oracle. Dropping the
+    // intra-half monotone check lets decompose stop once linear precedes resource
+    // (it need not also sort medials before contractions, etc.).
     for (size_t i = 0; i < b; ++i)
         if (!is_mls1x(d.steps[i].rule)) return false;
     for (size_t i = b; i < d.steps.size(); ++i)
         if (!is_resource(d.steps[i].rule)) return false;
-    // Non-≡ phases must be non-decreasing within each half.
-    auto monotone = [&](size_t lo, size_t hi) {
-        int last = 0;
-        for (size_t i = lo; i < hi; ++i) {
-            if (d.steps[i].rule == Rule::Eqv) continue;
-            int ph = static_cast<int>(phase_of(d.steps[i].rule));
-            if (ph < last) return false;
-            last = ph;
-        }
-        return true;
-    };
-    return monotone(0, b) && monotone(b, d.steps.size());
+    return true;
 }
 
 // ---- constructive Thm 17: reorganize into decomposed form (DECOMPOSE_DESIGN.md)
@@ -106,6 +103,20 @@ FormulaHandle put_at(FormulaBuilder& fb, FormulaHandle h, const Path& p, size_t 
                                   put_at(fb, f.as_quantified().body, p, i + 1, sub));
     return sub;
 }
+bool is_prefix(const Path& p, const Path& q) {
+    if (p.size() > q.size()) return false;
+    for (size_t i = 0; i < p.size(); ++i) if (p[i] != q[i]) return false;
+    return true;
+}
+FormulaHandle nav_at(FormulaHandle h, const Path& p) {
+    for (Dir d : p) {
+        const Formula& f = h.get();
+        if (f.is_compound()) h = (d == Dir::Left) ? f.as_compound().left : f.as_compound().right;
+        else if (f.is_quantified()) h = f.as_quantified().body;
+        else return FormulaHandle{};
+    }
+    return h;
+}
 std::optional<Path> find_handle(FormulaHandle h, FormulaHandle target) {
     if (h == target) return Path{};
     const Formula& f = h.get();
@@ -129,33 +140,76 @@ std::optional<Path> find_handle(FormulaHandle h, FormulaHandle target) {
 // result is self-VERIFIED by replay — any case not covered (binder crossing,
 // x created y's redex, AC chains merged by y) fails the check and returns
 // nullopt, so the caller safely leaves the pair in place (no wrong proof).
+const char* rule_name(Rule r) {
+    switch (r) {
+        case Rule::ForallUnit: return "ForallUnit"; case Rule::Ai: return "Ai";
+        case Rule::Tu: return "Tu"; case Rule::Sw: return "Sw"; case Rule::Mix: return "Mix";
+        case Rule::Ex: return "Ex"; case Rule::Eqv: return "Eqv"; case Rule::W: return "W";
+        case Rule::WForall: return "WForall"; case Rule::Ac: return "Ac";
+        case Rule::CForall: return "CForall"; case Rule::M: return "M";
+        case Rule::MForall: return "MForall"; case Rule::MExists: return "MExists";
+    }
+    return "?";
+}
+thread_local const char* g_swap_fail = "";
+
 std::optional<std::pair<Step, Step>> try_swap(FormulaBuilder& fb, FormulaHandle Fx,
                                               const Step& x, const Step& y,
                                               PredicateHandle sentinel) {
+#define SWAP_BAIL(R) do { g_swap_fail = (R); return std::nullopt; } while (0)
     auto end = replay(fb, Fx, {x, y});
-    if (end.is_error()) return std::nullopt;
+    if (end.is_error()) SWAP_BAIL("end-replay-error");
+
+    // Binder-crossing: y = Ex abstracts an instance φ[t] → ∃x.φ. abstract_var
+    // only RENAMES the fixed witness to Gen(0) (no tree restructuring), so the
+    // context remap is exact and analytic. y′ re-abstracts the PRE-x instance;
+    // x′, if it lived inside the instance, moves under the new [Down] with its
+    // params abstracted by the same witness (the deferred K6.2b-style rebind).
+    if (y.rule == Rule::Ex) {
+        if (!y.t_param.is_fixed()) SWAP_BAIL("Ex-nonfixed-witness");
+        var_index w = y.t_param.as_variable();
+        FormulaHandle inst = nav_at(Fx, y.context);
+        if (!inst.valid()) SWAP_BAIL("Ex-bad-context");
+        Step yp = y;
+        yp.f_param = fb.abstract_var(inst, w);                // body of the pre-x ∃
+        Step xp = x;
+        if (is_prefix(y.context, x.context)) {               // x is inside the instance
+            Path c(y.context.begin(), y.context.end());
+            c.push_back(Dir::Down);
+            c.insert(c.end(), x.context.begin() + y.context.size(), x.context.end());
+            xp.context = std::move(c);
+            if (xp.f_param.valid()) xp.f_param = fb.abstract_var(xp.f_param, w);
+        }   // else disjoint / x above the ∃ ⇒ x′ context unchanged.
+        auto chk = replay(fb, Fx, {yp, xp});
+        if (chk.is_error()) SWAP_BAIL("Ex-verify-replay-error");
+        if (chk.value() != end.value()) SWAP_BAIL("Ex-verify-mismatch");
+        return std::make_pair(yp, xp);
+    }
 
     FormulaHandle Z = fb.predicate(sentinel, {});
     FormulaHandle FxZ = put_at(fb, Fx, x.context, 0, Z);
     auto yz = replay(fb, FxZ, {y});                 // y on the sentinel'd formula
-    if (yz.is_error()) return std::nullopt;          // y's redex absent before x.
+    if (yz.is_error()) SWAP_BAIL("y-no-match-before-x");
     auto cxp = find_handle(yz.value(), Z);           // where x's redex moved.
-    if (!cxp) return std::nullopt;
+    if (!cxp) SWAP_BAIL("sentinel-lost");
 
     Step xp = x; xp.context = *cxp;
     auto chk = replay(fb, Fx, {y, xp});
-    if (chk.is_error() || chk.value() != end.value()) return std::nullopt;
+    if (chk.is_error()) SWAP_BAIL("verify-replay-error");
+    if (chk.value() != end.value()) SWAP_BAIL("verify-mismatch");
     return std::make_pair(y, xp);
+#undef SWAP_BAIL
 }
 
-// Should the later step b move before the earlier step a? Sort non-≡ steps by
-// phase; let a linear step jump left past an ≡ (which is phase-flexible) so an ≡
-// between two out-of-order non-≡ steps does not block the sort.
+// Should the later step b move before the earlier step a? The bridge needs only
+// the linear/resource BOUNDARY, so move a linear (non-≡ MLS1^X) step b before a
+// resource (non-≡) step a — and let it hop a flexible ≡ that would otherwise
+// block the boundary fix.
 bool should_precede(const Step& b, const Step& a) {
-    bool ae = a.rule == Rule::Eqv, be = b.rule == Rule::Eqv;
-    if (!ae && !be) return static_cast<int>(phase_of(b.rule)) < static_cast<int>(phase_of(a.rule));
-    if (ae && !be)  return static_cast<int>(phase_of(b.rule)) <= static_cast<int>(Phase::Inst);
-    return false;
+    bool b_linear = b.rule != Rule::Eqv && is_mls1x(b.rule);
+    if (!b_linear) return false;
+    bool a_resource = a.rule != Rule::Eqv && is_resource(a.rule);
+    return a_resource || a.rule == Rule::Eqv;
 }
 
 }  // namespace
@@ -164,33 +218,73 @@ Result<Derivation> decompose(FormulaBuilder& fb, const Derivation& d) {
     if (is_decomposed(d)) return d;                  // already decomposed (fast path)
     PredicateHandle sentinel = fb.context().add_predicate("$decomp_sentinel", 0);
     std::vector<Step> steps = d.steps;
+    const bool dbg = std::getenv("KS1_DECOMPOSE_DEBUG") != nullptr;
     const std::size_t cap = 4 * steps.size() + 16;   // bubble-pass backstop
+    std::size_t npass = 0, nswap = 0; bool replay_ok = true;
     for (std::size_t pass = 0; pass < cap; ++pass) {
+        ++npass;
         // Prefix formulas F[i] = state before step i (recomputed each pass).
         std::vector<FormulaHandle> F(steps.size() + 1);
         F[0] = d.top;
         bool ok = true;
         for (std::size_t i = 0; i < steps.size(); ++i) {
             auto r = replay(fb, F[i], {steps[i]});
-            if (r.is_error()) { ok = false; break; }
+            if (r.is_error()) {
+                if (dbg && pass == 0)
+                    std::fprintf(stderr, "[decompose] replay FAIL at step %zu (%s): %s\n",
+                                 i, rule_name(steps[i].rule), r.error().to_string().c_str());
+                ok = false; break;
+            }
             F[i + 1] = r.value();
         }
-        if (!ok) break;
+        if (!ok) { replay_ok = false; break; }
         bool changed = false;
         for (std::size_t i = 0; i + 1 < steps.size(); ++i) {
             if (!should_precede(steps[i + 1], steps[i])) continue;
             auto sw = try_swap(fb, F[i], steps[i], steps[i + 1], sentinel);
-            if (!sw) continue;
+            if (!sw) {
+                if (std::getenv("KS1_DECOMPOSE_DEBUG"))
+                    std::fprintf(stderr, "[decompose] no-swap %s before %s: %s\n",
+                                 rule_name(steps[i].rule), rule_name(steps[i + 1].rule),
+                                 g_swap_fail);
+                continue;
+            }
             steps[i] = sw->first; steps[i + 1] = sw->second;
             auto r = replay(fb, F[i], {steps[i]});
             if (r.is_error()) break;
             F[i + 1] = r.value();
-            changed = true;
+            changed = true; ++nswap;
         }
         if (!changed) break;
     }
     Derivation out = d;
     out.steps = std::move(steps);
+    if (dbg)
+        std::fprintf(stderr, "[decompose] n=%zu passes=%zu swaps=%zu replay_ok=%d decomposed=%d\n",
+                     d.steps.size(), npass, nswap, replay_ok ? 1 : 0, is_decomposed(out) ? 1 : 0);
+    if (std::getenv("KS1_DECOMPOSE_DEBUG") && !is_decomposed(out)) {
+        auto name = [](Rule r) -> const char* {
+            switch (r) {
+                case Rule::ForallUnit: return "ForallUnit"; case Rule::Ai: return "Ai";
+                case Rule::Tu: return "Tu"; case Rule::Sw: return "Sw"; case Rule::Mix: return "Mix";
+                case Rule::Ex: return "Ex"; case Rule::Eqv: return "Eqv"; case Rule::W: return "W";
+                case Rule::WForall: return "WForall"; case Rule::Ac: return "Ac";
+                case Rule::CForall: return "CForall"; case Rule::M: return "M";
+                case Rule::MForall: return "MForall"; case Rule::MExists: return "MExists";
+            }
+            return "?";
+        };
+        // Report each remaining phase-descent in the non-≡ subsequence.
+        const Step* prev = nullptr;
+        for (const Step& s : out.steps) {
+            if (s.rule == Rule::Eqv) continue;
+            if (prev && static_cast<int>(phase_of(s.rule)) < static_cast<int>(phase_of(prev->rule)))
+                std::fprintf(stderr, "[decompose] stuck: %s(p%d) before %s(p%d)\n",
+                             name(prev->rule), static_cast<int>(phase_of(prev->rule)),
+                             name(s.rule), static_cast<int>(phase_of(s.rule)));
+            prev = &s;
+        }
+    }
     return out;   // may be partial; split() checks is_decomposed.
 }
 
