@@ -315,6 +315,44 @@ void test_weakening_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ A ∨ (¬A ∧ ¬A) — contraction: the single A must link to BOTH ¬A's, so A is
+// duplicated (RDuplicate) and the two copies contracted (contract_steps).
+//   proof: ROr{0} / RDuplicate{src=0} / RAnd{1,part={0}} / two axioms [A,¬A].
+void test_contraction_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle PA = ctx.add_predicate("A", 0);
+    FormulaHandle a = fb.predicate(PA, {}), na = fb.make_not(a);
+    FormulaHandle naAndNa = fb.make_and(na, na);          // ¬A∧¬A
+    FormulaHandle goal = fb.make_or(a, naAndNa);          // A∨(¬A∧¬A)
+
+    auto ax1 = std::make_unique<lce::Deriv>();            // [A, ¬A]
+    ax1->conclusion = {a, na}; ax1->rule = lce::RAx{0, 1};
+    auto ax2 = std::make_unique<lce::Deriv>();            // [A, ¬A]
+    ax2->conclusion = {a, na}; ax2->rule = lce::RAx{0, 1};
+    auto andd = std::make_unique<lce::Deriv>();           // [A, ¬A∧¬A, A]
+    andd->conclusion = {a, naAndNa, a};
+    andd->rule = lce::RAnd{/*principal=*/1, /*left_partition=*/{0},
+                           std::move(ax1), std::move(ax2)};
+    auto dup = std::make_unique<lce::Deriv>();            // [A, ¬A∧¬A]
+    dup->conclusion = {a, naAndNa};
+    dup->rule = lce::RDuplicate{/*src=*/0, std::move(andd)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::ROr{0, std::move(dup)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
@@ -325,6 +363,7 @@ int main() {
     test_exists_ks1_valid();
     test_drinker_end_to_end();
     test_weakening_end_to_end();
+    test_contraction_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

@@ -258,8 +258,39 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
         return steps;
     }
 
+    // --- RDuplicate: ⊢ Γ,φ,φ ⊢ Γ,φ (the child has an extra copy of φ=node[src]
+    // appended; this node contracts it back). -----------------------------
+    // Φ1 proves the doubled core (denote(child) = denote(node) ∨ φ), then Φ2
+    // reshapes the two φ copies adjacent as φ∨φ, contracts (contract_steps), and
+    // reconciles to denote(node). Decomposed when the child's derivation is all
+    // linear (no interspersed weakening/contraction above — that needs Thm 29).
+    if (const auto* dup = std::get_if<lce::RDuplicate>(&d.rule)) {
+        const lce::Deriv* child = dup->child.get();
+        FormulaHandle X = d.conclusion[dup->src];
+        TRY_ASSIGN(steps, tr(fb, *child));                 // Φ1: → denote(child)
+
+        std::vector<FormulaHandle> rest;
+        for (std::size_t i = 0; i < d.conclusion.size(); ++i)
+            if (i != dup->src) rest.push_back(d.conclusion[i]);
+        FormulaHandle XX = fb.make_or(X, X);
+        const bool has_rest = !rest.empty();
+        FormulaHandle iso = has_rest ? fb.make_or(denote(fb, rest), XX) : XX;
+
+        TRY_ASSIGN(r1, equiv_steps(fb, denote(fb, child->conclusion), iso));
+        steps.insert(steps.end(), r1.begin(), r1.end());
+        TRY_ASSIGN(con, contract_steps(fb, X));            // φ∨φ → φ; at [Right] if rest
+        for (ks1::Step& s : con) {
+            if (has_rest) s.context.insert(s.context.begin(), ks1::Dir::Right);
+            steps.push_back(std::move(s));
+        }
+        FormulaHandle afterC = has_rest ? fb.make_or(denote(fb, rest), X) : X;
+        TRY_ASSIGN(r2, equiv_steps(fb, afterC, denote(fb, d.conclusion)));
+        steps.insert(steps.end(), r2.begin(), r2.end());
+        return steps;
+    }
+
     return MAKE_ERROR << "lkr_to_ks1: K6.3 — this rule not yet handled "
-                         "(contraction RContract/RDuplicate = K6.3b)";
+                         "(RContract = K6.3b, interspersed weakening/contraction = Thm 29)";
 }
 
 }  // namespace
