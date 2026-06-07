@@ -229,7 +229,75 @@ util::Result<std::vector<Step>> contract_at(FormulaBuilder& fb, FormulaHandle x,
     return MAKE_ERROR << "contract_steps: unsupported formula shape (⊥/unit?)";
 }
 
+// Re-bracket `cur` into the LEFT-associated denote(entries) via AssocOr
+// right-rotations, treating handles in `entries` as opaque leaves. Replay-tracked
+// so contexts are computed against the live formula.
+struct LeftAssoc {
+    FormulaBuilder&                   fb;
+    const std::vector<FormulaHandle>& entries;
+    FormulaHandle                     cur;
+    std::vector<Step>                 out;
+    bool                              ok = true;
+
+    bool is_entry(FormulaHandle h) const {
+        for (FormulaHandle e : entries) if (e == h) return true;
+        return false;
+    }
+    FormulaHandle at(const Path& p) const {
+        FormulaHandle h = cur;
+        for (Dir d : p) {
+            const Formula& f = h.get();
+            if (f.is_compound())
+                h = (d == Dir::Left) ? f.as_compound().left : f.as_compound().right;
+            else if (f.is_quantified())
+                h = f.as_quantified().body;
+        }
+        return h;
+    }
+    // A ∨ that is part of the sequent spine (i.e. NOT an opaque entry).
+    bool spine_or(FormulaHandle h) const {
+        const Formula& f = h.get();
+        return f.is_compound() && f.as_compound().op == Op::Or && !is_entry(h);
+    }
+    void rotate(const Path& ctx) {                 // A∨(B∨C) → (A∨B)∨C
+        if (!ok) return;
+        Step s; s.rule = ks1::Rule::Eqv; s.eq = EqRule::AssocOr;
+        s.dir = EqDir::Backward; s.context = ctx;
+        auto r = ks1::replay(fb, cur, {s});
+        if (r.is_error()) { ok = false; return; }
+        cur = r.value();
+        out.push_back(std::move(s));
+    }
+    void run(Path ctx) {
+        while (ok) {
+            FormulaHandle node = at(ctx);
+            if (!spine_or(node)) return;           // opaque entry or non-∨: a leaf
+            if (spine_or(node.get().as_compound().right))
+                rotate(ctx);                        // pull one element onto the spine
+            else
+                ctx.push_back(Dir::Left);           // right is a leaf → descend left
+        }
+    }
+};
+
 }  // namespace
+
+util::Result<std::vector<Step>> reassoc_left_steps(
+    FormulaBuilder& fb, FormulaHandle cur, const std::vector<FormulaHandle>& entries) {
+    if (entries.empty())
+        return MAKE_ERROR << "reassoc_left_steps: empty entries";
+    LeftAssoc la{fb, entries, cur, {}, true};
+    la.run({});
+    if (!la.ok)
+        return MAKE_ERROR << "reassoc_left_steps: rotation failed";
+    FormulaHandle target = entries[0];             // self-check: replay reaches it
+    for (std::size_t i = 1; i < entries.size(); ++i) target = fb.make_or(target, entries[i]);
+    auto got = ks1::replay(fb, cur, la.out);
+    if (got.is_error()) return std::move(got).error();
+    if (got.value() != target)
+        return MAKE_ERROR << "reassoc_left_steps: did not reach denote(entries)";
+    return la.out;
+}
 
 util::Result<std::vector<Step>> contract_steps(FormulaBuilder& fb, FormulaHandle x) {
     return contract_at(fb, x, {});

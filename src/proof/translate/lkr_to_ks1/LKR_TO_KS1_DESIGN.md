@@ -151,25 +151,34 @@ Migration is incremental: first the signature change keeping `entries = d.conclu
 
 ### Status / measured (eq_iff_eq, the worst corpus theorem)
 
-`RExchange`/`RWeaken`/`RAx`/`RExists` are fully order-free (no reconcile). `RDuplicate` uses
-a LOCAL move (bring the second copy adjacent to the first, group, contract in place with the
-fixed-context `contract_at` — which touches only `X∨X`, preserving sibling grouping). `RAnd`
-moves φ/ψ to the rightmost entry of each branch (bounded reorder) and still uses `equiv_steps`
-for its final reconcile.
+Every rule is now order-free with at most a LOCAL (O(distance)) reorder: `RExchange` (0 steps),
+`RWeaken` (1 W), `RAx` (Ai+W, no reconcile), `RExists` (Ex in place). `ROr` and `RDuplicate`
+bring the two grouped entries adjacent with a local move (not a full reorder into d.conclusion
+order) and `AssocOr`-group; `RDuplicate` then contracts in place with the fixed-context
+`contract_at` (touches only `X∨X`, preserving sibling grouping). `RAnd` moves φ/ψ to the rightmost
+branch entry (bounded reorder) and reconciles its switch tail `((φ∧ψ)∨P)∨Q` with the
+**entry-level** `reassoc_left_steps` (O(#entries) AssocOr rotations, entries opaque), falling
+back to `equiv_steps` only if a spine ∨ aliases an entry handle.
 
 | total steps | EQV | by-rule (self) |
 |---|---|---|
 | 44540 (before) | 43513 | RExchange 15237, RDuplicate 14229, RWeaken 9222, RAnd 3464, RAx 1269 |
-| **8418 (now)** | 7391 | RDuplicate 4182, RAnd 3634, ROr 363, RForall 103, RWeaken 92, RAx 36, RExists 8 |
+| **4761 (now)** | 3734 | RDuplicate 4237 (move 2556 + contract 1681), RAnd 252, RForall 103, RWeaken 92, RAx 36, ROr 33, RExists 8 |
 
-5.3× fewer steps; corpus unchanged (19/19 OK, the 4 cutfree theorems still hit the separate
-Thm-17-decompose bridge gap). NOT YET at the ~1027 NON-EQV floor: `RDuplicate`'s `xx_or_regroup`
-(∨-nested-in-X contraction) and `RAnd`'s leaf-level `equiv_steps` reconcile remain. Both want an
-**entry-level reassociation** helper (re-bracket a ∨-tree to left-assoc treating entries as
-opaque leaves — right-rotations / AssocOr, O(#entries), no leaf canonicalization). The
-operand-select-at-top alternative for `RDuplicate` is UNSOUND in general: the checker's `M`
-flattens the whole top ∨-chain and rebuilds it, destroying the grouping of sibling ∨-entries
-(`ROr` results) that a parent rule may need to locate by identity.
+**9.4× fewer steps** (eq_refl 1770→659, the mid theorems ~3000→~700). Corpus unchanged: 19/19 OK
+(ordered_pair), 6/7 OK (functions); the cutfree theorems still hit the separate
+Thm-17-decompose bridge gap — no new translation errors.
+
+The residual is `RDuplicate`. Its cost splits (diagnostic, gated on `LKR_TO_KS1_STATS`) into the
+grouping **move** (2556 — the safe floor) and the **contract** (1681). The move is essentially
+irreducible *safely*: contraction needs the two copies grouped as `X∨X`, and grouping two entries
+`d` apart costs ~`d`. The operand-select-at-top alternative (`M`/`Ac` with operand indices on the
+whole top ∨-chain) would avoid it but is UNSOUND in general — the checker's `M` flattens and
+rebuilds the entire top chain, destroying the grouping of sibling ∨-entries (`ROr` results) that a
+parent may locate by identity. The only remaining *safe* win is replacing `contract_at`'s
+`xx_or_regroup` (assoc/comm for ∨-nested-in-X) with a local flatten + operand-select `Ac`/`M`
+inside the already-grouped `X∨X` subterm (safe because X is one opaque entry) — modest, and capped
+by the move floor; left for a future session.
 
 ## Oracle
 

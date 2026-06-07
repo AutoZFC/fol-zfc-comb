@@ -51,6 +51,7 @@ struct TrStats {
     int depth = 0, max_depth = 0, max_conc = 0;
     std::vector<long long> child_sum;   // child_sum[d] = Σ sizes returned at depth d+1
     long long budget = 0;
+    long long dup_move = 0, dup_contract = 0;   // RDuplicate cost split (diagnostic)
     bool trace = false;
     std::string per_rule_dump() const {
         std::string s;                  // per-rule SELF-steps (excl. children) / node count
@@ -194,21 +195,32 @@ util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
         auto steps = std::move(childRes.steps);
         FormulaHandle A = child->conclusion[pr];
         FormulaHandle B = child->conclusion.back();
-        std::vector<FormulaHandle> inter;                 // [node…, A, B at pr+1, …]
-        for (std::size_t i = 0; i < d.conclusion.size(); ++i) {
-            inter.push_back(d.conclusion[i]);
-            if (i == pr) { inter.back() = A; inter.push_back(B); }
-        }
-        TRY_ASSIGN(r, reorder_steps(fb, childRes.entries, inter));
+        // Group A,B into the single entry A∨B: bring B adjacent after A (a LOCAL
+        // move, O(distance) — not a reorder of the whole sequent into d.conclusion
+        // order), then one AssocOr. Everything else keeps its current order.
+        std::vector<FormulaHandle> e = std::move(childRes.entries);
+        std::size_t ia = e.size(), ib = e.size();
+        for (std::size_t k = 0; k < e.size(); ++k) if (e[k] == A) { ia = k; break; }
+        for (std::size_t k = 0; k < e.size(); ++k) if (e[k] == B && k != ia) { ib = k; break; }
+        if (ia == e.size() || ib == e.size())
+            return MAKE_ERROR << "lkr_to_ks1: ROr child lacks the A / B disjuncts";
+        std::vector<FormulaHandle> target = e;            // move B to just after A
+        target.erase(target.begin() + ib);
+        const std::size_t i = ib < ia ? ia - 1 : ia;      // A's index after erase
+        target.insert(target.begin() + i + 1, B);
+        TRY_ASSIGN(r, reorder_steps(fb, e, target));
         steps.insert(steps.end(), r.begin(), r.end());
-        if (pr > 0) {                                     // (prefix∨A)∨B → prefix∨(A∨B)
-            const std::size_t N = d.conclusion.size();
+        const std::size_t n = target.size();
+        if (i > 0) {                                      // (P∨A)∨B → P∨(A∨B)
             ks1::Step a; a.rule = ks1::Rule::Eqv;
             a.eq = ks1::EqRule::AssocOr; a.dir = ks1::EqDir::Forward;
-            a.context = ks1::Path(N - 1 - pr, ks1::Dir::Left);
+            a.context = ks1::Path(n - 2 - i, ks1::Dir::Left);
             steps.push_back(a);
         }
-        return Tr{std::move(steps), d.conclusion};
+        std::vector<FormulaHandle> entries = target;      // A,B → the entry A∨B
+        entries[i] = fb.make_or(A, B);
+        entries.erase(entries.begin() + i + 1);
+        return Tr{std::move(steps), std::move(entries)};
     }
     if (const auto* ex = std::get_if<lce::RExchange>(&d.rule)) {
         // A pure entry permutation. Entry ORDER carries no meaning under modulo-≡
@@ -284,25 +296,31 @@ util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
         }
         // else emptyL && emptyR: cur = φ∧ψ already; no switches.
 
-        // cur is now an ≡-reshape of denote(node); reconcile.
-        FormulaHandle cur;
-        if (emptyL && emptyR)       cur = fb.make_and(phi, psi);
-        else {
-            FormulaHandle conj = fb.make_and(phi, psi);
-            if (!emptyL && !emptyR) {
-                FormulaHandle Pf = denote(fb, {LRes.entries.begin(), LRes.entries.end() - 1});
-                FormulaHandle Qf = denote(fb, {RRes.entries.begin(), RRes.entries.end() - 1});
-                cur = fb.make_or(fb.make_or(conj, Pf), Qf);
-            } else if (emptyL) {
-                FormulaHandle Qf = denote(fb, {RRes.entries.begin(), RRes.entries.end() - 1});
-                cur = fb.make_or(conj, Qf);
-            } else {
-                FormulaHandle Pf = denote(fb, {LRes.entries.begin(), LRes.entries.end() - 1});
-                cur = fb.make_or(conj, Pf);
-            }
+        // cur is now ((φ∧ψ)∨P)∨Q with P=denote(Γ_L), Q=denote(Γ_R) GROUPED
+        // (P/Q absent when that branch context is empty).
+        FormulaHandle conj = fb.make_and(phi, psi);
+        std::vector<FormulaHandle> gammaL(LRes.entries.begin(),
+                                          LRes.entries.end() - (emptyL ? 0 : 1));
+        std::vector<FormulaHandle> gammaR(RRes.entries.begin(),
+                                          RRes.entries.end() - (emptyR ? 0 : 1));
+        FormulaHandle cur = conj;
+        if (!gammaL.empty()) cur = fb.make_or(cur, denote(fb, gammaL));
+        if (!gammaR.empty()) cur = fb.make_or(cur, denote(fb, gammaR));
+
+        // Reconcile at the ENTRY level: re-bracket cur into the left-assoc list
+        // [φ∧ψ]++Γ_L++Γ_R (order free) via O(#entries) AssocOr rotations — NOT a
+        // leaf canonicalization. Fall back to equiv_steps if the cheap path can't
+        // reach the target (e.g. a spine ∨ aliases an entry handle).
+        std::vector<FormulaHandle> entries{conj};
+        entries.insert(entries.end(), gammaL.begin(), gammaL.end());
+        entries.insert(entries.end(), gammaR.begin(), gammaR.end());
+        auto rec = reassoc_left_steps(fb, cur, entries);
+        if (rec.ok()) {
+            steps.insert(steps.end(), rec.value().begin(), rec.value().end());
+            return Tr{std::move(steps), std::move(entries)};
         }
-        TRY_ASSIGN(rec, equiv_steps(fb, cur, denote(fb, d.conclusion)));
-        steps.insert(steps.end(), rec.begin(), rec.end());
+        TRY_ASSIGN(rec2, equiv_steps(fb, cur, denote(fb, d.conclusion)));
+        steps.insert(steps.end(), rec2.begin(), rec2.end());
         return Tr{std::move(steps), d.conclusion};
     }
 
@@ -438,6 +456,7 @@ util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
         target.erase(target.begin() + j);
         target.insert(target.begin() + i + 1, X);
         TRY_ASSIGN(r1, reorder_steps(fb, cur, target));
+        g_tr.dup_move += static_cast<long long>(r1.size());
         steps.insert(steps.end(), r1.begin(), r1.end());
 
         const std::size_t n = target.size();
@@ -451,6 +470,7 @@ util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
             cpath.push_back(ks1::Dir::Right);
         }
         TRY_ASSIGN(con, contract_steps(fb, X));            // X∨X → X at cpath
+        g_tr.dup_contract += static_cast<long long>(con.size()) + (i > 0 ? 1 : 0);
         for (ks1::Step& s : con) {
             s.context.insert(s.context.begin(), cpath.begin(), cpath.end());
             steps.push_back(std::move(s));
@@ -485,6 +505,8 @@ util::Result<ks1::Derivation> lkr_to_ks1(FormulaBuilder& fb,
         std::cerr << "[l2k stats] total=" << g_tr.total << " nodes=" << g_tr.calls
                   << " max_depth=" << g_tr.max_depth << " max_conc=" << g_tr.max_conc
                   << " EQV=" << eqv << " NON-EQV=" << (g_tr.total - eqv)
+                  << " [dup_move=" << g_tr.dup_move
+                  << " dup_contract=" << g_tr.dup_contract << "]"
                   << " by-rule(self): " << g_tr.per_rule_dump() << std::endl;
     }
     FormulaHandle top = fb.make_not(fb.make_bottom());   // ⊤ = ¬⊥

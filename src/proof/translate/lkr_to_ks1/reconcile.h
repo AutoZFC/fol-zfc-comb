@@ -47,4 +47,16 @@ util::Result<std::vector<logic::proof::ks1::Step>> reorder_steps(
 util::Result<std::vector<logic::proof::ks1::Step>> contract_steps(
     FormulaBuilder& fb, FormulaHandle x);
 
+// Re-bracket `cur` — a ∨-tree whose opaque leaves (stopping at any handle in
+// `entries`) are exactly `entries` left-to-right — into the fully LEFT-associated
+// denote(entries), via AssocOr right-rotations. Entries are OPAQUE: a ∨-valued
+// entry is never descended into, so this is O(#entries) structural rotations, not
+// a leaf canonicalization (the cheap alternative to `equiv_steps` when the caller
+// already knows the entry boundaries, e.g. RAnd's switch tail (…∨P)∨Q with P,Q
+// grouped). Self-checks by replay; errors if it cannot reach denote(entries)
+// (e.g. a spine ∨-node aliases an entry handle) so the caller can fall back.
+util::Result<std::vector<logic::proof::ks1::Step>> reassoc_left_steps(
+    FormulaBuilder& fb, FormulaHandle cur,
+    const std::vector<FormulaHandle>& entries);
+
 }  // namespace logic::proof::translate::lkr_to_ks1
