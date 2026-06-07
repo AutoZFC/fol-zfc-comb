@@ -20,13 +20,16 @@
 
 #include "src/library/library.h"
 #include "src/parser/parser.h"
+#include "src/proof/comb/verifier.h"
 #include "src/proof/lkr/verifier.h"
 #include "src/proof/nd/lowering.h"
 #include "src/proof/proof.h"
 #include "src/proof/translate/iota_elim/eliminate_iota.h"
+#include "src/proof/translate/ks1_to_comb/read_skew.h"
 #include "src/proof/translate/lkr_cut_elim/b0.h"
 #include "src/proof/translate/lkr_cut_elim/deriv.h"
 #include "src/proof/translate/lkr_cut_elim/reduce.h"
+#include "src/proof/translate/lkr_to_ks1/lkr_to_ks1.h"
 #include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/proof/translate/theorem_facts.h"
@@ -47,6 +50,8 @@ namespace ni  = logic::proof::translate::nd_internalize;
 namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
 namespace lce = logic::proof::translate::lkr_cut_elim;
+namespace l2k = logic::proof::translate::lkr_to_ks1;
+namespace k2c = logic::proof::ks1_to_comb;
 
 namespace {
 
@@ -70,6 +75,26 @@ struct StageResult {
 // case), so a re-verify FAILURE is an engine bug; residual Cut/Lemma ops are
 // just incomplete elimination (axiom-dependent cuts are irreducible, §7a).
 // Returns a short outcome tag for reporting.
+// K6.4 — the comb back end. Translate a CUT-FREE Deriv to KS1 (lkr_to_ks1),
+// bridge to a combinatorial proof (build_comb_proof), and run the independent
+// CombVerifier. Returns a granular tag locating any failure (which is expected
+// while the LKR→KS1 translation's generality is still being filled in — this is
+// a coverage measure, not a correctness gate). Only called on residual==0.
+std::string run_comb_backend(GlobalContext& ctx, FormulaHandle goal_nnf,
+                             const lce::Deriv& cutfree) {
+    FormulaBuilder fb(ctx);
+    auto ks1_r = l2k::lkr_to_ks1(fb, cutfree);
+    if (!ks1_r.ok()) return "comb_l2k_err: " + ks1_r.error().to_string();
+    auto cp = k2c::build_comb_proof(fb, ks1_r.value());
+    if (!cp.ok()) return "comb_bridge_err: " + cp.error().to_string();
+    comb::CombVerifier v;
+    if (!v.verify_well_formed(cp.value()).ok())                       return "comb_wf_fail";
+    if (!v.verify_target_is_formula_graph(ctx, goal_nnf, cp.value()).ok()) return "comb_target_fail";
+    if (!v.verify_fonet(cp.value()).ok())                            return "comb_fonet_fail";
+    if (!v.verify_skew_bifibration(cp.value()).ok())                 return "comb_skew_fail";
+    return "comb_ok";
+}
+
 std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
                          const Program<lkr::Instr>& lkr_prog,
                          std::optional<SentenceHandle> sh_self,
@@ -130,10 +155,15 @@ std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
     // Cache only genuinely cut-free proofs (the Stage A invariant): a residual
     // (axiom-dependent, §7a) proof must never be inlined into a downstream
     // citer, which would reintroduce cuts.
-    if (residual == 0 && sh_self.has_value())
+    if (residual != 0)
+        return "residual(" + std::to_string(residual) + ")";
+
+    // K6.4: cut-free ⇒ run the comb back end (lkr_to_ks1 → comb → CombVerifier)
+    // before the Deriv is moved into the cache.
+    std::string comb = run_comb_backend(ctx, goal_nnf, *cutfree);
+    if (sh_self.has_value())
         cache[sh_self.value()] = std::move(cutfree);
-    return residual == 0 ? "cutfree"
-                         : ("residual(" + std::to_string(residual) + ")");
+    return "cutfree | " + comb;
 }
 
 std::string load_headers(Runtime& rt,
