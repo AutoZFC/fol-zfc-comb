@@ -83,6 +83,31 @@ void test_non_equiv_errors() {
     EXPECT(r.is_error());
 }
 
+// contract_steps(X): replaying from X∨X must reach exactly X.
+void ok_contract(F& f, FormulaHandle x) {
+    auto s = l2k::contract_steps(f.fb, x);
+    EXPECT(s.ok());
+    if (!s.ok()) { std::cerr << "  " << s.error().to_string() << "\n"; return; }
+    auto got = proof::ks1::replay(f.fb, f.Or(x, x), s.value());
+    EXPECT(got.ok() && got.value() == x);
+    if (got.ok() && !(got.value() == x))
+        std::cerr << "  got " << got.value().get().to_string() << "\n";
+}
+
+void test_contract_atom() { F f; ok_contract(f, f.p("a")); }                 // Ac
+void test_contract_neg()  { F f; ok_contract(f, f.fb.make_not(f.p("a"))); }  // ¬a
+void test_contract_or()   { F f; ok_contract(f, f.Or(f.p("a"), f.p("b"))); } // reshape+Ac×2
+void test_contract_and()  { F f; ok_contract(f, f.And(f.p("a"), f.p("b"))); }// M+Ac×2
+void test_contract_em()   { F f; auto a=f.p("a"); ok_contract(f, f.Or(a, f.fb.make_not(a))); }
+void test_contract_nested() {
+    F f; auto a=f.p("a"),b=f.p("b"),c=f.p("c");
+    ok_contract(f, f.Or(f.And(a, b), c));     // ((a∧b)∨c): reshape, then M, Ac
+}
+void test_contract_forall() {
+    F f; auto body = f.fb.predicate(f.ctx.add_predicate("p", 1), {Term::generalized(0)});
+    ok_contract(f, f.fb.make_quantified(Op::Forall, body));   // MForall + Ac
+}
+
 }  // namespace
 
 int main() {
@@ -94,6 +119,13 @@ int main() {
     test_nested_and_in_or();
     test_and_chain();
     test_non_equiv_errors();
+    test_contract_atom();
+    test_contract_neg();
+    test_contract_or();
+    test_contract_and();
+    test_contract_em();
+    test_contract_nested();
+    test_contract_forall();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

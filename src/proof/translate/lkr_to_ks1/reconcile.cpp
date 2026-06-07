@@ -144,6 +144,78 @@ util::Result<std::vector<Step>> canon_path(FormulaBuilder& fb, FormulaHandle f) 
 
 }  // namespace
 
+namespace {
+
+using ks1::Dir;
+using ks1::Path;
+using ks1::Step;
+
+bool is_atom_lit(FormulaHandle h) {
+    const Formula& f = h.get();
+    if (f.is_predicate()) return true;
+    if (f.is_compound() && f.as_compound().op == Op::Not)
+        return f.as_compound().left.get().is_predicate();   // ¬atom
+    return false;
+}
+
+ks1::Step rule_at(ks1::Rule r, Path ctx) {
+    Step s; s.rule = r; s.context = std::move(ctx); return s;
+}
+
+// Emit S{X∨X}/S{X} at context `ctx`. Recurse through X's structure with the
+// medial that exposes a ∨ one level down, bottoming out at Ac on literal pairs.
+util::Result<std::vector<Step>> contract_at(FormulaBuilder& fb, FormulaHandle x,
+                                            Path ctx) {
+    std::vector<Step> out;
+    auto child = [&](Path c, Dir d) { c.push_back(d); return c; };
+
+    if (is_atom_lit(x)) {                       // a∨a → a
+        out.push_back(rule_at(ks1::Rule::Ac, ctx));
+        return out;
+    }
+    const Formula& f = x.get();
+    if (f.is_compound() && f.as_compound().op == Op::Or) {
+        FormulaHandle B = f.as_compound().left, C = f.as_compound().right;
+        // (B∨C)∨(B∨C) ⟶ (B∨B)∨(C∨C), then contract each side.
+        FormulaHandle from = fb.make_or(fb.make_or(B, C), fb.make_or(B, C));
+        FormulaHandle to   = fb.make_or(fb.make_or(B, B), fb.make_or(C, C));
+        TRY_ASSIGN(reshape, equiv_steps(fb, from, to));
+        for (Step& s : reshape) {
+            s.context.insert(s.context.begin(), ctx.begin(), ctx.end());
+            out.push_back(std::move(s));
+        }
+        TRY_ASSIGN(lb, contract_at(fb, B, child(ctx, Dir::Left)));
+        TRY_ASSIGN(rb, contract_at(fb, C, child(ctx, Dir::Right)));
+        out.insert(out.end(), lb.begin(), lb.end());
+        out.insert(out.end(), rb.begin(), rb.end());
+        return out;
+    }
+    if (f.is_compound() && f.as_compound().op == Op::And) {
+        FormulaHandle B = f.as_compound().left, C = f.as_compound().right;
+        out.push_back(rule_at(ks1::Rule::M, ctx));     // (B∧C)∨(B∧C)→(B∨B)∧(C∨C)
+        TRY_ASSIGN(lb, contract_at(fb, B, child(ctx, Dir::Left)));
+        TRY_ASSIGN(rb, contract_at(fb, C, child(ctx, Dir::Right)));
+        out.insert(out.end(), lb.begin(), lb.end());
+        out.insert(out.end(), rb.begin(), rb.end());
+        return out;
+    }
+    if (f.is_quantified()) {
+        Op op = f.as_quantified().op;
+        out.push_back(rule_at(op == Op::Forall ? ks1::Rule::MForall
+                                               : ks1::Rule::MExists, ctx));
+        TRY_ASSIGN(bb, contract_at(fb, f.as_quantified().body, child(ctx, Dir::Down)));
+        out.insert(out.end(), bb.begin(), bb.end());
+        return out;
+    }
+    return MAKE_ERROR << "contract_steps: unsupported formula shape (⊥/unit?)";
+}
+
+}  // namespace
+
+util::Result<std::vector<Step>> contract_steps(FormulaBuilder& fb, FormulaHandle x) {
+    return contract_at(fb, x, {});
+}
+
 util::Result<std::vector<Step>> equiv_steps(FormulaBuilder& fb,
                                             FormulaHandle from, FormulaHandle to) {
     if (from == to) return std::vector<Step>{};

@@ -25,4 +25,14 @@ namespace logic::proof::translate::lkr_to_ks1 {
 util::Result<std::vector<logic::proof::ks1::Step>> equiv_steps(
     FormulaBuilder& fb, FormulaHandle from, FormulaHandle to);
 
+// Contraction (CUT_HANDLING_ROADMAP K6.3b). Emit the KS1 resource steps that
+// rewrite `X ∨ X` into `X` — medials (M/MForall/MExists) pushing the ∨ down
+// through X's ∧/∀/∃ structure, then atomic contraction Ac at each literal pair
+// (with ≡-reshaping to pair the matching atoms). Replaying the result from
+// `make_or(X, X)` yields `X`. This is the core of the resource phase Φ2's
+// contraction (HSW §IX); `tr(RDuplicate)` reshapes the doubled sequent so the
+// two copies are adjacent, then applies this.
+util::Result<std::vector<logic::proof::ks1::Step>> contract_steps(
+    FormulaBuilder& fb, FormulaHandle x);
+
 }  // namespace logic::proof::translate::lkr_to_ks1
