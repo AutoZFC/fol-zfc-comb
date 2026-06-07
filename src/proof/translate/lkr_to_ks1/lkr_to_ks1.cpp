@@ -14,12 +14,23 @@ namespace lce = logic::proof::translate::lkr_cut_elim;
 
 namespace {
 
+// The result of translating one node: the KS1 steps and the sequent's ENTRIES
+// (LKR_TO_KS1_DESIGN.md §K6.5). Invariant: replay(⊤, steps) == denote(entries)
+// by handle, where denote left-associates the entries. `entries` is an
+// order-free bag of opaque subtrees — it need NOT match `d.conclusion`'s order;
+// rules locate entries by identity. A ∨-valued entry is kept GROUPED (never
+// flattened) so its boundary survives.
+struct Tr {
+    std::vector<ks1::Step>     steps;
+    std::vector<FormulaHandle> entries;
+};
+
 // --- Diagnostic instrumentation (gated on env; zero cost by default) -------
 // `tr` is a thin wrapper around `tr_impl` that tracks recursion depth, total
 // emitted steps, and per-rule step tallies, with an optional hard budget that
 // turns a translation blowup into a clean error instead of an OOM. Set
 // LKR_TO_KS1_MAX_STEPS to cap; LKR_TO_KS1_TRACE=1 to log entry/exit per call.
-util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deriv& d);
+util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d);
 
 int rule_idx(const lce::Deriv& d) {
     if (std::get_if<lce::RAx>(&d.rule))        return 0;
@@ -52,7 +63,7 @@ struct TrStats {
 };
 thread_local TrStats g_tr;
 
-util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d) {
+util::Result<Tr> tr(FormulaBuilder& fb, const lce::Deriv& d) {
     ++g_tr.calls;
     if (++g_tr.depth > g_tr.max_depth) g_tr.max_depth = g_tr.depth;
     const int mydepth = g_tr.depth, ri = rule_idx(d);
@@ -69,7 +80,7 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
     auto r = tr_impl(fb, d);
     --g_tr.depth;
     if (r.ok()) {
-        const long long n = static_cast<long long>(r.value().size());
+        const long long n = static_cast<long long>(r.value().steps.size());
         const long long self = n - g_tr.child_sum[mydepth];   // steps THIS node added
         g_tr.per_rule[ri] += self;
         if (mydepth >= 1) g_tr.child_sum[mydepth - 1] += n;    // report up to parent
@@ -101,6 +112,18 @@ FormulaHandle denote(FormulaBuilder& fb, const std::vector<FormulaHandle>& g) {
     FormulaHandle acc = g[0];
     for (std::size_t i = 1; i < g.size(); ++i) acc = fb.make_or(acc, g[i]);
     return acc;
+}
+
+// Path from the root of denote(entries) (the n-entry LEFT-associated ∨-tree) to
+// the entry at index `i`. denote = (…((e₀∨e₁)∨e₂)…)∨e_{n-1}, so e_{n-1} sits at
+// [Right], and every earlier entry is reached by descending [Left] first:
+//   i == n-1 : [Right]            (n ≥ 2)
+//   i  < n-1 : [Left]^(n-1-i) ++ [Right]   (i ≥ 1)
+//   i == 0   : [Left]^(n-1)       (the all-left spine; empty when n == 1)
+[[maybe_unused]] ks1::Path path_to_entry(std::size_t i, std::size_t n) {
+    ks1::Path p(n - 1 - i, ks1::Dir::Left);
+    if (i != 0) p.push_back(ks1::Dir::Right);
+    return p;
 }
 
 // Prepend `d` to every step's context — composes a sub-derivation (t ⟶ X)
@@ -137,7 +160,7 @@ ks1::Step tu_root() {
 // left-associated disjunction of the sequent (LKR_TO_KS1_DESIGN.md §"The
 // sequent–formula correspondence"). Reconciliation (reorder_steps/equiv_steps)
 // keeps each node's output at denote(node) exactly.
-util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
+util::Result<Tr> tr_impl(FormulaBuilder& fb, const lce::Deriv& d) {
     // --- RAx: axiom ⊢ Γ closing on the dual pair at {a,b}. ---------------
     // Ai introduces α∨ᾱ; any OTHER sequent entries are weakened in (the axiom
     // closes on the pair alone — implicit weakening), each a Φ2 W step; then
@@ -148,16 +171,17 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
         FormulaHandle positive = is_negative_literal(lit_a) ? lit_b : lit_a;
         FormulaHandle negative = is_negative_literal(lit_a) ? lit_a : lit_b;
         std::vector<ks1::Step> steps{ai_step(positive)};        // t → α∨ᾱ
-        FormulaHandle cur = fb.make_or(positive, negative);
+        // entries = [α, ᾱ] ++ weakened-in others. denote of this left-assoc list
+        // is exactly (α∨ᾱ)∨e₁∨… = what Ai+W produce, so NO reconcile; the pair is
+        // listed ungrouped so a parent can still find α / ᾱ by identity.
+        std::vector<FormulaHandle> entries{positive, negative};
         for (std::size_t i = 0; i < d.conclusion.size(); ++i) {
             if (i == ax->a || i == ax->b) continue;             // the axiom pair
             ks1::Step ws; ws.rule = ks1::Rule::W; ws.f_param = d.conclusion[i];
-            steps.push_back(ws);                                // → cur ∨ entry
-            cur = fb.make_or(cur, d.conclusion[i]);
+            steps.push_back(ws);                                // F → F∨entry
+            entries.push_back(d.conclusion[i]);
         }
-        TRY_ASSIGN(rec, equiv_steps(fb, cur, denote(fb, d.conclusion)));
-        steps.insert(steps.end(), rec.begin(), rec.end());
-        return steps;
+        return Tr{std::move(steps), std::move(entries)};
     }
 
     // --- ROr: build splits node[pr]=A∨B into A at pr and B appended. Move B
@@ -166,7 +190,8 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
     if (const auto* orr = std::get_if<lce::ROr>(&d.rule)) {
         const lce::Deriv* child = orr->child.get();
         const std::size_t pr = orr->principal;
-        TRY_ASSIGN(steps, tr(fb, *child));
+        TRY_ASSIGN(childRes, tr(fb, *child));
+        auto steps = std::move(childRes.steps);
         FormulaHandle A = child->conclusion[pr];
         FormulaHandle B = child->conclusion.back();
         std::vector<FormulaHandle> inter;                 // [node…, A, B at pr+1, …]
@@ -174,7 +199,7 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
             inter.push_back(d.conclusion[i]);
             if (i == pr) { inter.back() = A; inter.push_back(B); }
         }
-        TRY_ASSIGN(r, reorder_steps(fb, child->conclusion, inter));
+        TRY_ASSIGN(r, reorder_steps(fb, childRes.entries, inter));
         steps.insert(steps.end(), r.begin(), r.end());
         if (pr > 0) {                                     // (prefix∨A)∨B → prefix∨(A∨B)
             const std::size_t N = d.conclusion.size();
@@ -183,15 +208,14 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
             a.context = ks1::Path(N - 1 - pr, ks1::Dir::Left);
             steps.push_back(a);
         }
-        return steps;
+        return Tr{std::move(steps), d.conclusion};
     }
     if (const auto* ex = std::get_if<lce::RExchange>(&d.rule)) {
-        TRY_ASSIGN(steps, tr(fb, *ex->child));
-        // An exchange is a pure entry permutation; reorder the ∨-chain locally
-        // (O(inversions)) rather than canonicalize-and-invert the whole sequent.
-        TRY_ASSIGN(rec, reorder_steps(fb, ex->child->conclusion, d.conclusion));
-        steps.insert(steps.end(), rec.begin(), rec.end());
-        return steps;
+        // A pure entry permutation. Entry ORDER carries no meaning under modulo-≡
+        // checking (rules locate entries by identity; the final endpoint is
+        // compared order-free), so emit NOTHING — pass the child's steps and
+        // entries through unchanged (LKR_TO_KS1_DESIGN.md §K6.5).
+        return tr(fb, *ex->child);
     }
 
     // --- RAnd: ⊢ Γ_L,φ and ⊢ Γ_R,ψ ⊢ Γ_L,Γ_R,φ∧ψ. ---------------------
@@ -204,16 +228,39 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
         const bool emptyL = L->conclusion.size() == 1;   // Γ_L = ∅ (just φ)
         const bool emptyR = R->conclusion.size() == 1;   // Γ_R = ∅ (just ψ)
 
-        TRY_ASSIGN(stepsL, tr(fb, *L));   // t ⟶ P∨φ (or φ if Γ_L=∅)
-        TRY_ASSIGN(stepsR, tr(fb, *R));   // t ⟶ Q∨ψ (or ψ if Γ_R=∅)
+        TRY_ASSIGN(LRes, tr(fb, *L));     // t ⟶ (Γ_L)∨φ (or φ if Γ_L=∅)
+        TRY_ASSIGN(RRes, tr(fb, *R));     // t ⟶ (Γ_R)∨ψ (or ψ if Γ_R=∅)
+        FormulaHandle phi = L->conclusion.back();
+        FormulaHandle psi = R->conclusion.back();
+        // The switch sequence needs φ / ψ as the RIGHTMOST entry of F_L / F_R, so
+        // that the branch is (P∨φ) / (Q∨ψ). Entry order is free, so move a φ-entry
+        // (resp. ψ) to the end — a bounded reorder over the entry list, not a leaf
+        // canonicalization.
+        for (int side = 0; side < 2; ++side) {
+            std::vector<FormulaHandle>& e  = side ? RRes.entries : LRes.entries;
+            std::vector<ks1::Step>&     st = side ? RRes.steps   : LRes.steps;
+            FormulaHandle x = side ? psi : phi;
+            std::size_t k = e.size();
+            for (std::size_t t = 0; t < e.size(); ++t) if (e[t] == x) k = t;  // last
+            if (k == e.size())
+                return MAKE_ERROR << "lkr_to_ks1: RAnd branch lacks its principal";
+            if (k + 1 != e.size()) {                          // not already last
+                std::vector<FormulaHandle> tgt = e;
+                tgt.erase(tgt.begin() + k);
+                tgt.push_back(x);
+                TRY_ASSIGN(r, reorder_steps(fb, e, tgt));
+                st.insert(st.end(), r.begin(), r.end());
+                e = std::move(tgt);
+            }
+        }
+        auto stepsL = std::move(LRes.steps);
+        auto stepsR = std::move(RRes.steps);
         prefix_context(stepsL, ks1::Dir::Left);
         prefix_context(stepsR, ks1::Dir::Right);
         std::vector<ks1::Step> steps{tu_root()};                    // t → t∧t
         steps.insert(steps.end(), stepsL.begin(), stepsL.end());    // → (P∨φ)∧t
         steps.insert(steps.end(), stepsR.begin(), stepsR.end());    // → (P∨φ)∧(Q∨ψ)
 
-        FormulaHandle phi = L->conclusion.back();
-        FormulaHandle psi = R->conclusion.back();
         using P = ks1::Path; using D = ks1::Dir; using E = ks1::EqRule;
         if (!emptyL && !emptyR) {
             // (P∨φ)∧(Q∨ψ) ⟶ ((φ∧ψ)∨P)∨Q  (design doc steps 4–9).
@@ -243,20 +290,20 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
         else {
             FormulaHandle conj = fb.make_and(phi, psi);
             if (!emptyL && !emptyR) {
-                FormulaHandle Pf = denote(fb, {L->conclusion.begin(), L->conclusion.end() - 1});
-                FormulaHandle Qf = denote(fb, {R->conclusion.begin(), R->conclusion.end() - 1});
+                FormulaHandle Pf = denote(fb, {LRes.entries.begin(), LRes.entries.end() - 1});
+                FormulaHandle Qf = denote(fb, {RRes.entries.begin(), RRes.entries.end() - 1});
                 cur = fb.make_or(fb.make_or(conj, Pf), Qf);
             } else if (emptyL) {
-                FormulaHandle Qf = denote(fb, {R->conclusion.begin(), R->conclusion.end() - 1});
+                FormulaHandle Qf = denote(fb, {RRes.entries.begin(), RRes.entries.end() - 1});
                 cur = fb.make_or(conj, Qf);
             } else {
-                FormulaHandle Pf = denote(fb, {L->conclusion.begin(), L->conclusion.end() - 1});
+                FormulaHandle Pf = denote(fb, {LRes.entries.begin(), LRes.entries.end() - 1});
                 cur = fb.make_or(conj, Pf);
             }
         }
         TRY_ASSIGN(rec, equiv_steps(fb, cur, denote(fb, d.conclusion)));
         steps.insert(steps.end(), rec.begin(), rec.end());
-        return steps;
+        return Tr{std::move(steps), d.conclusion};
     }
 
     // --- RForall: ⊢ Γ, φ[eigen] ⊢ Γ, ∀x.φ. ------------------------------
@@ -278,12 +325,13 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
             if (i != pr) delta.push_back(child->conclusion[i]);
         const bool emptyG = delta.empty();
 
-        TRY_ASSIGN(steps, tr(fb, *child));                      // → denote(child)
+        TRY_ASSIGN(childRes, tr(fb, *child));                   // → denote(child)
+        auto steps = std::move(childRes.steps);
         // Reshape (Δ),φ so φ is the rightmost disjunct — BEFORE wrapping, on the
         // fixed-eigenvar formulas (so the ∀-body's reshape target is known).
         if (!emptyG) {
             FormulaHandle iso = fb.make_or(denote(fb, delta), child->conclusion[pr]);
-            TRY_ASSIGN(r, equiv_steps(fb, denote(fb, child->conclusion), iso));
+            TRY_ASSIGN(r, equiv_steps(fb, denote(fb, childRes.entries), iso));
             steps.insert(steps.end(), r.begin(), r.end());
         }
         // Wrap everything so far in ∀x: prefix [Down] + rebind the eigenvar.
@@ -314,7 +362,7 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
             TRY_ASSIGN(r2, equiv_steps(fb, afterDist, denote(fb, d.conclusion)));
             out.insert(out.end(), r2.begin(), r2.end());
         }
-        return out;
+        return Tr{std::move(out), d.conclusion};
     }
 
     // --- RExists: ⊢ Γ, φ[x:=t] ⊢ Γ, ∃x.φ. -------------------------------
@@ -330,26 +378,20 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
         FormulaHandle body = qf.as_quantified().body;            // φ with gen0
         FormulaHandle inst = fb.instantiate_gen(body, exr->witness);  // φ[t]
 
-        TRY_ASSIGN(steps, tr(fb, *child));                       // → denote(child)
-        std::vector<FormulaHandle> rest;                         // entries ≠ pr
-        for (std::size_t i = 0; i < child->conclusion.size(); ++i)
-            if (i != pr) rest.push_back(child->conclusion[i]);
-        const bool single = rest.empty();
-
-        // r1: move the instance φ[t] (at pr) to the rightmost slot — a pure
-        // permutation (reorder, not equiv_steps canon over the wide sequent).
-        std::vector<FormulaHandle> iso_vec = rest; iso_vec.push_back(inst);
-        TRY_ASSIGN(r1, reorder_steps(fb, child->conclusion, iso_vec));
-        steps.insert(steps.end(), r1.begin(), r1.end());
+        TRY_ASSIGN(childRes, tr(fb, *child));                    // → denote(child)
+        auto steps = std::move(childRes.steps);
+        // Apply Ex IN PLACE at the instance entry φ[t] — no reorder (order free).
+        std::vector<FormulaHandle> entries = std::move(childRes.entries);
+        std::size_t idx = entries.size();
+        for (std::size_t i = 0; i < entries.size(); ++i) if (entries[i] == inst) idx = i;
+        if (idx == entries.size())
+            return MAKE_ERROR << "lkr_to_ks1: RExists child lacks the instance φ[t]";
         ks1::Step ex; ex.rule = ks1::Rule::Ex; ex.f_param = body;
         ex.t_param = exr->witness;
-        ex.context = single ? ks1::Path{} : ks1::Path{ks1::Dir::Right};
+        ex.context = path_to_entry(idx, entries.size());
         steps.push_back(ex);                                     // φ[t] → ∃x.φ
-        // r2: move ∃x.φ back to pr — again a pure permutation.
-        std::vector<FormulaHandle> after_vec = rest; after_vec.push_back(quant);
-        TRY_ASSIGN(r2, reorder_steps(fb, after_vec, d.conclusion));
-        steps.insert(steps.end(), r2.begin(), r2.end());
-        return steps;
+        entries[idx] = quant;
+        return Tr{std::move(steps), std::move(entries)};
     }
 
     // --- RWeaken: ⊢ Γ ⊢ Γ,φ (the weakened-in φ is at idx). ---------------
@@ -358,16 +400,14 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
     if (const auto* w = std::get_if<lce::RWeaken>(&d.rule)) {
         const lce::Deriv* child = w->child.get();
         FormulaHandle weakened = d.conclusion[w->idx];
-        TRY_ASSIGN(steps, tr(fb, *child));                 // Φ1: → denote(child)
+        TRY_ASSIGN(childRes, tr(fb, *child));              // Φ1: → denote(child)
+        auto steps = std::move(childRes.steps);
         ks1::Step ws; ws.rule = ks1::Rule::W; ws.f_param = weakened;  // ctx {}
-        steps.push_back(ws);                               // → denote(child)∨φ
-        // After W the entries are child ++ [weakened]; node has weakened at idx.
-        // That is a pure permutation — reorder the ∨-chain locally.
-        std::vector<FormulaHandle> after = child->conclusion;
-        after.push_back(weakened);
-        TRY_ASSIGN(rec, reorder_steps(fb, after, d.conclusion));
-        steps.insert(steps.end(), rec.begin(), rec.end());
-        return steps;
+        steps.push_back(ws);                               // F → F∨φ
+        // φ is appended as a fresh entry; order is free, so NO reorder.
+        std::vector<FormulaHandle> entries = std::move(childRes.entries);
+        entries.push_back(weakened);
+        return Tr{std::move(steps), std::move(entries)};
     }
 
     // --- RDuplicate: ⊢ Γ,φ,φ ⊢ Γ,φ (the child has an extra copy of φ=node[src]
@@ -378,41 +418,46 @@ util::Result<std::vector<ks1::Step>> tr_impl(FormulaBuilder& fb, const lce::Deri
     if (const auto* dup = std::get_if<lce::RDuplicate>(&d.rule)) {
         const lce::Deriv* child = dup->child.get();
         FormulaHandle X = d.conclusion[dup->src];
-        TRY_ASSIGN(steps, tr(fb, *child));                 // Φ1: → denote(child)
+        TRY_ASSIGN(childRes, tr(fb, *child));              // Φ1: → denote(child)
+        auto steps = std::move(childRes.steps);
 
-        std::vector<FormulaHandle> rest;
-        for (std::size_t i = 0; i < d.conclusion.size(); ++i)
-            if (i != dup->src) rest.push_back(d.conclusion[i]);
-        const bool has_rest = !rest.empty();
+        // childRes.entries holds two copies of X. Bring the SECOND copy adjacent
+        // to the first — a LOCAL move (O(distance), not a reorder of the whole
+        // sequent into a canonical order) — group them as X∨X, and contract in
+        // place with the fixed-context contractor, which touches only the X∨X
+        // subtree and so preserves every other entry's grouping. Order is free,
+        // so the rest of the sequent keeps its current order.
+        const std::vector<FormulaHandle>& cur = childRes.entries;
+        std::size_t i = SIZE_MAX, j = SIZE_MAX;
+        for (std::size_t k = 0; k < cur.size(); ++k)
+            if (cur[k] == X) { if (i == SIZE_MAX) i = k; else { j = k; break; } }
+        if (j == SIZE_MAX)
+            return MAKE_ERROR << "lkr_to_ks1: RDuplicate child lacks two copies of X";
 
-        // r1: bring the two X copies adjacent and group them as X∨X. child's
-        // entries are a permutation of rest++[X,X], so reorder there (O(inversions)
-        // over the width), then one AssocOr regroups the trailing (…∨X)∨X into
-        // …∨(X∨X). No equiv_steps canon over the wide duplicated sequent.
-        std::vector<FormulaHandle> r1_target = rest;
-        r1_target.push_back(X);
-        r1_target.push_back(X);
-        TRY_ASSIGN(r1, reorder_steps(fb, child->conclusion, r1_target));
+        std::vector<FormulaHandle> target = cur;           // move copy j to i+1
+        target.erase(target.begin() + j);
+        target.insert(target.begin() + i + 1, X);
+        TRY_ASSIGN(r1, reorder_steps(fb, cur, target));
         steps.insert(steps.end(), r1.begin(), r1.end());
-        if (has_rest) {                                    // (R∨X)∨X → R∨(X∨X)
+
+        const std::size_t n = target.size();
+        ks1::Path grp(n - 2 - i, ks1::Dir::Left);          // node holding {…,X,X}
+        ks1::Path cpath = grp;
+        if (i > 0) {                                       // (P∨X)∨X → P∨(X∨X)
             ks1::Step a; a.rule = ks1::Rule::Eqv;
             a.eq = ks1::EqRule::AssocOr; a.dir = ks1::EqDir::Forward;
+            a.context = grp;
             steps.push_back(a);
+            cpath.push_back(ks1::Dir::Right);
         }
-
-        TRY_ASSIGN(con, contract_steps(fb, X));            // X∨X → X; at [Right] if rest
+        TRY_ASSIGN(con, contract_steps(fb, X));            // X∨X → X at cpath
         for (ks1::Step& s : con) {
-            if (has_rest) s.context.insert(s.context.begin(), ks1::Dir::Right);
+            s.context.insert(s.context.begin(), cpath.begin(), cpath.end());
             steps.push_back(std::move(s));
         }
-
-        // r2: after contraction the order is rest++[X]; node has X at src — a
-        // pure permutation.
-        std::vector<FormulaHandle> afterC = rest;
-        afterC.push_back(X);
-        TRY_ASSIGN(r2, reorder_steps(fb, afterC, d.conclusion));
-        steps.insert(steps.end(), r2.begin(), r2.end());
-        return steps;
+        std::vector<FormulaHandle> entries = cur;          // drop the second copy
+        entries.erase(entries.begin() + j);
+        return Tr{std::move(steps), std::move(entries)};
     }
 
     return MAKE_ERROR << "lkr_to_ks1: K6.3 — this rule not yet handled "
@@ -432,7 +477,8 @@ util::Result<ks1::Derivation> lkr_to_ks1(FormulaBuilder& fb,
     g_tr = TrStats{};
     if (const char* b = std::getenv("LKR_TO_KS1_MAX_STEPS")) g_tr.budget = std::atoll(b);
     g_tr.trace = std::getenv("LKR_TO_KS1_TRACE") != nullptr;
-    TRY_ASSIGN(steps, tr(fb, cutfree));
+    TRY_ASSIGN(result, tr(fb, cutfree));
+    auto steps = std::move(result.steps);
     if (std::getenv("LKR_TO_KS1_STATS")) {
         long long eqv = 0;
         for (const auto& s : steps) if (s.rule == ks1::Rule::Eqv) ++eqv;

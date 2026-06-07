@@ -97,6 +97,80 @@ returns `(Φ1, goal, [])` (empty resource phase). Weakening/contraction (Φ2) is
   (Theorem 29 + Lemmas 25/26); compute the linearized `A'`. The hard part.
 - **K6.4** — wire into `comb_checker` after `eliminate_cuts`; corpus coverage.
 
+## K6.5 — entries-list (the perf rewrite)
+
+The naive `tr` ends every node at `denote(d.conclusion)` *exactly* (left-assoc, in the
+LKR sequent's order) and reconciles to that shape with `equiv_steps`/`reorder_steps`. For
+wide sequents this is the step-blowup: `eq_iff_eq` = 44540 steps, **93–98% `Eqv`** (assoc/comm
+reassociation). The paper treats `≡` as a free congruence; those steps should not exist.
+
+The KS1 checker (`ks1::check`) is **modulo ≡** in two senses that make the order/bracketing of
+the sequent disjunction free, so the reassociation never has to be emitted:
+
+1. **AC-tolerant rule matching** — the chain rules (`Sw/Mix/Ac/M/MForall/MExists`) flatten the
+   ∧/∨-chain at `context` and pick operands; they find their redex regardless of order or
+   bracketing.
+2. **Modulo-≡ endpoint** — `check` accepts when `equiv(replay(⊤,steps), goal)`; the *final*
+   formula's order/bracketing is free.
+
+Therefore **the sequent's entry order carries no meaning**: rules locate their entries by
+identity, never by position, and no `Eqv` is needed to permute/reassociate the disjunction.
+
+### New contract
+
+`tr(d) → (steps, entries)` where `entries : vector<FormulaHandle>` is the sequent's entries as
+**opaque subtrees**, in the order they sit in the actual current formula, with the invariant
+
+> `replay(⊤, steps)  ==  denote_leftassoc(entries)`  (by handle).
+
+`entries` is an **order-free bag**: it need NOT match `d.conclusion`'s order. A `∨`-valued entry
+(e.g. an `ROr` result `A∨B`) is kept GROUPED as one entry — never flattened — so its boundary
+survives (this is the fix to the "entries lose their boundary under `flat_or`" blocker). The
+path to `entries[i]` in the n-entry left-assoc tree is `[Left]^(n-1-i)` for `i=0`, else
+`[Left]^(n-1-i) ++ [Right]` (empty for n=1).
+
+### Per-rule (order-free)
+
+- `RExchange` — **passthrough**: return `tr(child)` verbatim (0 steps). The permutation is a
+  no-op; downstream finds entries by identity.
+- `RWeaken` — one `W(φ)@{}` (`F → F∨φ`); `entries = child ++ [φ]`. No reorder.
+- `RAx` — `Ai(α)` then `W` each non-pair entry; `entries = [α, ᾱ] ++ others`. No reconcile.
+- `RDuplicate` — contract the two equal entries via `M/MForall/MExists` + `Ac` **operand
+  selectors** (no reorder/group); `entries` = child with one copy dropped.
+- `ROr` — group child's `A`,`B` entries into one `A∨B` entry (the only place a local
+  `AssocOr`/`reorder` is still needed, to physically form the subtree); ~free.
+- `RAnd` — `Tu` + branch composition + switch sequence (P,Q opaque), then **no** `equiv_steps`
+  reconcile — `entries = Γ_L ++ Γ_R ++ [φ∧ψ]` in whatever order the switch leaves them.
+- `RForall`/`RExists` — as before, but contexts computed against the child's returned `entries`;
+  the `DistForall` pull-out (RForall, non-empty Γ) stays.
+- **Root** — `lkr_to_ks1` ends with one `equiv_steps(denote(entries), goal)` guard, bounded by
+  goal size (normally a no-op: the single root entry == goal by handle).
+
+Migration is incremental: first the signature change keeping `entries = d.conclusion` order
+(behaviour-identical), then each rule relaxed to order-free.
+
+### Status / measured (eq_iff_eq, the worst corpus theorem)
+
+`RExchange`/`RWeaken`/`RAx`/`RExists` are fully order-free (no reconcile). `RDuplicate` uses
+a LOCAL move (bring the second copy adjacent to the first, group, contract in place with the
+fixed-context `contract_at` — which touches only `X∨X`, preserving sibling grouping). `RAnd`
+moves φ/ψ to the rightmost entry of each branch (bounded reorder) and still uses `equiv_steps`
+for its final reconcile.
+
+| total steps | EQV | by-rule (self) |
+|---|---|---|
+| 44540 (before) | 43513 | RExchange 15237, RDuplicate 14229, RWeaken 9222, RAnd 3464, RAx 1269 |
+| **8418 (now)** | 7391 | RDuplicate 4182, RAnd 3634, ROr 363, RForall 103, RWeaken 92, RAx 36, RExists 8 |
+
+5.3× fewer steps; corpus unchanged (19/19 OK, the 4 cutfree theorems still hit the separate
+Thm-17-decompose bridge gap). NOT YET at the ~1027 NON-EQV floor: `RDuplicate`'s `xx_or_regroup`
+(∨-nested-in-X contraction) and `RAnd`'s leaf-level `equiv_steps` reconcile remain. Both want an
+**entry-level reassociation** helper (re-bracket a ∨-tree to left-assoc treating entries as
+opaque leaves — right-rotations / AssocOr, O(#entries), no leaf canonicalization). The
+operand-select-at-top alternative for `RDuplicate` is UNSOUND in general: the checker's `M`
+flattens the whole top ∨-chain and rebuilds it, destroying the grouping of sibling ∨-entries
+(`ROr` results) that a parent rule may need to locate by identity.
+
 ## Oracle
 
 Every phase is gated end-to-end by `build_comb_proof` → `CombVerifier` (all four phases) on
