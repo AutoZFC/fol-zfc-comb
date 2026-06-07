@@ -25,6 +25,18 @@ namespace logic::proof::translate::lkr_to_ks1 {
 util::Result<std::vector<logic::proof::ks1::Step>> equiv_steps(
     FormulaBuilder& fb, FormulaHandle from, FormulaHandle to);
 
+// Reorder the LEFT-associated ∨-chain of `from` (the sequent entries) into the
+// order `to`, where `to` is a permutation of `from` BY HANDLE (same multiset of
+// entries, different positions). Emits a minimal adjacent-transposition bubble
+// (one CommOr, or an AssocOr/CommOr/AssocOr triple, per swap) — O(inversions)
+// steps, vs. `equiv_steps`'s full canonicalize-and-invert (O(n²)). This is the
+// fast path for `RExchange`/`RWeaken`, whose reconciliation is a pure entry
+// permutation. Replaying the result from denote(from) yields denote(to).
+// Precondition (checked): `to` is a permutation of `from` by handle.
+util::Result<std::vector<logic::proof::ks1::Step>> reorder_steps(
+    FormulaBuilder& fb, const std::vector<FormulaHandle>& from,
+    const std::vector<FormulaHandle>& to);
+
 // Contraction (CUT_HANDLING_ROADMAP K6.3b). Emit the KS1 resource steps that
 // rewrite `X ∨ X` into `X` — medials (M/MForall/MExists) pushing the ∨ down
 // through X's ∧/∀/∃ structure, then atomic contraction Ac at each literal pair

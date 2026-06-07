@@ -97,14 +97,30 @@ Thm 17). The old `walk_reduce`/`try_*_cut`/`ShiftPoint` hacks are DELETED.
 **Next actions** (per `CUT_ELIM_DESIGN.md` §9, math-first one phase at a time).
 - [x] Write `test/lkr_cut_elim_test.cpp` (round-trip property). DONE — red.
 - [x] Settle the design: rigorous classical Hauptsatz (CUT_ELIM_DESIGN.md).
-- [ ] **A** lemma inlining (replay-with-inert-context) + test.
-- [ ] **B0** additive→multiplicative Cut + Contraction + test.
-- [ ] **B1–B5** Gentzen cases: axiom/atomic; ∧/∨ principal; ∀/∃ principal
-      (+ capture-avoidance); permutation; structural (W/C/X).
-- [ ] **B6** termination worklist (topmost maximal-degree) + delete the
-      old `walk_reduce`/`try_*_cut`/`ShiftPoint` machinery.
-- [ ] Wire-up: route `lkr_to_comb::apply` cut branch through
-      `eliminate_cuts → interpret_tree`.
+- [x] **Foundation**: `deriv.{h,cpp}` (sequent-carrying IR; build/emit) +
+      `test/deriv_test.cpp` (build∘emit round-trips real cut-spine programs).
+- [x] **B1 atomic + B5 dead-cut + B3 ∀/∃ principal** (unary permutation,
+      eigenvar substitution, multiplicative `mcut` + **weakening-bridge** for
+      the doubled context) — `reduce.{h,cpp}` + `test/reduce_test.cpp`
+      (`⊢P→P`, EM `⊢A∨¬A`, `⊢(∀x.p)∨(∃y.¬p)`). All build→eliminate→emit→
+      re-verify, Cut→0. Architecture validated.
+- [x] **B2 ∧/∨ principal** (context-split And → 2 sub-cuts + general
+      merge-bridge) — test `⊢((¬p∨¬q)∨p)∨q` via `Cut(p∧q)`. Green.
+- [x] **Permutation infra**: Or (Exchange-fixup), Weakening, Exchange (both
+      sides), And-right (sorted partition) — test `⊢A∨(¬A∨B)` via `Cut(A)`.
+      Real axiom-free spine `(a&bb)→a` now reaches Cut==0 STRUCTURALLY.
+- [ ] **FIX position-composition bug**: that spine's emitted program fails
+      re-verify (`axiom_lit 8,10 not duals`) — an index error in the
+      Weaken/Exchange/And-right composition. Isolate via per-rule hand-built
+      permutation tests (And-right, Weaken, Exchange individually); the 5
+      isolated reduction tests already pass so it's in their interaction.
+      `FOL_DEBUG_CUT=1` prints unhandled combos. (Re-verify net = sound.)
+- [ ] And-left permutation (Exchange-fixup) + contraction-against-cut (§5.5 C).
+- [ ] **A** lemma inlining (proven theorems; reuse `lemma_inliner`).
+- [ ] **B6** termination worklist + delete old
+      `walk_reduce`/`try_*_cut`/`ShiftPoint` in `cut_elim.cpp`.
+- [ ] Wire-up: `lkr_to_comb::apply` cut branch → `eliminate → interpret_tree`
+      (axiom-citing goals need §7a leaf reformulation first — front-end).
 - [ ] Run the corpus as a GATE only; measure blowup cost.
 
 **Risks.** Non-elementary blowup on deep proofs (the eq/extensionality

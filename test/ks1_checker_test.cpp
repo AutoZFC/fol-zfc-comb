@@ -119,17 +119,16 @@ void test_exists() {
 
 void test_eqv_comm_assoc() {
     Fixture f;
-    auto eqv = [](EqRule e, EqDir dir = EqDir::Forward) {
-        Step s = step(Rule::Eqv); s.eq = e; s.dir = dir; return s;
-    };
-    EXPECT_OK((Derivation{f.And(f.a(), f.b()), f.And(f.b(), f.a()), {eqv(EqRule::CommAnd)}}));
-    EXPECT_OK((Derivation{f.Or(f.a(), f.b()), f.Or(f.b(), f.a()), {eqv(EqRule::CommOr)}}));
-    // assoc∧ forward: (a∧b)∧c → a∧(b∧c)
+    // Propositional ≡ (comm/assoc of ∧/∨) is now a FREE congruence: derivations
+    // are taken modulo ≡, so ≡-equal formulas check with ZERO steps.
+    EXPECT_OK((Derivation{f.And(f.a(), f.b()), f.And(f.b(), f.a()), {}}));
+    EXPECT_OK((Derivation{f.Or(f.a(), f.b()), f.Or(f.b(), f.a()), {}}));
     EXPECT_OK((Derivation{f.And(f.And(f.a(), f.b()), f.c()),
-                          f.And(f.a(), f.And(f.b(), f.c())), {eqv(EqRule::AssocAnd)}}));
-    // assoc∨ backward: a∨(b∨c) → (a∨b)∨c
+                          f.And(f.a(), f.And(f.b(), f.c())), {}}));
     EXPECT_OK((Derivation{f.Or(f.a(), f.Or(f.b(), f.c())),
-                          f.Or(f.Or(f.a(), f.b()), f.c()), {eqv(EqRule::AssocOr, EqDir::Backward)}}));
+                          f.Or(f.Or(f.a(), f.b()), f.c()), {}}));
+    // A non-≡ pair still needs a real rule (here: none) → rejected.
+    EXPECT_ERR((Derivation{f.And(f.a(), f.b()), f.Or(f.a(), f.b()), {}}));
 }
 
 void test_eqv_swap() {
@@ -142,13 +141,14 @@ void test_eqv_swap() {
 
 void test_eqv_dist() {
     Fixture f;
-    // ∀x.(p(x) ∨ b) ≡ (∀x.p(x)) ∨ b   [x ∉ b]
+    // ∀x.(p(x) ∨ b) ≡ (∀x.p(x)) ∨ b   [x ∉ b].  DistForall→ is AC-tolerant: it
+    // floats every x-free disjunct out of the (canonicalized) chain regardless
+    // of position. (Backward un-distribution is not used by the translation and,
+    // since canonicalize does not yet absorb quantifier shifts, is exercised in
+    // Phase 2 once mini-scoping lands.)
     Step fwd = step(Rule::Eqv); fwd.eq = EqRule::DistForall; fwd.dir = EqDir::Forward;
     EXPECT_OK((Derivation{f.fa(f.Or(f.p(f.g(0)), f.b())),
                           f.Or(f.fa(f.p(f.g(0))), f.b()), {fwd}}));
-    Step bwd = step(Rule::Eqv); bwd.eq = EqRule::DistForall; bwd.dir = EqDir::Backward;
-    EXPECT_OK((Derivation{f.Or(f.fa(f.p(f.g(0))), f.b()),
-                          f.fa(f.Or(f.p(f.g(0)), f.b())), {bwd}}));
     // reject forward: bound var DOES occur free in B  → ∀x.(p(x) ∨ q(x))
     Step bad = step(Rule::Eqv); bad.eq = EqRule::DistForall; bad.dir = EqDir::Forward;
     EXPECT_ERR((Derivation{f.fa(f.Or(f.p(f.g(0)), f.q(f.g(0)))),
@@ -264,6 +264,32 @@ void test_multi_step() {
                            {step(Rule::Tu), ai_l, ai_r}}));
 }
 
+// Chain rules are AC-tolerant: the redex need not sit in the exact binary
+// bracketing the schema shows — it is matched against the flattened canonical
+// ∧/∨-chain. These exercise that (the binary redex is NOT directly exposed).
+void test_chain_ac_tolerant() {
+    Fixture f;
+    // Ac on a 3-operand ∨-chain with a duplicate: a∨b∨a  ≡(canon)  a∨(a∨b) → a∨b.
+    EXPECT_OK((Derivation{f.Or(f.a(), f.Or(f.b(), f.a())), f.Or(f.a(), f.b()),
+                          {step(Rule::Ac)}}));
+    // Sw on a 3-operand ∧-chain: (a ∧ d ∧ (b∨c)) → pick the ∨, A = a∧d.
+    // canon reorders, but Sw finds the ∨-operand; result ≡ ((a∧d)∧b)∨c.
+    EXPECT_OK((Derivation{f.And(f.a(), f.And(f.d(), f.Or(f.b(), f.c()))),
+                          f.Or(f.And(f.And(f.a(), f.d()), f.b()), f.c()),
+                          {step(Rule::Sw)}}));
+    // M on the contraction shape (X∨X with X=a∧b): (a∧b)∨(a∧b) → (a∨a)∧(b∨b).
+    EXPECT_OK((Derivation{f.Or(f.And(f.a(), f.b()), f.And(f.a(), f.b())),
+                          f.And(f.Or(f.a(), f.a()), f.Or(f.b(), f.b())),
+                          {step(Rule::M)}}));
+    // Full atomic contraction of (a∧b)∨(a∧b) → a∧b: M then Ac on each ∨-pair.
+    // After M+canon the formula is (a∨a)∧(b∨b); Ac at each conjunct.
+    Step m  = step(Rule::M);
+    Step ac1 = step(Rule::Ac, {Dir::Left});
+    Step ac2 = step(Rule::Ac, {Dir::Right});
+    EXPECT_OK((Derivation{f.Or(f.And(f.a(), f.b()), f.And(f.a(), f.b())),
+                          f.And(f.a(), f.b()), {m, ac1, ac2}}));
+}
+
 }  // namespace
 
 int main() {
@@ -288,6 +314,7 @@ int main() {
     test_ai_on_bot();
     test_ac_on_top();
     test_multi_step();
+    test_chain_ac_tolerant();
 
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

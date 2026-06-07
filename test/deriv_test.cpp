@@ -17,6 +17,7 @@
 #include "src/proof/nd/lowering.h"
 #include "src/proof/proof.h"
 #include "src/proof/translate/lkr_cut_elim/deriv.h"
+#include "src/proof/translate/lkr_cut_elim/validate.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/runtime/runtime.h"
 
@@ -149,6 +150,65 @@ void test_or_elim() {
     )", "all_r");
 }
 
+// --- coalesce_exchanges: collapse RExchange chains to minimal net perms -----
+namespace lce = translate::lkr_cut_elim;
+
+lce::DerivPtr mk_ax(const std::vector<FormulaHandle>& conc, size_t a, size_t b) {
+    auto d = std::make_unique<lce::Deriv>();
+    d->conclusion = conc;
+    d->rule = lce::RAx{a, b};
+    return d;
+}
+// node = swap(child, i, j)  (matches validate's RExchange convention).
+lce::DerivPtr mk_exch(size_t i, size_t j, lce::DerivPtr child) {
+    auto d = std::make_unique<lce::Deriv>();
+    d->conclusion = child->conclusion;
+    std::swap(d->conclusion[i], d->conclusion[j]);
+    d->rule = lce::RExchange{i, j, std::move(child)};
+    return d;
+}
+int count_exch(const lce::Deriv& d) {
+    if (auto* r = std::get_if<lce::RExchange>(&d.rule))
+        return 1 + count_exch(*r->child);
+    return 0;
+}
+void check(const char* label, bool cond) {
+    if (cond) { std::cout << "  ok[" << label << "]\n"; ++g_passed; }
+    else { std::cerr << "FAIL[" << label << "]\n"; ++g_failed; }
+}
+
+void test_coalesce_minimizes() {
+    GlobalContext ctx; FormulaBuilder fb(ctx);
+    auto A = fb.predicate(ctx.add_predicate("a", 0), {});
+    auto B = fb.predicate(ctx.add_predicate("b", 0), {});
+    auto C = fb.predicate(ctx.add_predicate("c", 0), {});
+    auto d = mk_ax({A, B, C}, 0, 1);
+    d = mk_exch(0, 1, std::move(d));   // [b,a,c]
+    d = mk_exch(0, 1, std::move(d));   // [a,b,c]  (round-trip)
+    d = mk_exch(1, 2, std::move(d));   // [a,c,b]
+    d = mk_exch(0, 1, std::move(d));   // [c,a,b]
+    const std::vector<FormulaHandle> target = d->conclusion;
+    check("coalesce_before_count", count_exch(*d) == 4);
+    lce::coalesce_exchanges(d);
+    check("coalesce_conclusion_preserved", d->conclusion == target);
+    check("coalesce_minimal", count_exch(*d) == 2);   // [a,b,c]→[c,a,b]: 2 transpositions
+    check("coalesce_valid", lce::validate(*d).ok());
+}
+
+void test_coalesce_identity_collapses() {
+    GlobalContext ctx; FormulaBuilder fb(ctx);
+    auto A = fb.predicate(ctx.add_predicate("a", 0), {});
+    auto B = fb.predicate(ctx.add_predicate("b", 0), {});
+    auto d = mk_ax({A, B}, 0, 1);
+    d = mk_exch(0, 1, std::move(d));   // [b,a]
+    d = mk_exch(0, 1, std::move(d));   // [a,b]  net identity
+    const std::vector<FormulaHandle> target = d->conclusion;
+    lce::coalesce_exchanges(d);
+    check("identity_no_exchanges", count_exch(*d) == 0);
+    check("identity_is_leaf", std::get_if<lce::RAx>(&d->rule) != nullptr);
+    check("identity_conclusion_preserved", d->conclusion == target);
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +216,8 @@ int main() {
     test_implies_elim();
     test_and_intro();
     test_or_elim();
+    test_coalesce_minimizes();
+    test_coalesce_identity_collapses();
     std::cout << "deriv_test: " << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

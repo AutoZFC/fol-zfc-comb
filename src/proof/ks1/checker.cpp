@@ -1,6 +1,9 @@
 #include "src/proof/ks1/checker.h"
 
+#include "src/proof/ks1/equiv.h"
+
 #include <cassert>
+#include <vector>
 
 namespace logic::proof::ks1 {
 
@@ -65,6 +68,32 @@ FormulaHandle remake(FormulaBuilder& fb, Op op, FormulaHandle l, FormulaHandle r
         case Op::Bottom:  return fb.make_bottom();
         default:          return fb.make_or(l, r);  // unreachable for KS1 NNF
     }
+}
+
+// ---- ∧/∨-chain helpers (for AC-tolerant rule matching, modulo ≡) ---------
+// Derivations are checked modulo ≡ (the working formula is kept canonical), so
+// a rule's redex may be spread across a flattened ∧/∨-chain rather than sitting
+// in the exact binary bracketing the schema shows. These flatten/rebuild a
+// chain so a rule can pick its operands.
+
+// Flatten the maximal `op`-chain rooted at `h` into its operands, left to right.
+void flatten_chain(FormulaHandle h, Op op, std::vector<FormulaHandle>& out) {
+    const Formula& f = h.get();
+    if (f.is_compound() && f.as_compound().op == op) {
+        flatten_chain(f.as_compound().left, op, out);
+        flatten_chain(f.as_compound().right, op, out);
+    } else {
+        out.push_back(h);
+    }
+}
+
+// Build a right-leaning `op`-chain from `ops` (size ≥ 1).
+FormulaHandle build_chain(FormulaBuilder& fb, Op op,
+                          const std::vector<FormulaHandle>& ops) {
+    FormulaHandle acc = ops.back();
+    for (std::size_t i = ops.size() - 1; i-- > 0;)
+        acc = (op == Op::And) ? fb.make_and(ops[i], acc) : fb.make_or(ops[i], acc);
+    return acc;
 }
 
 // ---- De Bruijn helpers (only what shift_formula/instantiate_gen lack) ----
@@ -218,20 +247,31 @@ Result<FormulaHandle> apply_eq(FormulaBuilder& fb, EqRule eq, EqDir dir,
         FormulaHandle swapped = swap_gen(fb, body, 0);
         return fb.make_quantified(q, fb.make_quantified(q, swapped));
     };
-    // ∀-over-∨ (dist=Or for ∀) / ∃-over-∧ (dist=And for ∃).
+    // ∀-over-∨ (op=Or for ∀) / ∃-over-∧ (op=And for ∃), AC-tolerant: the working
+    // formula is canonical, so the binder's body is a flattened op-chain and the
+    // x-free operands may sit anywhere. Forward floats ALL x-free operands out.
     auto dist = [&](Op q, Op op) -> Result<FormulaHandle> {
         if (dir == EqDir::Forward) {
-            // Qx.(A op B) → (Qx.A) op B,  requires x (Gen0) not free in B.
+            // Qx.(C₁ op … op Cₙ) → Qx.(those with x) op (those without x, floated)
             if (!is_quant(P, q) || !is_op(P.get().as_quantified().body, op))
-                return MAKE_ERROR << "≡ dist→: redex not Qx.(A op B)";
-            const Compound& c = P.get().as_quantified().body.get().as_compound();
-            FormulaHandle Ab = c.left, Bb = c.right;
-            if (gen_occurs_free(Bb, 0))
-                return MAKE_ERROR << "≡ dist→: bound var occurs free in B";
-            FormulaHandle B = fb.shift_formula(Bb, 1, -1);  // drop the binder over B
-            return remake(fb, op, fb.make_quantified(q, Ab), B);
+                return MAKE_ERROR << "≡ dist→: redex not Qx.(op-chain)";
+            std::vector<FormulaHandle> ops;
+            flatten_chain(P.get().as_quantified().body, op, ops);
+            std::vector<FormulaHandle> hasX, floated;
+            for (FormulaHandle o : ops) {
+                if (gen_occurs_free(o, 0)) hasX.push_back(o);
+                else floated.push_back(fb.shift_formula(o, 1, -1));  // leaves the binder
+            }
+            if (floated.empty())
+                return MAKE_ERROR << "≡ dist→: no x-free operand to float";
+            if (hasX.empty())
+                return MAKE_ERROR << "≡ dist→: every operand is x-free (vacuous binder)";
+            std::vector<FormulaHandle> chain{
+                fb.make_quantified(q, build_chain(fb, op, hasX))};
+            for (FormulaHandle b : floated) chain.push_back(b);
+            return build_chain(fb, op, chain);
         }
-        // (Qx.A) op B → Qx.(A op B).
+        // (Qx.A) op B → Qx.(A op B).  (binary; un-distribution is not AC-driven)
         if (!is_op(P, op) || !is_quant(P.get().as_compound().left, q))
             return MAKE_ERROR << "≡ dist←: redex not (Qx.A) op B";
         FormulaHandle Ab = P.get().as_compound().left.get().as_quantified().body;
@@ -269,22 +309,51 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
         case Rule::Tu:          // S{A}/S{A∧t}
             return fb.make_and(P, make_top(fb));
 
-        case Rule::Sw: {        // S{A∧(B∨C)}/S{(A∧B)∨C}
-            if (!is_op(P, Op::And) || !is_op(P.get().as_compound().right, Op::Or))
-                return MAKE_ERROR << "s: redex not A∧(B∨C)";
-            FormulaHandle A = P.get().as_compound().left;
-            const Compound& orc = P.get().as_compound().right.get().as_compound();
-            return fb.make_or(fb.make_and(A, orc.left), orc.right);
+        case Rule::Sw: {        // S{A∧(B∨C)}/S{(A∧B)∨C}  (AC: pick ∨-operand j, B=disj `split`)
+            if (!is_op(P, Op::And)) return MAKE_ERROR << "s: redex not a ∧";
+            std::vector<FormulaHandle> conj;
+            flatten_chain(P, Op::And, conj);
+            std::size_t j = SIZE_MAX;
+            if (!s.operands.empty()) {
+                j = s.operands[0];
+                if (j >= conj.size() || !is_op(conj[j], Op::Or))
+                    return MAKE_ERROR << "s: selected ∧-operand is not a ∨";
+            } else {
+                for (std::size_t i = 0; i < conj.size(); ++i)
+                    if (is_op(conj[i], Op::Or)) { j = i; break; }
+                if (j == SIZE_MAX) return MAKE_ERROR << "s: ∧ has no ∨-operand";
+            }
+            std::vector<FormulaHandle> disj;
+            flatten_chain(conj[j], Op::Or, disj);
+            std::size_t b = s.split;                          // index of the single B disjunct
+            if (b >= disj.size()) return MAKE_ERROR << "s: split out of range for ∨";
+            FormulaHandle B = disj[b];
+            std::vector<FormulaHandle> crest;                 // C = the other disjuncts, in order
+            for (std::size_t i = 0; i < disj.size(); ++i) if (i != b) crest.push_back(disj[i]);
+            if (crest.empty()) return MAKE_ERROR << "s: ∨ has no C remainder";
+            FormulaHandle C = build_chain(fb, Op::Or, crest);
+            std::vector<FormulaHandle> rest;                 // A = the other ∧-operands
+            for (std::size_t i = 0; i < conj.size(); ++i)
+                if (i != j) rest.push_back(conj[i]);
+            if (rest.empty()) return MAKE_ERROR << "s: ∧ has no A operand";
+            FormulaHandle A = build_chain(fb, Op::And, rest);
+            return fb.make_or(fb.make_and(A, B), C);
         }
-        case Rule::Mix: {       // S{A∧B}/S{A∨B}
+        case Rule::Mix: {       // S{A∧B}/S{A∨B}  (AC: split the ∧-chain at `split`)
             if (!is_op(P, Op::And)) return MAKE_ERROR << "mix: redex not A∧B";
-            const Compound& c = P.get().as_compound();
-            return fb.make_or(c.left, c.right);
+            std::vector<FormulaHandle> conj;
+            flatten_chain(P, Op::And, conj);
+            std::size_t k = s.split ? s.split : 1;
+            if (k >= conj.size()) return MAKE_ERROR << "mix: split out of range";
+            FormulaHandle A = build_chain(fb, Op::And, {conj.begin(), conj.begin() + k});
+            FormulaHandle B = build_chain(fb, Op::And, {conj.begin() + k, conj.end()});
+            return fb.make_or(A, B);
         }
-        case Rule::Ex: {        // S{A[x/t]}/S{∃x.A}
+        case Rule::Ex: {        // S{A[x/t]}/S{∃x.A}  (instance matched modulo ≡)
             if (!s.f_param.valid()) return MAKE_ERROR << "∃: missing body parameter";
             FormulaHandle inst = fb.instantiate_gen(s.f_param, s.t_param);
-            if (!(inst == P)) return MAKE_ERROR << "∃: A[x/t] does not match the redex";
+            if (!equiv(fb, inst, P))
+                return MAKE_ERROR << "∃: A[x/t] does not match the redex";
             return fb.make_quantified(Op::Exists, s.f_param);
         }
         case Rule::Eqv:         // S{B}/S{A}, A≡B
@@ -297,12 +366,25 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
         case Rule::WForall:     // S{A}/S{∀x.A}, x∉A
             return fb.make_quantified(Op::Forall, fb.shift_formula(P, 0, 1));
 
-        case Rule::Ac: {        // S{a∨a}/S{a}
-            if (!is_op(P, Op::Or)) return MAKE_ERROR << "ac: redex not a∨a";
-            const Compound& c = P.get().as_compound();
-            if (!(c.left == c.right)) return MAKE_ERROR << "ac: operands differ";
-            if (!is_atom_literal(c.left)) return MAKE_ERROR << "ac: operand not atomic";
-            return c.left;
+        case Rule::Ac: {        // S{a∨a}/S{a}  (AC: contract two EQUAL atoms anywhere)
+            if (!is_op(P, Op::Or)) return MAKE_ERROR << "ac: redex not a ∨";
+            std::vector<FormulaHandle> disj;
+            flatten_chain(P, Op::Or, disj);
+            std::size_t i = SIZE_MAX, j = SIZE_MAX;
+            if (!s.operands.empty()) {                       // explicit: contract operand i's twin
+                i = s.operands[0];
+                for (std::size_t k = 0; k < disj.size(); ++k)
+                    if (k != i && i < disj.size() && disj[k] == disj[i]) { j = k; break; }
+            } else {
+                for (std::size_t p = 0; p < disj.size() && j == SIZE_MAX; ++p)
+                    for (std::size_t q = p + 1; q < disj.size(); ++q)
+                        if (disj[p] == disj[q]) { i = p; j = q; break; }
+            }
+            if (i == SIZE_MAX || j == SIZE_MAX || !(disj[i] == disj[j]))
+                return MAKE_ERROR << "ac: no two equal ∨-operands";
+            if (!is_atom_literal(disj[i])) return MAKE_ERROR << "ac: operand not atomic";
+            disj.erase(disj.begin() + j);                   // drop one copy
+            return build_chain(fb, Op::Or, disj);
         }
         case Rule::CForall: {   // S{∀x.∀x.A}/S{∀x.A}
             if (!is_quant(P, Op::Forall) ||
@@ -311,30 +393,45 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
             FormulaHandle body2 = P.get().as_quantified().body.get().as_quantified().body;
             return fb.make_quantified(Op::Forall, fb.shift_formula(body2, 1, -1));
         }
-        case Rule::M: {         // S{(A∧C)∨(B∧D)}/S{(A∨B)∧(C∨D)}
-            if (!is_op(P, Op::Or) || !is_op(P.get().as_compound().left, Op::And) ||
-                !is_op(P.get().as_compound().right, Op::And))
-                return MAKE_ERROR << "m: redex not (A∧C)∨(B∧D)";
-            const Compound& lc = P.get().as_compound().left.get().as_compound();
-            const Compound& rc = P.get().as_compound().right.get().as_compound();
-            return fb.make_and(fb.make_or(lc.left, rc.left),
-                               fb.make_or(lc.right, rc.right));
-        }
-        case Rule::MForall: {   // S{(∀x.A)∨(∀x.B)}/S{∀x.(A∨B)}
-            if (!is_op(P, Op::Or) || !is_quant(P.get().as_compound().left, Op::Forall) ||
-                !is_quant(P.get().as_compound().right, Op::Forall))
-                return MAKE_ERROR << "m∀: redex not (∀x.A)∨(∀x.B)";
-            FormulaHandle Ab = P.get().as_compound().left.get().as_quantified().body;
-            FormulaHandle Bb = P.get().as_compound().right.get().as_quantified().body;
-            return fb.make_quantified(Op::Forall, fb.make_or(Ab, Bb));
-        }
-        case Rule::MExists: {   // S{(∃x.A)∨(∃x.B)}/S{∃x.(A∨B)}
-            if (!is_op(P, Op::Or) || !is_quant(P.get().as_compound().left, Op::Exists) ||
-                !is_quant(P.get().as_compound().right, Op::Exists))
-                return MAKE_ERROR << "m∃: redex not (∃x.A)∨(∃x.B)";
-            FormulaHandle Ab = P.get().as_compound().left.get().as_quantified().body;
-            FormulaHandle Bb = P.get().as_compound().right.get().as_quantified().body;
-            return fb.make_quantified(Op::Exists, fb.make_or(Ab, Bb));
+        // The three medials share the ∨-chain operand selection: pick two
+        // operands (default the first two), replace them with the medial result,
+        // keep any others in the ∨-chain. `replay` re-canonicalizes after.
+        case Rule::M:
+        case Rule::MForall:
+        case Rule::MExists: {
+            if (!is_op(P, Op::Or)) return MAKE_ERROR << "m: redex not a ∨";
+            std::vector<FormulaHandle> disj;
+            flatten_chain(P, Op::Or, disj);
+            std::size_t j = 0, k = 1;
+            if (s.operands.size() == 2) { j = s.operands[0]; k = s.operands[1]; }
+            if (j >= disj.size() || k >= disj.size() || j == k)
+                return MAKE_ERROR << "m: operand selectors out of range";
+            FormulaHandle L = disj[j], R = disj[k], medial;
+            if (s.rule == Rule::M) {                         // (A∧C)∨(B∧D)→(A∨B)∧(C∨D)
+                if (!is_op(L, Op::And) || !is_op(R, Op::And))
+                    return MAKE_ERROR << "m: selected operands not both ∧";
+                std::vector<FormulaHandle> lc, rc;
+                flatten_chain(L, Op::And, lc);
+                flatten_chain(R, Op::And, rc);
+                std::size_t sl = s.split ? s.split : 1, sr = sl;
+                if (sl >= lc.size() || sr >= rc.size())
+                    return MAKE_ERROR << "m: ∧ split out of range";
+                FormulaHandle A = build_chain(fb, Op::And, {lc.begin(), lc.begin() + sl});
+                FormulaHandle C = build_chain(fb, Op::And, {lc.begin() + sl, lc.end()});
+                FormulaHandle B = build_chain(fb, Op::And, {rc.begin(), rc.begin() + sr});
+                FormulaHandle D = build_chain(fb, Op::And, {rc.begin() + sr, rc.end()});
+                medial = fb.make_and(fb.make_or(A, B), fb.make_or(C, D));
+            } else {                                         // (Qx.A)∨(Qx.B)→Qx.(A∨B)
+                Op q = (s.rule == Rule::MForall) ? Op::Forall : Op::Exists;
+                if (!is_quant(L, q) || !is_quant(R, q))
+                    return MAKE_ERROR << "m∀/m∃: selected operands not both the quantifier";
+                medial = fb.make_quantified(q, fb.make_or(L.get().as_quantified().body,
+                                                          R.get().as_quantified().body));
+            }
+            std::vector<FormulaHandle> rest{medial};         // medial + the untouched operands
+            for (std::size_t i = 0; i < disj.size(); ++i)
+                if (i != j && i != k) rest.push_back(disj[i]);
+            return build_chain(fb, Op::Or, rest);
         }
     }
     return MAKE_ERROR << "unknown rule";
@@ -342,6 +439,15 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
 
 }  // namespace
 
+// Replay MODULO ≡ (HSW §II eq (2)): formulas are taken up to ≡, so
+// reassociation/commutation of ∧/∨ is free and never a recorded step. Rather
+// than force a canonical representative (which would make ∧/∨-operand positions
+// — and hence context Paths — unstable), the rules MATCH their redex AC-tolerantly
+// (see the chain arms in `apply_rule`): a rule applies if its premise shape is
+// present at `context` up to ≡. The working formula evolves exactly as the rules
+// produce it, so context Paths stay stable; `check` compares the endpoints
+// modulo ≡. The remaining explicit `Eqv` steps are quantifier shifts the
+// AC-tolerant arms do not absorb (only `DistForall` is emitted today).
 Result<FormulaHandle> replay(FormulaBuilder& fb, FormulaHandle top,
                              const std::vector<Step>& steps) {
     if (!top.valid()) return MAKE_ERROR << "derivation: top not set";
@@ -362,8 +468,8 @@ ResultStatus check(FormulaBuilder& fb, const Derivation& d) {
     if (!d.bottom.valid()) return MAKE_ERROR << "derivation: bottom not set";
     auto end = replay(fb, d.top, d.steps);
     if (end.is_error()) return std::move(end).error();
-    if (!(end.value() == d.bottom))
-        return MAKE_ERROR << "derivation: final formula does not match bottom";
+    if (!equiv(fb, end.value(), d.bottom))
+        return MAKE_ERROR << "derivation: final formula does not match bottom (modulo ≡)";
     return Ok();
 }
 

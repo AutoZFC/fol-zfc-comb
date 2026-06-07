@@ -113,6 +113,34 @@ size_t to_mirror(Arena& a, FormulaHandle h, std::vector<size_t>& stack,
 // a quantifier (Down). See checker.cpp::is_navigable_binary.
 bool is_nav_binary(MNode::K k) { return k == MNode::And || k == MNode::Or; }
 
+// ---- AC-tolerant ∧/∨-chain helpers on the mirror (src rides along) -------
+void flatten_m(const Arena& a, size_t idx, MNode::K k, std::vector<size_t>& out) {
+    const MNode& n = a.nodes[idx];
+    if (n.k == k && (k == MNode::And || k == MNode::Or)) {
+        flatten_m(a, n.l, k, out);
+        flatten_m(a, n.r, k, out);
+    } else {
+        out.push_back(idx);
+    }
+}
+size_t build_m(Arena& a, MNode::K k, const std::vector<size_t>& ops) {
+    size_t acc = ops.back();
+    for (size_t i = ops.size() - 1; i-- > 0;) acc = a.bin(k, ops[i], acc);
+    return acc;
+}
+// Two mirror atoms denote the same literal (pred/polarity/args), ignoring src.
+bool atom_eq(const Arena& a, size_t x, size_t y) {
+    const MNode& m = a.nodes[x]; const MNode& n = a.nodes[y];
+    if (m.k != MNode::Atom || n.k != MNode::Atom) return false;
+    if (m.neg != n.neg || !(m.pred == n.pred) || m.args.size() != n.args.size()) return false;
+    for (size_t i = 0; i < m.args.size(); ++i) {
+        const TArg& p = m.args[i]; const TArg& qa = n.args[i];
+        if (p.bound != qa.bound) return false;
+        if (p.bound ? p.binder_tag != qa.binder_tag : p.fixed != qa.fixed) return false;
+    }
+    return true;
+}
+
 // Navigate to redex, collecting enclosing binder tags.
 Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
                    std::vector<size_t>& stack) {
@@ -197,12 +225,25 @@ util::ResultStatus apply_res(State& st, const Step& s) {
             size_t bt = a.fresh_binder();
             return put(a.quant(MNode::Forall, R, bt));  // new binder node: empty src
         }
-        case Rule::Ac: {  // S{a∨a}/S{a}: merge the two atoms' src
-            const MNode& n = a.nodes[R];
-            if (n.k != MNode::Or) return MAKE_ERROR << "skew: ac not ∨";
-            size_t keep = n.l, other = n.r;
+        case Rule::Ac: {  // S{a∨a}/S{a}: merge two EQUAL atoms' src (AC, any position)
+            if (a.nodes[R].k != MNode::Or) return MAKE_ERROR << "skew: ac not ∨";
+            std::vector<size_t> disj; flatten_m(a, R, MNode::Or, disj);
+            size_t i = SIZE_MAX, j = SIZE_MAX;
+            if (!s.operands.empty()) {
+                i = s.operands[0];
+                for (size_t k = 0; k < disj.size(); ++k)
+                    if (k != i && i < disj.size() && atom_eq(a, disj[k], disj[i])) { j = k; break; }
+            } else {
+                for (size_t p = 0; p < disj.size() && j == SIZE_MAX; ++p)
+                    for (size_t q = p + 1; q < disj.size(); ++q)
+                        if (atom_eq(a, disj[p], disj[q])) { i = p; j = q; break; }
+            }
+            if (i == SIZE_MAX || j == SIZE_MAX || !atom_eq(a, disj[i], disj[j]))
+                return MAKE_ERROR << "skew: ac no two equal ∨-operands";
+            size_t keep = disj[i], other = disj[j];
             a.nodes[keep].src = merge_src(a.nodes[keep].src, a.nodes[other].src);
-            return put(keep);
+            disj.erase(disj.begin() + j);
+            return put(build_m(a, MNode::Or, disj));
         }
         case Rule::CForall: {  // S{∀x.∀x.A}/S{∀x.A}: merge two universal binders
             const MNode& n = a.nodes[R];
@@ -216,26 +257,47 @@ util::ResultStatus apply_res(State& st, const Step& s) {
             a.nodes[merged].src = merge_src(n.src, a.nodes[inner].src);
             return put(merged);
         }
-        case Rule::M: {  // S{(A∧C)∨(B∧D)}/S{(A∨B)∧(C∨D)}: identity on vertices
-            const MNode& n = a.nodes[R];
-            if (n.k != MNode::Or || a.nodes[n.l].k != MNode::And || a.nodes[n.r].k != MNode::And)
-                return MAKE_ERROR << "skew: m shape";
-            size_t A = a.nodes[n.l].l, C = a.nodes[n.l].r, B = a.nodes[n.r].l, D = a.nodes[n.r].r;
-            return put(a.bin(MNode::And, a.bin(MNode::Or, A, B), a.bin(MNode::Or, C, D)));
+        case Rule::M: {  // (A∧C)∨(B∧D)→(A∨B)∧(C∨D)  (AC: pick the two ∧-operands)
+            if (a.nodes[R].k != MNode::Or) return MAKE_ERROR << "skew: m redex not ∨";
+            std::vector<size_t> disj; flatten_m(a, R, MNode::Or, disj);
+            size_t j = 0, k = 1;
+            if (s.operands.size() == 2) { j = s.operands[0]; k = s.operands[1]; }
+            if (j >= disj.size() || k >= disj.size() || j == k) return MAKE_ERROR << "skew: m sel";
+            if (a.nodes[disj[j]].k != MNode::And || a.nodes[disj[k]].k != MNode::And)
+                return MAKE_ERROR << "skew: m operands not both ∧";
+            std::vector<size_t> lc, rc;
+            flatten_m(a, disj[j], MNode::And, lc);
+            flatten_m(a, disj[k], MNode::And, rc);
+            size_t sp = s.split ? s.split : 1;
+            if (sp >= lc.size() || sp >= rc.size()) return MAKE_ERROR << "skew: m split";
+            size_t A = build_m(a, MNode::And, {lc.begin(), lc.begin() + sp});
+            size_t C = build_m(a, MNode::And, {lc.begin() + sp, lc.end()});
+            size_t B = build_m(a, MNode::And, {rc.begin(), rc.begin() + sp});
+            size_t D = build_m(a, MNode::And, {rc.begin() + sp, rc.end()});
+            size_t medial = a.bin(MNode::And, a.bin(MNode::Or, A, B), a.bin(MNode::Or, C, D));
+            std::vector<size_t> rest{medial};
+            for (size_t i2 = 0; i2 < disj.size(); ++i2) if (i2 != j && i2 != k) rest.push_back(disj[i2]);
+            return put(build_m(a, MNode::Or, rest));
         }
-        case Rule::MForall:    // S{(∀x.A)∨(∀x.B)}/S{∀x.(A∨B)}: merge two binders
+        case Rule::MForall:    // (Qx.A)∨(Qx.B)→Qx.(A∨B)  (AC: pick two quant-operands)
         case Rule::MExists: {
             MNode::K q = (s.rule == Rule::MForall) ? MNode::Forall : MNode::Exists;
-            const MNode& n = a.nodes[R];
-            if (n.k != MNode::Or || a.nodes[n.l].k != q || a.nodes[n.r].k != q)
-                return MAKE_ERROR << "skew: medial-quant shape";
-            size_t lq = n.l, rq = n.r;
+            if (a.nodes[R].k != MNode::Or) return MAKE_ERROR << "skew: m-quant redex not ∨";
+            std::vector<size_t> disj; flatten_m(a, R, MNode::Or, disj);
+            size_t j = 0, k = 1;
+            if (s.operands.size() == 2) { j = s.operands[0]; k = s.operands[1]; }
+            if (j >= disj.size() || k >= disj.size() || j == k) return MAKE_ERROR << "skew: m-quant sel";
+            size_t lq = disj[j], rq = disj[k];
+            if (a.nodes[lq].k != q || a.nodes[rq].k != q)
+                return MAKE_ERROR << "skew: m-quant operands not the quantifier";
             size_t lbt = a.nodes[lq].binder_tag, rbt = a.nodes[rq].binder_tag;
             size_t lbody = a.nodes[lq].child, rbody = a.nodes[rq].child;
             rebind(a, rbody, rbt, lbt);  // right binder refs → kept (left) binder
             size_t merged = a.quant(q, a.bin(MNode::Or, lbody, rbody), lbt);
             a.nodes[merged].src = merge_src(a.nodes[lq].src, a.nodes[rq].src);
-            return put(merged);
+            std::vector<size_t> rest{merged};
+            for (size_t i2 = 0; i2 < disj.size(); ++i2) if (i2 != j && i2 != k) rest.push_back(disj[i2]);
+            return put(build_m(a, MNode::Or, rest));
         }
         case Rule::Eqv: {  // identity on vertices; restructure only
             const MNode n = a.nodes[R];

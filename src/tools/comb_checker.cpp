@@ -80,13 +80,70 @@ struct StageResult {
 // CombVerifier. Returns a granular tag locating any failure (which is expected
 // while the LKR→KS1 translation's generality is still being filled in — this is
 // a coverage measure, not a correctness gate). Only called on residual==0.
+// Pure walk of a cut-free Deriv: count nodes per rule, tree depth, widest
+// sequent. Answers "how big is what cut-elim produced" independent of any
+// translation step generation. Gated by COMB_CHECKER_DERIV_STATS.
+struct DerivStats { long long total = 0, by_rule[12] = {}; int max_depth = 0, max_conc = 0;
+                    long long exch_identity = 0, exch_over_exch = 0, exch_adjacent_pairs = 0;
+                    long long exch_dist_sum = 0; int exch_dist_max = 0, exch_adjacent = 0; };
+const char* kDerivRule[12] = {"RAx","ROne","RLemma","RExchange","RWeaken",
+                              "RDuplicate","RContract","RAnd","ROr","RForall",
+                              "RExists","RCut"};
+void count_deriv(const lce::Deriv& d, DerivStats& s, int depth) {
+    ++s.total;
+    ++s.by_rule[d.rule.index()];
+    if (depth > s.max_depth) s.max_depth = depth;
+    if (static_cast<int>(d.conclusion.size()) > s.max_conc)
+        s.max_conc = static_cast<int>(d.conclusion.size());
+    if (auto* r = std::get_if<lce::RExchange>(&d.rule)) {
+        if (r->i == r->j) ++s.exch_identity;
+        int dist = r->i > r->j ? int(r->i - r->j) : int(r->j - r->i);
+        s.exch_dist_sum += dist;
+        if (dist > s.exch_dist_max) s.exch_dist_max = dist;
+        if (dist == 1) ++s.exch_adjacent;
+        if (auto* c = std::get_if<lce::RExchange>(&r->child->rule)) {
+            ++s.exch_over_exch;                            // exchange stacked on exchange
+            if (c->i == r->i && c->j == r->j) ++s.exch_adjacent_pairs;  // same swap twice = cancels
+        }
+        count_deriv(*r->child, s, depth + 1);
+    }
+    else if (auto* r = std::get_if<lce::RWeaken>(&d.rule))    count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::RDuplicate>(&d.rule)) count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::RContract>(&d.rule))  count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::ROr>(&d.rule))        count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::RForall>(&d.rule))    count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::RExists>(&d.rule))    count_deriv(*r->child, s, depth + 1);
+    else if (auto* r = std::get_if<lce::RAnd>(&d.rule)) {
+        count_deriv(*r->left, s, depth + 1); count_deriv(*r->right, s, depth + 1);
+    } else if (auto* r = std::get_if<lce::RCut>(&d.rule)) {
+        count_deriv(*r->left, s, depth + 1); count_deriv(*r->right, s, depth + 1);
+    }
+}
+
 std::string run_comb_backend(GlobalContext& ctx, FormulaHandle goal_nnf,
                              const lce::Deriv& cutfree) {
     FormulaBuilder fb(ctx);
+    if (std::getenv("COMB_CHECKER_DERIV_STATS")) {
+        DerivStats s; count_deriv(cutfree, s, 1);
+        std::cerr << "[deriv] total=" << s.total << " max_depth=" << s.max_depth
+                  << " max_conc=" << s.max_conc << " ::";
+        for (int i = 0; i < 12; ++i)
+            if (s.by_rule[i]) std::cerr << " " << kDerivRule[i] << "=" << s.by_rule[i];
+        std::cerr << " | exch_over_exch=" << s.exch_over_exch
+                  << " exch_adjacent(dist1)=" << s.exch_adjacent
+                  << " exch_dist_max=" << s.exch_dist_max
+                  << " exch_dist_sum=" << s.exch_dist_sum << std::endl;
+    }
+    const bool prog = std::getenv("COMB_CHECKER_PROGRESS") != nullptr;
+    if (prog) std::cerr << "[progress]   comb: lkr_to_ks1" << std::endl;
     auto ks1_r = l2k::lkr_to_ks1(fb, cutfree);
     if (!ks1_r.ok()) return "comb_l2k_err: " + ks1_r.error().to_string();
+    if (std::getenv("COMB_CHECKER_DERIV_STATS"))
+        std::cerr << "[ks1] steps=" << ks1_r.value().steps.size() << std::endl;
+    if (prog) std::cerr << "[progress]   comb: build_comb_proof" << std::endl;
     auto cp = k2c::build_comb_proof(fb, ks1_r.value());
     if (!cp.ok()) return "comb_bridge_err: " + cp.error().to_string();
+    if (prog) std::cerr << "[progress]   comb: verify" << std::endl;
     comb::CombVerifier v;
     if (!v.verify_well_formed(cp.value()).ok())                       return "comb_wf_fail";
     if (!v.verify_target_is_formula_graph(ctx, goal_nnf, cp.value()).ok()) return "comb_target_fail";
@@ -103,6 +160,16 @@ std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
     FormulaHandle goal_nnf = fb.to_nnf(wrapped_goal);
     auto deriv_r = lce::build(fb, goal_nnf, lkr_prog);
     if (!deriv_r.ok()) return "build_err: " + deriv_r.error().to_string();
+
+    if (std::getenv("COMB_CHECKER_DERIV_STATS")) {
+        DerivStats s; count_deriv(*deriv_r.value(), s, 1);
+        std::cerr << "[deriv pre-elim] lkr_instrs=" << lkr_prog.instrs.size()
+                  << " total=" << s.total << " max_depth=" << s.max_depth
+                  << " max_conc=" << s.max_conc << " ::";
+        for (int i = 0; i < 12; ++i)
+            if (s.by_rule[i]) std::cerr << " " << kDerivRule[i] << "=" << s.by_rule[i];
+        std::cerr << std::endl;
+    }
 
     // Diagnostic: does build∘emit alone round-trip (no cut-elim)? Isolates
     // build/emit bugs from reduction bugs.
@@ -137,6 +204,11 @@ std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
     auto elim_r = lce::eliminate_cuts(fb, *deriv_r.value(), lemmas);
     if (!elim_r.ok()) return "elim_err: " + elim_r.error().to_string();
     lce::DerivPtr cutfree = std::move(elim_r).unwrap();
+
+    // Coalesce the exchange chains cut-elim leaves behind (pure reordering,
+    // conclusion-preserving). The emit→LKRVerifier re-verify below then doubles
+    // as a corpus-wide correctness gate on the pass.
+    lce::coalesce_exchanges(cutfree);
 
     auto prog_r = lce::emit(*cutfree);
     if (!prog_r.ok()) return "emit_err: " + prog_r.error().to_string();
@@ -208,6 +280,8 @@ void process_proof_file(
 
     for (const auto& parsed_proof : parsed.proofs) {
         const std::string& name = parsed_proof.claim_name;
+        if (std::getenv("COMB_CHECKER_PROGRESS"))
+            std::cerr << "[progress] start: " << name << std::endl;  // flushed
         if (parsed_proof.unproved) {
             results.push_back({proof_path, name, "unproved-marker", ""});
             continue;
@@ -320,6 +394,11 @@ int main(int argc, char* argv[]) {
     // via LKR_CUT_ELIM_MAX_STEPS for deeper runs.
     if (!std::getenv("LKR_CUT_ELIM_MAX_STEPS"))
         setenv("LKR_CUT_ELIM_MAX_STEPS", "500", /*overwrite=*/0);
+    // Likewise backstop the LKR→KS1 step count: a deep cut-free Deriv (B5-C
+    // duplication) translates to an enormous KS1 derivation that OOMs. The
+    // budget turns that into a clean comb_l2k_err. Raise via LKR_TO_KS1_MAX_STEPS.
+    if (!std::getenv("LKR_TO_KS1_MAX_STEPS"))
+        setenv("LKR_TO_KS1_MAX_STEPS", "500000", /*overwrite=*/0);
     std::string header_path = argv[1];
     std::string proof_path  = argv[2];
 

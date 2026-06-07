@@ -98,6 +98,28 @@ void test_ac_contraction_fibration() {
     }
 }
 
+// Contraction of structurally-EQUAL but occurrence-DISTINCT compounds, exercised
+// through the canonical (AC) medial+ac path: (a∧b)∨(a∧b) —m→ (a∨a)∧(b∨b)
+// —ac,ac→ a∧b. The four source atoms (a,b,a,b) map many-to-one onto the two
+// targets; both a-copies must coincide and both b-copies must coincide.
+void test_occurrence_distinct_contraction() {
+    Fixture f;
+    FormulaHandle X = f.And(f.a(), f.b());
+    Step m  = S(Rule::M);
+    Step ac1 = S(Rule::Ac, {Dir::Left});
+    Step ac2 = S(Rule::Ac, {Dir::Right});
+    Derivation phi2{f.Or(X, X), X, {m, ac1, ac2}};
+    auto sk = read_skew(f.fb, phi2);
+    EXPECT(sk.ok());
+    if (sk.ok()) {
+        EXPECT(sk.value().fibration.size() == 4);
+        EXPECT(sk.value().fibration[0] == sk.value().fibration[2]);  // a-copies coincide
+        EXPECT(sk.value().fibration[1] == sk.value().fibration[3]);  // b-copies coincide
+        EXPECT(sk.value().fibration[0] != sk.value().fibration[1]);  // a ≠ b vertex
+        EXPECT(sk.value().target.num_vertex() == 2);
+    }
+}
+
 // --- per-resource-rule fibration unit tests --------------------------
 //
 // Each test exercises one rule's induced map on a small Φ2 and asserts the
@@ -215,6 +237,7 @@ void test_m_fibration() {
 int main() {
     test_weakening_end_to_end();
     test_ac_contraction_fibration();
+    test_occurrence_distinct_contraction();
     test_w_forall_fibration();
     test_c_forall_fibration();
     test_m_forall_fibration();

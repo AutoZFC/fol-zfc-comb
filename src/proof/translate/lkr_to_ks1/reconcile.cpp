@@ -162,6 +162,27 @@ ks1::Step rule_at(ks1::Rule r, Path ctx) {
     Step s; s.rule = r; s.context = std::move(ctx); return s;
 }
 
+ks1::Step eqv_at(EqRule eq, EqDir dir, Path ctx) {
+    Step s; s.rule = ks1::Rule::Eqv; s.eq = eq; s.dir = dir;
+    s.context = std::move(ctx); return s;
+}
+
+// The fixed regroup (B∨C)∨(B∨C) ⟶ (B∨B)∨(C∨C), with B and C OPAQUE — contexts
+// never descend into them (so it is O(1) regardless of |B|,|C|, vs. equiv_steps
+// which canonicalizes all leaves). Relative to the regroup root; the caller
+// prefixes the surrounding S{·} context. Derivation:
+//   (B∨C)∨(B∨C) →Assoc→ B∨(C∨(B∨C)) →Assoc⁻¹@R→ B∨((C∨B)∨C)
+//   →Comm@R.L→ B∨((B∨C)∨C) →Assoc@R→ B∨(B∨(C∨C)) →Assoc⁻¹→ (B∨B)∨(C∨C)
+std::vector<Step> xx_or_regroup() {
+    return {
+        eqv_at(EqRule::AssocOr, EqDir::Forward,  {}),
+        eqv_at(EqRule::AssocOr, EqDir::Backward, {Dir::Right}),
+        eqv_at(EqRule::CommOr,  EqDir::Forward,  {Dir::Right, Dir::Left}),
+        eqv_at(EqRule::AssocOr, EqDir::Forward,  {Dir::Right}),
+        eqv_at(EqRule::AssocOr, EqDir::Backward, {}),
+    };
+}
+
 // Emit S{X∨X}/S{X} at context `ctx`. Recurse through X's structure with the
 // medial that exposes a ∨ one level down, bottoming out at Ac on literal pairs.
 util::Result<std::vector<Step>> contract_at(FormulaBuilder& fb, FormulaHandle x,
@@ -176,11 +197,9 @@ util::Result<std::vector<Step>> contract_at(FormulaBuilder& fb, FormulaHandle x,
     const Formula& f = x.get();
     if (f.is_compound() && f.as_compound().op == Op::Or) {
         FormulaHandle B = f.as_compound().left, C = f.as_compound().right;
-        // (B∨C)∨(B∨C) ⟶ (B∨B)∨(C∨C), then contract each side.
-        FormulaHandle from = fb.make_or(fb.make_or(B, C), fb.make_or(B, C));
-        FormulaHandle to   = fb.make_or(fb.make_or(B, B), fb.make_or(C, C));
-        TRY_ASSIGN(reshape, equiv_steps(fb, from, to));
-        for (Step& s : reshape) {
+        // (B∨C)∨(B∨C) ⟶ (B∨B)∨(C∨C) by a local regroup (B,C opaque), then
+        // contract each side. O(1) here vs. equiv_steps's leaf-canonicalization.
+        for (Step& s : xx_or_regroup()) {
             s.context.insert(s.context.begin(), ctx.begin(), ctx.end());
             out.push_back(std::move(s));
         }
@@ -214,6 +233,62 @@ util::Result<std::vector<Step>> contract_at(FormulaBuilder& fb, FormulaHandle x,
 
 util::Result<std::vector<Step>> contract_steps(FormulaBuilder& fb, FormulaHandle x) {
     return contract_at(fb, x, {});
+}
+
+util::Result<std::vector<Step>> reorder_steps(FormulaBuilder& fb,
+                                              const std::vector<FormulaHandle>& from,
+                                              const std::vector<FormulaHandle>& to) {
+    const std::size_t n = from.size();
+    if (n != to.size())
+        return MAKE_ERROR << "reorder_steps: size mismatch (" << n << " vs "
+                          << to.size() << ")";
+    if (n <= 1) return std::vector<Step>{};
+
+    // rank[k] = target position (index in `to`) of from[k]; stable on duplicates.
+    std::vector<std::size_t> rank(n);
+    std::vector<char> used(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::size_t t = 0;
+        for (; t < n; ++t) if (!used[t] && to[t] == from[i]) break;
+        if (t == n) return MAKE_ERROR << "reorder_steps: `to` is not a "
+                                         "permutation of `from` (by handle)";
+        rank[i] = t; used[t] = 1;
+    }
+
+    // Bubble-sort `rank` ascending; each adjacent swap of positions (p, p+1) in
+    // the length-n left-comb emits its local Assoc/Comm steps. The structure
+    // stays a length-n left-comb throughout, so contexts depend only on p and n.
+    std::vector<Step> out;
+    auto mk = [](EqRule eq, EqDir dir, Path ctx) {
+        Step s; s.rule = ks1::Rule::Eqv; s.eq = eq; s.dir = dir;
+        s.context = std::move(ctx); return s;
+    };
+    auto swap_at = [&](std::size_t p) {                 // swap entries p, p+1
+        Path ctx(n - 2 - p, Dir::Left);                 // node holding {…,p,p+1}
+        if (p == 0) {
+            out.push_back(mk(EqRule::CommOr, EqDir::Forward, ctx));
+        } else {
+            Path inner = ctx; inner.push_back(Dir::Right);
+            out.push_back(mk(EqRule::AssocOr, EqDir::Forward, ctx));   // (P'∨cp)∨cq → P'∨(cp∨cq)
+            out.push_back(mk(EqRule::CommOr, EqDir::Forward, inner));  // cp∨cq → cq∨cp
+            out.push_back(mk(EqRule::AssocOr, EqDir::Backward, ctx));  // P'∨(cq∨cp) → (P'∨cq)∨cp
+        }
+    };
+    for (std::size_t i = 0; i + 1 < n; ++i)
+        for (std::size_t p = 0; p + 1 < n - i; ++p)
+            if (rank[p] > rank[p + 1]) { swap_at(p); std::swap(rank[p], rank[p + 1]); }
+
+    // Self-check: the steps must carry denote(from) to denote(to).
+    auto denote = [&](const std::vector<FormulaHandle>& g) {
+        FormulaHandle acc = g[0];
+        for (std::size_t i = 1; i < g.size(); ++i) acc = fb.make_or(acc, g[i]);
+        return acc;
+    };
+    auto got = ks1::replay(fb, denote(from), out);
+    if (got.is_error()) return std::move(got).error();
+    if (got.value() != denote(to))
+        return MAKE_ERROR << "reorder_steps: replay did not reach denote(to)";
+    return out;
 }
 
 util::Result<std::vector<Step>> equiv_steps(FormulaBuilder& fb,

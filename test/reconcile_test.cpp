@@ -108,6 +108,51 @@ void test_contract_forall() {
     ok_contract(f, f.fb.make_quantified(Op::Forall, body));   // MForall + Ac
 }
 
+// reorder_steps(from,to): replaying from denote(from) must reach denote(to),
+// where `to` is a permutation (by handle) of the entry list `from`.
+FormulaHandle denote(F& f, const std::vector<FormulaHandle>& g) {
+    FormulaHandle acc = g[0];
+    for (std::size_t i = 1; i < g.size(); ++i) acc = f.Or(acc, g[i]);
+    return acc;
+}
+void ok_reorder(F& f, std::vector<FormulaHandle> from, std::vector<FormulaHandle> to) {
+    auto s = l2k::reorder_steps(f.fb, from, to);
+    EXPECT(s.ok());
+    if (!s.ok()) { std::cerr << "  " << s.error().to_string() << "\n"; return; }
+    auto got = proof::ks1::replay(f.fb, denote(f, from), s.value());
+    EXPECT(got.ok() && got.value() == denote(f, to));
+}
+
+void test_reorder_swap2() {                              // [a,b] → [b,a]
+    F f; auto a=f.p("a"), b=f.p("b");
+    ok_reorder(f, {a,b}, {b,a});
+}
+void test_reorder_reverse3() {                           // [a,b,c] → [c,b,a]
+    F f; auto a=f.p("a"), b=f.p("b"), c=f.p("c");
+    ok_reorder(f, {a,b,c}, {c,b,a});
+}
+void test_reorder_far_transposition() {                  // [a,b,c,d] → [a,d,c,b]
+    F f; auto a=f.p("a"), b=f.p("b"), c=f.p("c"), d=f.p("d");
+    ok_reorder(f, {a,b,c,d}, {a,d,c,b});
+}
+void test_reorder_rotate() {                             // [a,b,c,d] → [d,a,b,c]
+    F f; auto a=f.p("a"), b=f.p("b"), c=f.p("c"), d=f.p("d");
+    ok_reorder(f, {a,b,c,d}, {d,a,b,c});
+}
+void test_reorder_identity() {                           // no steps
+    F f; auto a=f.p("a"), b=f.p("b"), c=f.p("c");
+    ok_reorder(f, {a,b,c}, {a,b,c});
+}
+void test_reorder_duplicates() {                         // [a,a,b] → [b,a,a]
+    F f; auto a=f.p("a"), b=f.p("b");
+    ok_reorder(f, {a,a,b}, {b,a,a});
+}
+void test_reorder_not_permutation() {                    // [a,b] → [a,c] errors
+    F f; auto a=f.p("a"), b=f.p("b"), c=f.p("c");
+    auto s = l2k::reorder_steps(f.fb, {a,b}, {a,c});
+    EXPECT(s.is_error());
+}
+
 }  // namespace
 
 int main() {
@@ -126,6 +171,13 @@ int main() {
     test_contract_em();
     test_contract_nested();
     test_contract_forall();
+    test_reorder_swap2();
+    test_reorder_reverse3();
+    test_reorder_far_transposition();
+    test_reorder_rotate();
+    test_reorder_identity();
+    test_reorder_duplicates();
+    test_reorder_not_permutation();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

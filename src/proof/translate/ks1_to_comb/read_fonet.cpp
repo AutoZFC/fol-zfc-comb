@@ -62,6 +62,40 @@ struct Arena {
 // must stay in atom position (paper §V); see checker.cpp::is_navigable_binary.
 bool is_nav_binary(TNode::K k) { return k == TNode::And || k == TNode::Or; }
 
+// ---- AC-tolerant ∧/∨-chain helpers on the tagged tree --------------------
+// Mirror checker.cpp's flatten_chain/build_chain so the bridge can match a
+// rule's redex against a flattened canonical chain (tags ride along, since we
+// only rearrange / re-wrap existing subtree indices).
+void flatten_t(const Arena& a, size_t idx, TNode::K k, std::vector<size_t>& out) {
+    const TNode& n = a.nodes[idx];
+    if (n.k == k && (k == TNode::And || k == TNode::Or)) {
+        flatten_t(a, n.l, k, out);
+        flatten_t(a, n.r, k, out);
+    } else {
+        out.push_back(idx);
+    }
+}
+size_t build_t(Arena& a, TNode::K k, const std::vector<size_t>& ops) {
+    size_t acc = ops.back();
+    for (size_t i = ops.size() - 1; i-- > 0;) acc = a.bin(k, ops[i], acc);
+    return acc;
+}
+// Does any atom under `idx` reference the universal/existential binder `bt`?
+bool refers_binder(const Arena& a, size_t idx, size_t bt) {
+    const TNode& n = a.nodes[idx];
+    switch (n.k) {
+        case TNode::Atom:
+            for (const TArg& t : n.args)
+                if (t.bound && t.binder_tag == bt) return true;
+            return false;
+        case TNode::And: case TNode::Or:
+            return refers_binder(a, n.l, bt) || refers_binder(a, n.r, bt);
+        case TNode::Forall: case TNode::Exists:
+            return refers_binder(a, n.child, bt);
+        default: return false;
+    }
+}
+
 // Navigate to the redex index, collecting the enclosing binder-tag stack
 // (outermost first) for Gen-resolution.
 Result<size_t> nav(const Arena& a, size_t root, const Path& p, size_t i,
@@ -144,9 +178,65 @@ struct Prov {
     std::vector<std::pair<size_t, TArg>>   dualizer_raw;    // (exists binder_tag, witness)
 };
 
+// Flatten a maximal core-formula `op`-chain into operands.
+void flatten_core(FormulaHandle h, Op op, std::vector<FormulaHandle>& out) {
+    const Formula& f = h.get();
+    if (f.is_compound() && f.as_compound().op == op) {
+        flatten_core(f.as_compound().left, op, out);
+        flatten_core(f.as_compound().right, op, out);
+    } else {
+        out.push_back(h);
+    }
+}
+
+// Does the ∃-body operand `body` (core, Gen0=x at `depth`) denote the same
+// formula skeleton as the tagged subtree `tf` (canonical, x-positions hold the
+// witness)? Used to pair ∨/∧ operands when canonicalization reordered them, so
+// rebind_exists rebinds the right atoms. Checks predicate/polarity/shape (enough
+// to disambiguate operands; the modulo-≡ instance check is the soundness gate).
+bool aligns(const Arena& a, FormulaHandle body, size_t tf, var_index depth) {
+    const Formula& bf = body.get();
+    const TNode& tn = a.nodes[tf];
+    if (bf.is_predicate())
+        return tn.k == TNode::Atom && !tn.neg &&
+               tn.pred == bf.as_predicate().predicate() &&
+               tn.args.size() == bf.as_predicate().args().size();
+    if (bf.is_compound()) {
+        const Compound& c = bf.as_compound();
+        if (c.op == Op::Not) {
+            if (c.left.valid() && c.left.get().is_predicate())
+                return tn.k == TNode::Atom && tn.neg &&
+                       tn.pred == c.left.get().as_predicate().predicate() &&
+                       tn.args.size() == c.left.get().as_predicate().args().size();
+            return tn.k == TNode::One;                       // ¬⊥
+        }
+        if (c.op == Op::And || c.op == Op::Or) {
+            TNode::K k = c.op == Op::And ? TNode::And : TNode::Or;
+            if (tn.k != k) return false;
+            std::vector<FormulaHandle> bops; flatten_core(body, c.op, bops);
+            std::vector<size_t> tops; flatten_t(a, tf, k, tops);
+            if (bops.size() != tops.size()) return false;
+            std::vector<bool> used(tops.size(), false);
+            for (FormulaHandle bo : bops) {
+                bool m = false;
+                for (size_t j = 0; j < tops.size(); ++j)
+                    if (!used[j] && aligns(a, bo, tops[j], depth)) { used[j] = true; m = true; break; }
+                if (!m) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+    if (bf.is_quantified())
+        return (tn.k == TNode::Forall || tn.k == TNode::Exists) &&
+               aligns(a, bf.as_quantified().body, tn.child, depth + 1);
+    return false;
+}
+
 // Co-recurse the ∃ body parameter (core, Gen0 = x) with the redex TF subtree;
 // at each atom arg position where the body has Gen(0), rebind the TF atom's arg
-// to the new existential binder. Returns error on shape mismatch.
+// to the new existential binder. ∧/∨ operands are paired modulo ≡ (canonical
+// reordering), via `aligns`. Returns error on shape mismatch.
 util::ResultStatus rebind_exists(Arena& a, FormulaHandle body, size_t tf,
                                  size_t new_binder, var_index depth) {
     const Formula& bf = body.get();
@@ -174,12 +264,24 @@ util::ResultStatus rebind_exists(Arena& a, FormulaHandle body, size_t tf,
             return util::Ok();  // ¬⊥ = One: no args
         }
         if (c.op == Op::And || c.op == Op::Or) {
-            if (tn.k != (c.op == Op::And ? TNode::And : TNode::Or))
-                return MAKE_ERROR << "read_fonet: ∃ shape mismatch (∧/∨)";
-            size_t l = tn.l, r = tn.r;
-            auto rl = rebind_exists(a, c.left, l, new_binder, depth);
-            if (rl.is_error()) return rl;
-            return rebind_exists(a, c.right, r, new_binder, depth);
+            TNode::K k = c.op == Op::And ? TNode::And : TNode::Or;
+            if (tn.k != k) return MAKE_ERROR << "read_fonet: ∃ shape mismatch (∧/∨)";
+            std::vector<FormulaHandle> bops; flatten_core(body, c.op, bops);
+            std::vector<size_t> tops; flatten_t(a, tf, k, tops);
+            if (bops.size() != tops.size())
+                return MAKE_ERROR << "read_fonet: ∃ ∧/∨ arity mismatch";
+            std::vector<bool> used(tops.size(), false);
+            for (FormulaHandle bo : bops) {                  // pair operands modulo ≡
+                size_t pick = SIZE_MAX;
+                for (size_t j = 0; j < tops.size(); ++j)
+                    if (!used[j] && aligns(a, bo, tops[j], depth)) { pick = j; break; }
+                if (pick == SIZE_MAX)
+                    return MAKE_ERROR << "read_fonet: ∃ cannot pair ∧/∨ operand";
+                used[pick] = true;
+                auto r = rebind_exists(a, bo, tops[pick], new_binder, depth);
+                if (r.is_error()) return r;
+            }
+            return util::Ok();
         }
         return util::Ok();
     }
@@ -224,15 +326,40 @@ util::ResultStatus apply_tf(Prov& pv, const Step& s) {
         }
         case Rule::Tu:
             return put(a.bin(TNode::And, R, a.one()));
-        case Rule::Mix: {
+        case Rule::Mix: {       // A∧B → A∨B  (AC: split the ∧-chain at `split`)
             if (a.nodes[R].k != TNode::And) return MAKE_ERROR << "read_fonet: mix redex not ∧";
-            return put(a.bin(TNode::Or, a.nodes[R].l, a.nodes[R].r));
+            std::vector<size_t> conj; flatten_t(a, R, TNode::And, conj);
+            size_t k = s.split ? s.split : 1;
+            if (k >= conj.size()) return MAKE_ERROR << "read_fonet: mix split out of range";
+            size_t A = build_t(a, TNode::And, {conj.begin(), conj.begin() + k});
+            size_t B = build_t(a, TNode::And, {conj.begin() + k, conj.end()});
+            return put(a.bin(TNode::Or, A, B));
         }
-        case Rule::Sw: {
-            const TNode& n = a.nodes[R];
-            if (n.k != TNode::And || a.nodes[n.r].k != TNode::Or)
-                return MAKE_ERROR << "read_fonet: s redex not A∧(B∨C)";
-            size_t A = n.l, B = a.nodes[n.r].l, C = a.nodes[n.r].r;
+        case Rule::Sw: {        // A∧(B∨C) → (A∧B)∨C  (AC: pick the ∨-operand)
+            if (a.nodes[R].k != TNode::And) return MAKE_ERROR << "read_fonet: s redex not a ∧";
+            std::vector<size_t> conj; flatten_t(a, R, TNode::And, conj);
+            size_t j = SIZE_MAX;
+            if (!s.operands.empty()) {
+                j = s.operands[0];
+                if (j >= conj.size() || a.nodes[conj[j]].k != TNode::Or)
+                    return MAKE_ERROR << "read_fonet: s selected ∧-operand not a ∨";
+            } else {
+                for (size_t i = 0; i < conj.size(); ++i)
+                    if (a.nodes[conj[i]].k == TNode::Or) { j = i; break; }
+                if (j == SIZE_MAX) return MAKE_ERROR << "read_fonet: s ∧ has no ∨-operand";
+            }
+            std::vector<size_t> disj; flatten_t(a, conj[j], TNode::Or, disj);
+            size_t b = s.split;                               // index of the single B disjunct
+            if (b >= disj.size()) return MAKE_ERROR << "read_fonet: s split out of range";
+            size_t B = disj[b];
+            std::vector<size_t> crest;
+            for (size_t i = 0; i < disj.size(); ++i) if (i != b) crest.push_back(disj[i]);
+            if (crest.empty()) return MAKE_ERROR << "read_fonet: s ∨ has no C remainder";
+            size_t C = build_t(a, TNode::Or, crest);
+            std::vector<size_t> rest;
+            for (size_t i = 0; i < conj.size(); ++i) if (i != j) rest.push_back(conj[i]);
+            if (rest.empty()) return MAKE_ERROR << "read_fonet: s ∧ has no A operand";
+            size_t A = build_t(a, TNode::And, rest);
             return put(a.bin(TNode::Or, a.bin(TNode::And, A, B), C));
         }
         case Rule::Ex: {
@@ -265,12 +392,21 @@ util::ResultStatus apply_tf(Prov& pv, const Step& s) {
                 size_t bx = n.binder_tag, by = a.nodes[inner].binder_tag;
                 return put(a.quant(q, a.quant(q, body, bx), by));  // tags follow atoms
             };
-            // ∀-over-∨ (q=Forall, op=Or) / ∃-over-∧ (q=Exists, op=And).
+            // ∀-over-∨ (q=Forall, op=Or) / ∃-over-∧ (q=Exists, op=And). Forward is
+            // AC-tolerant: float every operand of the canonical chain that does
+            // not reference the binder (tags are absolute, so no De Bruijn shift).
             auto dist = [&](TNode::K q, TNode::K op) -> util::ResultStatus {
                 if (s.dir == EqDir::Forward) {
                     if (n.k != q || a.nodes[n.child].k != op) return MAKE_ERROR << "read_fonet: ≡ dist→";
-                    size_t A = a.nodes[n.child].l, B = a.nodes[n.child].r, bt = n.binder_tag;
-                    return put(a.bin(op, a.quant(q, A, bt), B));
+                    size_t bt = n.binder_tag;
+                    std::vector<size_t> ops; flatten_t(a, n.child, op, ops);
+                    std::vector<size_t> hasX, floated;
+                    for (size_t o : ops) (refers_binder(a, o, bt) ? hasX : floated).push_back(o);
+                    if (floated.empty()) return MAKE_ERROR << "read_fonet: ≡ dist→ nothing to float";
+                    if (hasX.empty()) return MAKE_ERROR << "read_fonet: ≡ dist→ vacuous binder";
+                    std::vector<size_t> chain{a.quant(q, build_t(a, op, hasX), bt)};
+                    for (size_t b : floated) chain.push_back(b);
+                    return put(build_t(a, op, chain));
                 }
                 if (n.k != op || a.nodes[n.l].k != q) return MAKE_ERROR << "read_fonet: ≡ dist←";
                 size_t A = a.nodes[n.l].child, B = n.r, bt = a.nodes[n.l].binder_tag;

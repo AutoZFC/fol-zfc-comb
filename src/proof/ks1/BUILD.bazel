@@ -26,6 +26,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":equiv",
         "//src/core:formula",
         "//src/util:error",
     ],

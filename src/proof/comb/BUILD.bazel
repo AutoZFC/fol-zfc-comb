@@ -62,3 +62,16 @@ cc_library(
         "//src/util:error",
     ],
 )
+
+# Debug formatters for CombProof / Fograph / Fonet. Pure diagnostics —
+# no functional behaviour, safe to depend on from anywhere.
+cc_library(
+    name = "debug",
+    srcs = ["debug.cpp"],
+    hdrs = ["debug.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":comb_proof",
+        "//src/core:formula",
+    ],
+)

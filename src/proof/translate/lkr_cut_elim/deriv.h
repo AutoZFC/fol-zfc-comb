@@ -95,4 +95,13 @@ util::Result<DerivPtr> build(
 // re-verifies under LKRVerifier.
 util::Result<Program<lkr::Instr>> emit(const Deriv& root);
 
+// Normalize: coalesce each maximal chain of RExchange nodes into the minimal
+// set of transpositions realizing the chain's net permutation (an identity
+// chain collapses to nothing). Cut-elimination emits an RExchange per
+// permutation step and never merges them, inflating the cut-free Deriv with
+// reordering bookkeeping (e.g. eq_iff_eq: 0 → 2765 exchanges, ~40× total). This
+// rewrites the tree IN PLACE. Pure reordering: every node's conclusion is
+// preserved, so emit→LKRVerifier (and the comb back end) still accept.
+void coalesce_exchanges(DerivPtr& root);
+
 }  // namespace logic::proof::translate::lkr_cut_elim

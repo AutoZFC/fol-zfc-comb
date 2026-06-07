@@ -118,7 +118,13 @@ most_general_dualizer(const CombProof& proof) {
         for (size_t i = 0; i < a1.args.size(); ++i) {
             if (!unify(a1.args[i], a2.args[i])) {
                 return MAKE_ERROR << "most_general_dualizer: link arguments do "
-                                     "not unify — no dualizer exists";
+                                     "not unify — no dualizer exists "
+                                  << "(link {" << link.first << "," << link.second
+                                  << "} arg " << i << ": "
+                                  << (is_unknown(a1.args[i]) ? "∃" : "∀")
+                                  << "f" << a1.args[i].as_variable() << " vs "
+                                  << (is_unknown(a2.args[i]) ? "∃" : "∀")
+                                  << "f" << a2.args[i].as_variable() << ")";
             }
         }
     }

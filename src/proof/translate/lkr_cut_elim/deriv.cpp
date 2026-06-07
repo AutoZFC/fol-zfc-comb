@@ -293,4 +293,69 @@ util::Result<Program<lkr::Instr>> emit(const Deriv& root) {
     return prog;
 }
 
+namespace {
+
+// The minimal transpositions turning `from` into `to` (which must be a
+// permutation of `from` by handle). Selection by first-match: at each position
+// place the wanted element from later in the list — exactly |from| − #cycles
+// swaps, each an arbitrary (i,j) pair (RExchange permits non-adjacent).
+std::vector<std::pair<std::size_t, std::size_t>> transpositions_to(
+    const Seq& from, const Seq& to) {
+    Seq cur = from;
+    std::vector<std::pair<std::size_t, std::size_t>> ts;
+    const std::size_t n = cur.size();
+    for (std::size_t k = 0; k < n; ++k) {
+        if (cur[k] == to[k]) continue;
+        std::size_t m = k + 1;
+        while (m < n && !(cur[m] == to[k])) ++m;
+        if (m == n) continue;            // not a permutation; leave as-is (defensive)
+        std::swap(cur[k], cur[m]);
+        ts.push_back({k, m});
+    }
+    return ts;
+}
+
+}  // namespace
+
+void coalesce_exchanges(DerivPtr& node) {
+    if (!node) return;
+
+    // An RExchange chain: capture the chain's net output order (this node's
+    // conclusion), descend to the first non-exchange base, then rebuild the
+    // minimal exchange stack that carries base's order to the target order.
+    if (std::get_if<RExchange>(&node->rule)) {
+        const Seq target = node->conclusion;          // top-of-chain order
+        DerivPtr* slot = &node;
+        while (std::get_if<RExchange>(&(*slot)->rule))
+            slot = &std::get<RExchange>((*slot)->rule).child;
+        DerivPtr base = std::move(*slot);             // detach the base
+        coalesce_exchanges(base);                     // normalize below the chain
+
+        Seq conc = base->conclusion;
+        DerivPtr cur = std::move(base);
+        for (auto [i, j] : transpositions_to(conc, target)) {
+            std::swap(conc[i], conc[j]);
+            auto n = std::make_unique<Deriv>();
+            n->conclusion = conc;
+            n->rule = RExchange{i, j, std::move(cur)};
+            cur = std::move(n);
+        }
+        node = std::move(cur);                         // conclusion == target
+        return;
+    }
+
+    // Non-exchange node: recurse into children.
+    if (auto* r = std::get_if<RWeaken>(&node->rule))         coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<RDuplicate>(&node->rule)) coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<RContract>(&node->rule))  coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<ROr>(&node->rule))        coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<RForall>(&node->rule))    coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<RExists>(&node->rule))    coalesce_exchanges(r->child);
+    else if (auto* r = std::get_if<RAnd>(&node->rule)) {
+        coalesce_exchanges(r->left); coalesce_exchanges(r->right);
+    } else if (auto* r = std::get_if<RCut>(&node->rule)) {
+        coalesce_exchanges(r->left); coalesce_exchanges(r->right);
+    }
+}
+
 }  // namespace logic::proof::translate::lkr_cut_elim

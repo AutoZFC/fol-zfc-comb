@@ -75,6 +75,13 @@ enum class EqDir { Forward, Backward };
 // One rule instance. `context` locates the redex P; the remaining fields are
 // the rule's parameters (kind-tagged by `rule`, mirroring VertexLabel's flat
 // record style — only the subset relevant to `rule` is meaningful).
+//
+// Derivations are checked MODULO ≡ (HSW §II eq (2)): the checker keeps the
+// working formula in `ks1::canonicalize` normal form, so reassociation and
+// commutation of ∧/∨ are free and never recorded as steps. `context` is a Path
+// into that canonical form. The chain rules (Ac/Sw/Mix/M/MForall/MExists) act
+// on a flattened ∧/∨-chain at `context`; `operands`/`split` select which
+// operands participate (with deterministic defaults, so most steps carry none).
 struct Step {
     Rule          rule{};
     Path          context{};
@@ -84,6 +91,18 @@ struct Step {
 
     EqRule        eq{};       // Eqv: which eq(2) equation
     EqDir         dir{};      // Eqv: direction
+
+    // Chain-rule operand selectors, interpreted against the flattened canonical
+    // ∧/∨-chain rooted at `context` (empty ⇒ the rule's deterministic default):
+    //   Ac      operands={i}  the ∨-operand index to contract against its equal
+    //                         right-neighbour (default: first adjacent equal pair)
+    //   Sw      operands={j}  the ∨-operand of the ∧-chain to switch out
+    //                         (default: first ∨-operand); split cuts it into B,C
+    //   Mix     split=k       A = first k ∧-operands, B = the rest (default k=1)
+    //   M/M∀/M∃ operands={j,k} the two ∨-operands to medial (default: first two);
+    //                         split cuts each conjunct into (A,C)/(B,D) (default 1)
+    std::vector<std::size_t> operands{};
+    std::size_t              split{};
 };
 
 // A derivation from `top` to `bottom` via `steps` (applied in order, top-down).
