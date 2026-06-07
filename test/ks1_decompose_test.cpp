@@ -110,6 +110,33 @@ void test_split_halves_compose() {
     EXPECT(sp.value().phi2.bottom == d.bottom);
 }
 
+// Constructive Thm 17: an INTERSPERSED derivation (a weakening emitted before
+// later linear steps) is valid but not decomposed; decompose() must phase-sort it
+// into Φ1-linear ; Φ2-resource, preserving the theorem, so split() then succeeds.
+//   t —ai—→ pc∨p̄c —W(pc)—→ (pc∨p̄c)∨pc —tu—→ (…)∧t —ai@R—→ ((pc∨p̄c)∨pc)∧(pc∨p̄c)
+// The W (resource) sits before tu/ai@R (linear) ⇒ not decomposed.
+void test_constructive_decompose() {
+    Fixture f;
+    FormulaHandle pc = f.p(f.k0()), npc = f.np(f.k0());
+    Step ai0 = S(Rule::Ai);                 ai0.f_param = pc;       // {}      linear
+    Step w   = S(Rule::W);                  w.f_param   = pc;       // {}      resource (early)
+    Step tu  = S(Rule::Tu);                                         // {}      linear (late!)
+    Step ai1 = S(Rule::Ai, {Dir::Right});   ai1.f_param = pc;       // [Right] linear
+    FormulaHandle bottom = f.fb.make_and(f.Or(f.Or(pc, npc), pc), f.Or(pc, npc));
+    Derivation d{f.top(), bottom, {ai0, w, tu, ai1}};
+
+    EXPECT(check(f.fb, d).ok());      // valid…
+    EXPECT(!is_decomposed(d));        // …but interspersed (W before tu/ai)
+
+    auto dec = decompose(f.fb, d);
+    EXPECT(dec.ok());
+    if (dec.ok()) {
+        EXPECT(is_decomposed(dec.value()));     // phase-sorted now
+        EXPECT(check(f.fb, dec.value()).ok());  // same theorem, still valid
+    }
+    EXPECT(split(f.fb, d).ok());      // split decomposes internally and succeeds
+}
+
 }  // namespace
 
 int main() {
@@ -118,6 +145,7 @@ int main() {
     test_decomposed_resource();
     test_not_decomposed_out_of_order();
     test_split_halves_compose();
+    test_constructive_decompose();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

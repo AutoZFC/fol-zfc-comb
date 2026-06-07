@@ -42,6 +42,14 @@ bool is_resource(Rule r);  // {w, w∀, ac, c∀, m, m∀, m∃, ≡}
 // non-decreasing within each half.
 bool is_decomposed(const Derivation& d);
 
+// Constructive Thm 17: reorganize `d` into decomposed form by phase-sorting its
+// steps via replay-verified adjacent transpositions (DECOMPOSE_DESIGN.md). Each
+// swap exactly preserves the derivation's effect; any pair that does not commute
+// cleanly (binder crossing, weakening-absorption cases, AC-chain merges) is left
+// in place — so the result may be only PARTIALLY decomposed and `split` still
+// gates on `is_decomposed`. Returns a derivation with the same top/bottom.
+util::Result<Derivation> decompose(FormulaBuilder& fb, const Derivation& d);
+
 // The MLS1^X linear core Φ1 (t ⟶ A'), the split formula A', and the resource
 // phase Φ2 (A' ⟶ A), of a decomposed derivation.
 struct Split {
