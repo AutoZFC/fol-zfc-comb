@@ -353,6 +353,45 @@ void test_contraction_end_to_end() {
     EXPECT(all_phases(ctx, goal, cp.value()));
 }
 
+// ⊢ ∀x.p(x) ∨ ∃y.¬p(y) — excluded middle on ∀x.p(x). The RForall has a
+// NON-EMPTY context Γ={∃y.¬p(y)}, exercising the DistForall pull-out:
+//   …→ ∀x.(∃y.¬p(y)∨p(x)) →comm→ ∀x.(p(x)∨∃y.¬p(y)) →DistForall→
+//      (∀x.p(x))∨∃y.¬p(y).
+void test_forall_context_distforall_end_to_end() {
+    GlobalContext ctx;
+    FormulaBuilder fb(ctx);
+    PredicateHandle P = ctx.add_predicate("p", 1);
+    Term g0 = Term::generalized(0), c = Term::fixed(0);
+    FormulaHandle faP  = fb.make_quantified(Op::Forall, fb.predicate(P, {g0}));   // ∀x.p(x)
+    FormulaHandle exNP = fb.make_quantified(Op::Exists,
+                            fb.make_not(fb.predicate(P, {g0})));                  // ∃y.¬p(y)
+    FormulaHandle goal = fb.make_or(faP, exNP);
+    FormulaHandle pc = fb.predicate(P, {c}), npc = fb.make_not(pc);
+
+    auto ax = std::make_unique<lce::Deriv>();           // [p(c), ¬p(c)]
+    ax->conclusion = {pc, npc}; ax->rule = lce::RAx{0, 1};
+    auto exd = std::make_unique<lce::Deriv>();          // [p(c), ∃y.¬p(y)]
+    exd->conclusion = {pc, exNP};
+    exd->rule = lce::RExists{/*principal=*/1, c, std::move(ax)};
+    auto fad = std::make_unique<lce::Deriv>();          // [∀x.p(x), ∃y.¬p(y)]
+    fad->conclusion = {faP, exNP};
+    fad->rule = lce::RForall{/*principal=*/0, /*eigen=*/0, std::move(exd)};
+    lce::Deriv root;
+    root.conclusion = {goal};
+    root.rule = lce::ROr{0, std::move(fad)};
+
+    auto d = l2k::lkr_to_ks1(fb, root);
+    EXPECT(d.ok());
+    if (!d.ok()) { std::cerr << "  " << d.error().to_string() << "\n"; return; }
+    auto chk = proof::ks1::check(fb, d.value());
+    EXPECT(chk.ok());
+    if (chk.is_error()) std::cerr << "  ks1::check: " << chk.error().to_string() << "\n";
+    auto cp = build_comb_proof(fb, d.value());
+    EXPECT(cp.ok());
+    if (cp.is_error()) { std::cerr << "  build_comb_proof: " << cp.error().to_string() << "\n"; return; }
+    EXPECT(all_phases(ctx, goal, cp.value()));
+}
+
 }  // namespace
 
 int main() {
@@ -364,6 +403,7 @@ int main() {
     test_drinker_end_to_end();
     test_weakening_end_to_end();
     test_contraction_end_to_end();
+    test_forall_context_distforall_end_to_end();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

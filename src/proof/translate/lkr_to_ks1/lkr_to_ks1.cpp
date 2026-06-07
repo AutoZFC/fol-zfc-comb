@@ -166,28 +166,39 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
 
     // --- RForall: ⊢ Γ, φ[eigen] ⊢ Γ, ∀x.φ. ------------------------------
     // ForallUnit gives ∀x.t; the child derivation runs under [Down] with the
-    // eigenvariable rebound to the ∀'s bound var (fixed(eigen) → gen0), so the
-    // body becomes φ. K6.2 first cut: Γ empty (single-formula goal); the
-    // DistForall pull-out for a non-empty context, and nested-binder de Bruijn
-    // depth, are K6.2b.
+    // eigenvariable rebound to the ∀'s bound var (depth-aware fixed(eigen)→gen),
+    // building ∀x.(child). With Γ=∅ that already is the goal. With Γ≠∅ the body
+    // is ∀x.((Δ)∨φ), so a DistForall pulls Δ back out: comm to ∀x.(φ∨(Δ)), then
+    // ∀x.(A∨B)→(∀x.A)∨B (x∉Δ since the eigenvar is fresh), then reconcile. (A
+    // sequent formula has free FIXED vars but no free GEN vars, so DistForall's
+    // gen-shift on Δ is a no-op — the construction is de-Bruijn-sound.)
     if (const auto* far = std::get_if<lce::RForall>(&d.rule)) {
-        if (d.conclusion.size() != 1)
-            return MAKE_ERROR << "lkr_to_ks1: K6.2 RForall supports only a "
-                                 "single-formula goal (Γ empty); DistForall context = K6.2b";
-        const Formula& qf = d.conclusion[0].get();
+        const std::size_t pr = far->principal;
+        FormulaHandle quant = d.conclusion[pr];                 // ∀x.φ
+        const Formula& qf = quant.get();
         if (!(qf.is_quantified() && qf.as_quantified().op == Op::Forall))
             return MAKE_ERROR << "lkr_to_ks1: RForall principal is not a ∀";
-        TRY_ASSIGN(child_steps, tr(fb, *far->child));
-        for (ks1::Step& s : child_steps) {
-            // De Bruijn index of the new ∀'s var, as seen from this step's
-            // redex = the number of binders (quantifier `Down`s) above it.
+        const lce::Deriv* child = far->child.get();
+
+        std::vector<FormulaHandle> delta;                       // Γ (entries ≠ pr)
+        for (std::size_t i = 0; i < child->conclusion.size(); ++i)
+            if (i != pr) delta.push_back(child->conclusion[i]);
+        const bool emptyG = delta.empty();
+
+        TRY_ASSIGN(steps, tr(fb, *child));                      // → denote(child)
+        // Reshape (Δ),φ so φ is the rightmost disjunct — BEFORE wrapping, on the
+        // fixed-eigenvar formulas (so the ∀-body's reshape target is known).
+        if (!emptyG) {
+            FormulaHandle iso = fb.make_or(denote(fb, delta), child->conclusion[pr]);
+            TRY_ASSIGN(r, equiv_steps(fb, denote(fb, child->conclusion), iso));
+            steps.insert(steps.end(), r.begin(), r.end());
+        }
+        // Wrap everything so far in ∀x: prefix [Down] + rebind the eigenvar.
+        for (ks1::Step& s : steps) {
             int depth = 0;
             for (ks1::Dir dd : s.context) if (dd == ks1::Dir::Down) ++depth;
-            // Ex's f_param is the ∃-BODY — one binder deeper than the redex; its
-            // t_param (witness) sits at the redex level. All other params (Ai's
-            // literal, W's formula) sit at the redex level.
             if (s.f_param.valid()) {
-                int fd = depth + (s.rule == ks1::Rule::Ex ? 1 : 0);
+                int fd = depth + (s.rule == ks1::Rule::Ex ? 1 : 0);  // Ex body deeper
                 s.f_param = fb.translate_term(s.f_param, Term::fixed(far->eigen),
                                               Term::generalized(fd));
             }
@@ -196,10 +207,21 @@ util::Result<std::vector<ks1::Step>> tr(FormulaBuilder& fb, const lce::Deriv& d)
                                                  Term::generalized(depth));
             s.context.insert(s.context.begin(), ks1::Dir::Down);
         }
-        ks1::Step fu; fu.rule = ks1::Rule::ForallUnit;       // t → ∀x.t  (ctx {})
-        std::vector<ks1::Step> steps{fu};
-        steps.insert(steps.end(), child_steps.begin(), child_steps.end());
-        return steps;
+        ks1::Step fu; fu.rule = ks1::Rule::ForallUnit;          // t → ∀x.t
+        std::vector<ks1::Step> out{fu};
+        out.insert(out.end(), steps.begin(), steps.end());      // → ∀x.(child[bound])
+
+        if (!emptyG) {
+            // ∀x.((Δ)∨φ) → ∀x.(φ∨(Δ)) → (∀x.φ)∨(Δ) → denote(node).
+            out.push_back(eqv_step(ks1::EqRule::CommOr, ks1::Path{ks1::Dir::Down}));
+            ks1::Step dist; dist.rule = ks1::Rule::Eqv;
+            dist.eq = ks1::EqRule::DistForall; dist.dir = ks1::EqDir::Forward;  // ctx {}
+            out.push_back(dist);
+            FormulaHandle afterDist = fb.make_or(quant, denote(fb, delta));
+            TRY_ASSIGN(r2, equiv_steps(fb, afterDist, denote(fb, d.conclusion)));
+            out.insert(out.end(), r2.begin(), r2.end());
+        }
+        return out;
     }
 
     // --- RExists: ⊢ Γ, φ[x:=t] ⊢ Γ, ∃x.φ. -------------------------------
