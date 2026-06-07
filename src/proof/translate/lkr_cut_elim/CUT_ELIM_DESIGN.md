@@ -104,13 +104,29 @@ it is exactly where contraction-against-cut is paid for, rigorously.
   formula. `d(Cut) = d(φ)` of its cut formula.
 - **rank/level** = combined height of the two immediate subderivations.
 
-Pick a **topmost** cut of **maximal degree** `δ` (no cut of degree ≥ δ
-above it). Reduce it by the case below. The well-order is the multiset of
-cut-degrees under `>`; each step replaces a degree-`δ` cut by cuts of
-degree `< δ` (principal/axiom) or moves it up at fixed degree while strictly
-lowering rank (permutation/structural). Lexicographic `(δ, rank)`
-terminates (Gentzen). Cost: worst-case non-elementary (the only risk; not
-correctness).
+Pick a cut to reduce. Two selection disciplines are sound (the §5 cases are
+local rewrites, valid for any cut, so only termination depends on order):
+
+- **topmost maximal-degree** (Gentzen's): a cut of maximal degree `δ` with no
+  degree-≥δ cut above it. `find_topmost_max_deg_cut`. Lexicographic `(δ, rank)`
+  terminates. BUT a max-degree cut's premises may still hold *lower-degree*
+  cuts, so `B5-contraction` duplicates a **cut-ful** premise — those cuts are
+  copied and re-reduced per copy, amplifying the contraction count beyond the
+  source proof's intrinsic contractions (measured: 30–55% of B5-C firings
+  duplicated a cut-ful premise).
+
+- **uppermost** (`find_uppermost_cut`, the driver's choice): a cut whose BOTH
+  premises are already cut-free. `B5-contraction` then duplicates only cut-free
+  material ⇒ **no cut is ever duplicated** ⇒ no strategy-induced amplification;
+  the cut-free proof carries only the source's intrinsic contractions (which
+  set the comb-proof fonet size — see the perf note below). Termination is the
+  standard uppermost argument: reducing a degree-`δ` uppermost cut yields only
+  degree-`<δ` cuts (logical) or degree-`δ` cuts over strictly smaller premises
+  (B5), so `(δ, premise-size)` descends. Measured effect (eq_iff_eq): contraction
+  nodes 120→27, depth 2478→285, comb-gen steps 4761→3263; both corpora 0%
+  cut-ful-premise duplications; +2 functions theorems became fully cut-free
+  (no longer hit the step cap). Worst-case is still non-elementary (the wall is
+  intrinsic to the source proof, not the strategy).
 
 ### 5.2 Axiom cases (incl. atomic cut)
 

@@ -17,6 +17,14 @@ namespace {
 // Name of the §5 case/sub-case that last fired (debug diagnostics only).
 const char* g_last_case = "";
 
+// Diagnostic counters (LKR_CUT_ELIM_STATS): per reduce_loop call, how many
+// B5-contraction reductions fired, and how many of those duplicated a premise
+// that STILL contained cuts. The latter measures strategy-induced amplification
+// (the C-strat lever): if it is ~0, the uppermost-max-degree order is not
+// duplicating cut-ful premises, so there is nothing for an innermost discipline
+// to recover and the contraction count is intrinsic to the source proof.
+long long g_b5c_total = 0, g_b5c_O_cutful = 0;
+
 DerivPtr clone(const Deriv& d) {
     auto n = std::make_unique<Deriv>();
     n->conclusion = d.conclusion;
@@ -120,6 +128,38 @@ TopmostScan scan_topmost(const Deriv& d) {
             return out;
         }
         return TopmostScan{};   // RAx / ROne / RLemma: no cut.
+    }, d.rule);
+}
+
+// Path to an UPPERMOST cut — one whose BOTH premises are already cut-free.
+// Reducing only uppermost cuts is the C-strat discipline (STAGE3/perf): an
+// uppermost B5-contraction duplicates CUT-FREE material, so no cut is ever
+// duplicated and re-reduced per copy ⇒ no strategy-induced amplification of the
+// contraction count (which drives the comb proof's fonet size). Termination is
+// the standard uppermost argument: a reduction of a degree-d uppermost cut
+// yields only lower-degree cuts (logical cases) or same-degree cuts over
+// strictly smaller premises (B5), so (degree, premise-size) descends. Returns
+// nullopt iff the tree is cut-free. Replaces the max-degree-first selection,
+// which duplicated still-cut-ful premises (measured at 30–55% of firings).
+std::optional<CutPath> find_uppermost_cut(const Deriv& d) {
+    return std::visit([&](auto&& r) -> std::optional<CutPath> {
+        using T = std::decay_t<decltype(r)>;
+        auto into = [](int side, CutPath sub) {
+            CutPath p{side}; p.insert(p.end(), sub.begin(), sub.end()); return p;
+        };
+        if constexpr (std::is_same_v<T, RCut> || std::is_same_v<T, RAnd>) {
+            if (auto l = find_uppermost_cut(*r.left))  return into(0, *l);
+            if (auto rr = find_uppermost_cut(*r.right)) return into(1, *rr);
+            if constexpr (std::is_same_v<T, RCut>) return CutPath{};  // premises cut-free.
+            return std::nullopt;
+        } else if constexpr (std::is_same_v<T, RExchange> || std::is_same_v<T, RWeaken> ||
+                             std::is_same_v<T, RDuplicate> || std::is_same_v<T, RContract> ||
+                             std::is_same_v<T, ROr> || std::is_same_v<T, RForall> ||
+                             std::is_same_v<T, RExists>) {
+            if (auto c = find_uppermost_cut(*r.child)) return into(0, *c);
+            return std::nullopt;
+        }
+        return std::nullopt;   // RAx / ROne / RLemma.
     }, d.rule);
 }
 
@@ -1056,6 +1096,10 @@ DerivPtr try_b5_contraction(const Deriv& cut_node, const RCut& cut,
     }
     if (!dup) return nullptr;
 
+    // Diagnostic: is the premise O we are about to DUPLICATE still cut-ful?
+    ++g_b5c_total;
+    if (scan_topmost(*O).has_cut) ++g_b5c_O_cutful;
+
     const Deriv* C2 = dup->child.get();           // Γ_C with ψ at cs_dup and last
     const FormulaHandle psi = C2->conclusion.back();   // duplicated cut formula ψ
     const std::size_t go = O->conclusion.size() - 1;   // |Γ_o|
@@ -1380,6 +1424,7 @@ DerivPtr rectify_eigenvars(const Deriv& d, FormulaBuilder& b) {
 // validate (see reduce.h); on a rejected reduction the last valid tree is kept.
 util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
                                    const VerifyStep& verify_step) {
+    g_b5c_total = 0; g_b5c_O_cutful = 0;   // reset per-call diagnostics
     // Variable-condition invariant for the commutation cases (§6).
     DerivPtr rectified = rectify_eigenvars(start, builder);
     TRY_ASSIGN(current, additive_to_multiplicative(*rectified));
@@ -1416,10 +1461,10 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
                              "eigenvars not globally distinct\n");
 
     for (std::size_t step = 0; step < max_steps; ++step) {
-        auto cand = find_topmost_max_deg_cut(*current);
-        if (!cand) break;  // no cuts remain.
+        auto cpath = find_uppermost_cut(*current);   // C-strat: never duplicate a cut-ful premise.
+        if (!cpath) break;  // no cuts remain.
 
-        DerivPtr* slot = slot_at_path(current, cand->path);
+        DerivPtr* slot = slot_at_path(current, *cpath);
         if (!slot || !*slot)
             return MAKE_ERROR << "eliminate_cuts: lost cut node at path";
         const Deriv* cut_node = slot->get();
@@ -1460,6 +1505,13 @@ util::Result<DerivPtr> reduce_loop(FormulaBuilder& builder, const Deriv& start,
                          "(case %s): eigenvars no longer globally distinct\n",
                          step, g_last_case);
     }
+
+    if (std::getenv("LKR_CUT_ELIM_STATS") && g_b5c_total)
+        std::fprintf(stderr, "[cut-elim stats] B5-contraction firings=%lld; "
+                     "duplicated a STILL-CUTFUL premise=%lld (%.0f%% — the "
+                     "strategy-induced amplification C-strat could recover)\n",
+                     g_b5c_total, g_b5c_O_cutful,
+                     100.0 * static_cast<double>(g_b5c_O_cutful) / static_cast<double>(g_b5c_total));
 
     // Any residual (irreducible) cut is still multiplicative; convert back to
     // additive so the output emits to the additive LKR (Cut). No-op if cut-free.
