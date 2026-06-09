@@ -303,6 +303,52 @@ util::Result<std::vector<Step>> contract_steps(FormulaBuilder& fb, FormulaHandle
     return contract_at(fb, x, {});
 }
 
+namespace {
+FormulaHandle denote(FormulaBuilder& fb, const std::vector<FormulaHandle>& g) {
+    FormulaHandle acc = g[0];
+    for (std::size_t i = 1; i < g.size(); ++i) acc = fb.make_or(acc, g[i]);
+    return acc;
+}
+// Left-to-right spine leaves of `cur`, descending ∨-nodes but STOPPING at any
+// handle that is an entry (opaque) — so a ∨-valued entry stays a single leaf.
+void spine_order(FormulaHandle cur, const std::vector<FormulaHandle>& entries,
+                 std::vector<FormulaHandle>& out) {
+    for (FormulaHandle e : entries) if (e == cur) { out.push_back(cur); return; }
+    const Formula& f = cur.get();
+    if (f.is_compound() && f.as_compound().op == Op::Or) {
+        spine_order(f.as_compound().left, entries, out);
+        spine_order(f.as_compound().right, entries, out);
+    } else {
+        out.push_back(cur);
+    }
+}
+}  // namespace
+
+util::Result<std::vector<Step>> reconcile_to(FormulaBuilder& fb, FormulaHandle cur,
+                                             const std::vector<FormulaHandle>& entries) {
+    if (entries.empty()) return MAKE_ERROR << "reconcile_to: empty entries";
+    if (cur == denote(fb, entries)) return std::vector<Step>{};
+
+    // Boundary-aware path: re-bracket cur to left-assoc in its own spine order,
+    // then permute that order into `entries`. Both treat entries as opaque, so a
+    // ∨-valued entry's boundary survives (unlike equiv_steps' leaf canonicalize).
+    std::vector<FormulaHandle> order;
+    spine_order(cur, entries, order);
+    auto ra = reassoc_left_steps(fb, cur, order);
+    if (ra.ok()) {
+        auto ro = reorder_steps(fb, order, entries);
+        if (ro.ok()) {
+            std::vector<Step> steps = std::move(ra).value();
+            auto rov = std::move(ro).value();
+            steps.insert(steps.end(), rov.begin(), rov.end());
+            return steps;
+        }
+    }
+    // Fallback: full ≡ canonicalization (loses ∨-entry boundaries, but correct
+    // when entries are non-∨ or the spine aliases an entry handle).
+    return equiv_steps(fb, cur, denote(fb, entries));
+}
+
 util::Result<std::vector<Step>> reorder_steps(FormulaBuilder& fb,
                                               const std::vector<FormulaHandle>& from,
                                               const std::vector<FormulaHandle>& to) {

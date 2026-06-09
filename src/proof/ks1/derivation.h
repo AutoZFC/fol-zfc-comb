@@ -96,11 +96,13 @@ struct Step {
     // ∧/∨-chain rooted at `context` (empty ⇒ the rule's deterministic default):
     //   Ac      operands={i}  the ∨-operand index to contract against its equal
     //                         right-neighbour (default: first adjacent equal pair)
-    //   Sw      operands={j}  the ∨-operand of the ∧-chain to switch out
-    //                         (default: first ∨-operand); split cuts it into B,C
     //   Mix     split=k       A = first k ∧-operands, B = the rest (default k=1)
     //   M/M∀/M∃ operands={j,k} the two ∨-operands to medial (default: first two);
     //                         split cuts each conjunct into (A,C)/(B,D) (default 1)
+    // `Sw` carries no selector: it is BINARY on the redex A∧(B∨C) with the ∨ as
+    // the RIGHT conjunct (A=∧.left, B=∨.left, C=∨.right), no flattening — so a
+    // ∨-typed B or a structured C survives intact (HSW's switch on opaque
+    // structures). The emitter brackets B∨C on the right via ≡ steps.
     std::vector<std::size_t> operands{};
     std::size_t              split{};
 };

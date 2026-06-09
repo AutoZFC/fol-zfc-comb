@@ -59,4 +59,17 @@ util::Result<std::vector<logic::proof::ks1::Step>> reassoc_left_steps(
     FormulaBuilder& fb, FormulaHandle cur,
     const std::vector<FormulaHandle>& entries);
 
+// Reshape `cur` into the canonical left-associated denote(entries) — the single
+// boundary-aware reconcile used by every translation macro. `entries` is the
+// target sequent as an order-free bag of OPAQUE subtrees (a ∨-valued entry is
+// never flattened). Works for any ≡-equal `cur` whose spine leaves are `entries`
+// in any bracketing/order: re-brackets to cur's own spine order then permutes to
+// `entries`, falling back to full ≡ canonicalization only when the boundaries
+// cannot be read off the spine. Replaying the result from `cur` yields
+// denote(entries). This supersedes raw `equiv_steps` at the macro level, which
+// flattens ∨-entries and so dissolves their boundaries.
+util::Result<std::vector<logic::proof::ks1::Step>> reconcile_to(
+    FormulaBuilder& fb, FormulaHandle cur,
+    const std::vector<FormulaHandle>& entries);
+
 }  // namespace logic::proof::translate::lkr_to_ks1

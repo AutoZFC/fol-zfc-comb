@@ -309,35 +309,17 @@ Result<FormulaHandle> apply_rule(FormulaBuilder& fb, const Step& s, FormulaHandl
         case Rule::Tu:          // S{A}/S{A∧t}
             return fb.make_and(P, make_top(fb));
 
-        case Rule::Sw: {        // S{A∧(B∨C)}/S{(A∧B)∨C}  (AC: pick ∨-operand j, B=disj `split`)
+        case Rule::Sw: {        // S{A∧(B∨C)}/S{(A∧B)∨C}  (binary: A=∧.left, B∨C=∧.right)
+            // HSW's switch acts on opaque structures, so we split the TOP binary
+            // nodes — no ∧/∨ flattening — and B / C survive whatever their own
+            // shape (a ∨-typed B, a structured C). The emitter brackets B∨C as
+            // the right conjunct via ≡ steps.
             if (!is_op(P, Op::And)) return MAKE_ERROR << "s: redex not a ∧";
-            std::vector<FormulaHandle> conj;
-            flatten_chain(P, Op::And, conj);
-            std::size_t j = SIZE_MAX;
-            if (!s.operands.empty()) {
-                j = s.operands[0];
-                if (j >= conj.size() || !is_op(conj[j], Op::Or))
-                    return MAKE_ERROR << "s: selected ∧-operand is not a ∨";
-            } else {
-                for (std::size_t i = 0; i < conj.size(); ++i)
-                    if (is_op(conj[i], Op::Or)) { j = i; break; }
-                if (j == SIZE_MAX) return MAKE_ERROR << "s: ∧ has no ∨-operand";
-            }
-            std::vector<FormulaHandle> disj;
-            flatten_chain(conj[j], Op::Or, disj);
-            std::size_t b = s.split;                          // index of the single B disjunct
-            if (b >= disj.size()) return MAKE_ERROR << "s: split out of range for ∨";
-            FormulaHandle B = disj[b];
-            std::vector<FormulaHandle> crest;                 // C = the other disjuncts, in order
-            for (std::size_t i = 0; i < disj.size(); ++i) if (i != b) crest.push_back(disj[i]);
-            if (crest.empty()) return MAKE_ERROR << "s: ∨ has no C remainder";
-            FormulaHandle C = build_chain(fb, Op::Or, crest);
-            std::vector<FormulaHandle> rest;                 // A = the other ∧-operands
-            for (std::size_t i = 0; i < conj.size(); ++i)
-                if (i != j) rest.push_back(conj[i]);
-            if (rest.empty()) return MAKE_ERROR << "s: ∧ has no A operand";
-            FormulaHandle A = build_chain(fb, Op::And, rest);
-            return fb.make_or(fb.make_and(A, B), C);
+            const Compound& pc = P.get().as_compound();
+            if (!is_op(pc.right, Op::Or))
+                return MAKE_ERROR << "s: right conjunct is not a ∨ (bracket B∨C on the right)";
+            const Compound& oc = pc.right.get().as_compound();
+            return fb.make_or(fb.make_and(pc.left, oc.left), oc.right);  // (A∧B)∨C
         }
         case Rule::Mix: {       // S{A∧B}/S{A∨B}  (AC: split the ∧-chain at `split`)
             if (!is_op(P, Op::And)) return MAKE_ERROR << "mix: redex not A∧B";

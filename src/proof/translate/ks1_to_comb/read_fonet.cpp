@@ -335,31 +335,12 @@ util::ResultStatus apply_tf(Prov& pv, const Step& s) {
             size_t B = build_t(a, TNode::And, {conj.begin() + k, conj.end()});
             return put(a.bin(TNode::Or, A, B));
         }
-        case Rule::Sw: {        // A∧(B∨C) → (A∧B)∨C  (AC: pick the ∨-operand)
+        case Rule::Sw: {        // A∧(B∨C) → (A∧B)∨C  (binary: A=∧.left, B∨C=∧.right)
             if (a.nodes[R].k != TNode::And) return MAKE_ERROR << "read_fonet: s redex not a ∧";
-            std::vector<size_t> conj; flatten_t(a, R, TNode::And, conj);
-            size_t j = SIZE_MAX;
-            if (!s.operands.empty()) {
-                j = s.operands[0];
-                if (j >= conj.size() || a.nodes[conj[j]].k != TNode::Or)
-                    return MAKE_ERROR << "read_fonet: s selected ∧-operand not a ∨";
-            } else {
-                for (size_t i = 0; i < conj.size(); ++i)
-                    if (a.nodes[conj[i]].k == TNode::Or) { j = i; break; }
-                if (j == SIZE_MAX) return MAKE_ERROR << "read_fonet: s ∧ has no ∨-operand";
-            }
-            std::vector<size_t> disj; flatten_t(a, conj[j], TNode::Or, disj);
-            size_t b = s.split;                               // index of the single B disjunct
-            if (b >= disj.size()) return MAKE_ERROR << "read_fonet: s split out of range";
-            size_t B = disj[b];
-            std::vector<size_t> crest;
-            for (size_t i = 0; i < disj.size(); ++i) if (i != b) crest.push_back(disj[i]);
-            if (crest.empty()) return MAKE_ERROR << "read_fonet: s ∨ has no C remainder";
-            size_t C = build_t(a, TNode::Or, crest);
-            std::vector<size_t> rest;
-            for (size_t i = 0; i < conj.size(); ++i) if (i != j) rest.push_back(conj[i]);
-            if (rest.empty()) return MAKE_ERROR << "read_fonet: s ∧ has no A operand";
-            size_t A = build_t(a, TNode::And, rest);
+            size_t A = a.nodes[R].l, bc = a.nodes[R].r;
+            if (a.nodes[bc].k != TNode::Or)
+                return MAKE_ERROR << "read_fonet: s right conjunct not a ∨";
+            size_t B = a.nodes[bc].l, C = a.nodes[bc].r;
             return put(a.bin(TNode::Or, a.bin(TNode::And, A, B), C));
         }
         case Rule::Ex: {

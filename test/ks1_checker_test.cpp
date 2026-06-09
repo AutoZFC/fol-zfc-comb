@@ -98,6 +98,18 @@ void test_switch() {
                           f.Or(f.And(f.a(), f.b()), f.c()), {step(Rule::Sw)}}));
     EXPECT_ERR((Derivation{f.And(f.a(), f.b()),  // not A∧(B∨C)
                            f.Or(f.And(f.a(), f.b()), f.c()), {step(Rule::Sw)}}));
+
+    // Binary, structural: B = ∨.left survives as a whole disjunction. The redex
+    // a∧((b∨c)∨d) switches to (a∧(b∨c))∨d — B={b∨c}, C={d} — no flattening that
+    // would peel b alone (the boundary-loss bug this fixes).
+    EXPECT_OK((Derivation{f.And(f.a(), f.Or(f.Or(f.b(), f.c()), f.d())),
+                          f.Or(f.And(f.a(), f.Or(f.b(), f.c())), f.d()), {step(Rule::Sw)}}));
+    // C survives structured too: a∧(b∨(c∨d)) / (a∧b)∨(c∨d).
+    EXPECT_OK((Derivation{f.And(f.a(), f.Or(f.b(), f.Or(f.c(), f.d()))),
+                          f.Or(f.And(f.a(), f.b()), f.Or(f.c(), f.d())), {step(Rule::Sw)}}));
+    // reject: the right conjunct must be the ∨ (here it is a literal).
+    EXPECT_ERR((Derivation{f.And(f.Or(f.a(), f.b()), f.c()),
+                           f.Or(f.And(f.c(), f.a()), f.b()), {step(Rule::Sw)}}));
 }
 
 void test_mix() {
@@ -272,9 +284,9 @@ void test_chain_ac_tolerant() {
     // Ac on a 3-operand ∨-chain with a duplicate: a∨b∨a  ≡(canon)  a∨(a∨b) → a∨b.
     EXPECT_OK((Derivation{f.Or(f.a(), f.Or(f.b(), f.a())), f.Or(f.a(), f.b()),
                           {step(Rule::Ac)}}));
-    // Sw on a 3-operand ∧-chain: (a ∧ d ∧ (b∨c)) → pick the ∨, A = a∧d.
-    // canon reorders, but Sw finds the ∨-operand; result ≡ ((a∧d)∧b)∨c.
-    EXPECT_OK((Derivation{f.And(f.a(), f.And(f.d(), f.Or(f.b(), f.c()))),
+    // Sw with a compound A: ((a∧d) ∧ (b∨c)) → (a∧d)∧b ∨ c. A=(a∧d) is the top
+    // left conjunct (one subtree); binary Sw keeps it whole.
+    EXPECT_OK((Derivation{f.And(f.And(f.a(), f.d()), f.Or(f.b(), f.c())),
                           f.Or(f.And(f.And(f.a(), f.d()), f.b()), f.c()),
                           {step(Rule::Sw)}}));
     // M on the contraction shape (X∨X with X=a∧b): (a∧b)∨(a∧b) → (a∨a)∧(b∨b).
