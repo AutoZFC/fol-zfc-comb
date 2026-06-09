@@ -329,24 +329,22 @@ util::Result<std::vector<Step>> reconcile_to(FormulaBuilder& fb, FormulaHandle c
     if (entries.empty()) return MAKE_ERROR << "reconcile_to: empty entries";
     if (cur == denote(fb, entries)) return std::vector<Step>{};
 
-    // Boundary-aware path: re-bracket cur to left-assoc in its own spine order,
-    // then permute that order into `entries`. Both treat entries as opaque, so a
-    // ∨-valued entry's boundary survives (unlike equiv_steps' leaf canonicalize).
+    // Re-bracket cur to left-assoc in its own spine order, then permute that
+    // order into `entries`. Both treat entries as OPAQUE (a ∨-valued entry's
+    // boundary survives) and address by HANDLE/position — never by `to_string`.
+    // The emitted steps are therefore STRUCTURAL, hence stable under a later
+    // eigenvar rebind (an ancestor RForall renames fixed→gen). `equiv_steps`'
+    // canon sorts operands by to_string, so its steps would break under that
+    // rebind; we deliberately do NOT fall back to it. If the spine order is not a
+    // permutation of `entries`, cur ≢ denote(entries) by a NON-propositional
+    // difference (a quantifier shift needing DistForall) — the caller's bug to
+    // fix, surfaced here rather than papered over.
     std::vector<FormulaHandle> order;
     spine_order(cur, entries, order);
-    auto ra = reassoc_left_steps(fb, cur, order);
-    if (ra.ok()) {
-        auto ro = reorder_steps(fb, order, entries);
-        if (ro.ok()) {
-            std::vector<Step> steps = std::move(ra).value();
-            auto rov = std::move(ro).value();
-            steps.insert(steps.end(), rov.begin(), rov.end());
-            return steps;
-        }
-    }
-    // Fallback: full ≡ canonicalization (loses ∨-entry boundaries, but correct
-    // when entries are non-∨ or the spine aliases an entry handle).
-    return equiv_steps(fb, cur, denote(fb, entries));
+    TRY_ASSIGN(ra, reassoc_left_steps(fb, cur, order));
+    TRY_ASSIGN(ro, reorder_steps(fb, order, entries));
+    ra.insert(ra.end(), ro.begin(), ro.end());
+    return ra;
 }
 
 util::Result<std::vector<Step>> reorder_steps(FormulaBuilder& fb,
