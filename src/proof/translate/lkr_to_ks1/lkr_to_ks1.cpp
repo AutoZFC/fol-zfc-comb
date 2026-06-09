@@ -274,12 +274,12 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RFora
         for (ks1::Dir dd : s.context) if (dd == ks1::Dir::Down) ++depth;
         if (s.f_param.valid()) {
             int fd = depth + (s.rule == ks1::Rule::Ex ? 1 : 0);   // Ex body is deeper
-            s.f_param = fb.translate_term(s.f_param, Term::fixed(far.eigen),
-                                          Term::generalized(fd));
+            s.f_param = fb.subst_fixed_impl(s.f_param, far.eigen,
+                                            Term::generalized(fd), 0);
         }
         if (s.rule == ks1::Rule::Ex)
-            s.t_param = fb.translate_in_term(s.t_param, Term::fixed(far.eigen),
-                                             Term::generalized(depth));
+            s.t_param = fb.subst_fixed_in_term(s.t_param, far.eigen,
+                                               Term::generalized(depth), 0);
         s.context.insert(s.context.begin(), ks1::Dir::Down);
     }
 
