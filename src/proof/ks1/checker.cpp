@@ -247,31 +247,23 @@ Result<FormulaHandle> apply_eq(FormulaBuilder& fb, EqRule eq, EqDir dir,
         FormulaHandle swapped = swap_gen(fb, body, 0);
         return fb.make_quantified(q, fb.make_quantified(q, swapped));
     };
-    // ∀-over-∨ (op=Or for ∀) / ∃-over-∧ (op=And for ∃), AC-tolerant: the working
-    // formula is canonical, so the binder's body is a flattened op-chain and the
-    // x-free operands may sit anywhere. Forward floats ALL x-free operands out.
+    // ∀-over-∨ (op=Or for ∀) / ∃-over-∧ (op=And for ∃): the paper's BINARY
+    // equation (HSW §II eq (2)) Qx.(A op B) ≡ (Qx.A) op B, x∉B — applied to the
+    // body's top binary node, NOT an AC-tolerant float-all-x-free embellishment.
+    // Keeping it binary keeps the principal A whole (its own x-free subparts stay
+    // under the binder) and emits no fix-up steps.
     auto dist = [&](Op q, Op op) -> Result<FormulaHandle> {
         if (dir == EqDir::Forward) {
-            // Qx.(C₁ op … op Cₙ) → Qx.(those with x) op (those without x, floated)
+            // Qx.(A op B) → (Qx.A) op B, with x (= Gen0) not free in B.
             if (!is_quant(P, q) || !is_op(P.get().as_quantified().body, op))
-                return MAKE_ERROR << "≡ dist→: redex not Qx.(op-chain)";
-            std::vector<FormulaHandle> ops;
-            flatten_chain(P.get().as_quantified().body, op, ops);
-            std::vector<FormulaHandle> hasX, floated;
-            for (FormulaHandle o : ops) {
-                if (gen_occurs_free(o, 0)) hasX.push_back(o);
-                else floated.push_back(fb.shift_formula(o, 1, -1));  // leaves the binder
-            }
-            if (floated.empty())
-                return MAKE_ERROR << "≡ dist→: no x-free operand to float";
-            if (hasX.empty())
-                return MAKE_ERROR << "≡ dist→: every operand is x-free (vacuous binder)";
-            std::vector<FormulaHandle> chain{
-                fb.make_quantified(q, build_chain(fb, op, hasX))};
-            for (FormulaHandle b : floated) chain.push_back(b);
-            return build_chain(fb, op, chain);
+                return MAKE_ERROR << "≡ dist→: redex not Qx.(A op B)";
+            const Compound& bc = P.get().as_quantified().body.get().as_compound();
+            if (gen_occurs_free(bc.right, 0))
+                return MAKE_ERROR << "≡ dist→: x is free in B (cannot float)";
+            FormulaHandle Bup = fb.shift_formula(bc.right, 1, -1);  // B leaves the binder
+            return remake(fb, op, fb.make_quantified(q, bc.left), Bup);
         }
-        // (Qx.A) op B → Qx.(A op B).  (binary; un-distribution is not AC-driven)
+        // (Qx.A) op B → Qx.(A op B).
         if (!is_op(P, op) || !is_quant(P.get().as_compound().left, q))
             return MAKE_ERROR << "≡ dist←: redex not (Qx.A) op B";
         FormulaHandle Ab = P.get().as_compound().left.get().as_quantified().body;

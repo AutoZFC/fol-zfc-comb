@@ -376,18 +376,14 @@ util::ResultStatus apply_tf(Prov& pv, const Step& s) {
             // ∀-over-∨ (q=Forall, op=Or) / ∃-over-∧ (q=Exists, op=And). Forward is
             // AC-tolerant: float every operand of the canonical chain that does
             // not reference the binder (tags are absolute, so no De Bruijn shift).
+            // Binary Qx.(A op B) ≡ (Qx.A) op B, x∉B (HSW eq (2)); binder tags are
+            // absolute so no De Bruijn shift. (Matches checker.cpp's binary dist.)
             auto dist = [&](TNode::K q, TNode::K op) -> util::ResultStatus {
                 if (s.dir == EqDir::Forward) {
                     if (n.k != q || a.nodes[n.child].k != op) return MAKE_ERROR << "read_fonet: ≡ dist→";
-                    size_t bt = n.binder_tag;
-                    std::vector<size_t> ops; flatten_t(a, n.child, op, ops);
-                    std::vector<size_t> hasX, floated;
-                    for (size_t o : ops) (refers_binder(a, o, bt) ? hasX : floated).push_back(o);
-                    if (floated.empty()) return MAKE_ERROR << "read_fonet: ≡ dist→ nothing to float";
-                    if (hasX.empty()) return MAKE_ERROR << "read_fonet: ≡ dist→ vacuous binder";
-                    std::vector<size_t> chain{a.quant(q, build_t(a, op, hasX), bt)};
-                    for (size_t b : floated) chain.push_back(b);
-                    return put(build_t(a, op, chain));
+                    size_t bt = n.binder_tag, A = a.nodes[n.child].l, B = a.nodes[n.child].r;
+                    if (refers_binder(a, B, bt)) return MAKE_ERROR << "read_fonet: ≡ dist→ x free in B";
+                    return put(a.bin(op, a.quant(q, A, bt), B));   // (Qx.A) op B
                 }
                 if (n.k != op || a.nodes[n.l].k != q) return MAKE_ERROR << "read_fonet: ≡ dist←";
                 size_t A = a.nodes[n.l].child, B = n.r, bt = a.nodes[n.l].binder_tag;
