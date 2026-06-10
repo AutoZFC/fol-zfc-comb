@@ -31,6 +31,7 @@
 #include "src/proof/translate/lkr_cut_elim/reduce.h"
 #include "src/proof/ks1/checker.h"
 #include "src/proof/translate/lkr_to_ks1/lkr_to_ks1.h"
+#include "src/proof/translate/lkr_to_comb/lkr_to_comb.h"
 #include "src/proof/translate/nd_internalize/apply.h"
 #include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/proof/translate/theorem_facts.h"
@@ -52,6 +53,7 @@ namespace ie  = logic::proof::translate::iota_elim;
 namespace ntl = logic::proof::translate::nd_to_lkr;
 namespace lce = logic::proof::translate::lkr_cut_elim;
 namespace l2k = logic::proof::translate::lkr_to_ks1;
+namespace l2c = logic::proof::translate::lkr_to_comb;
 namespace k2c = logic::proof::ks1_to_comb;
 
 namespace {
@@ -160,6 +162,26 @@ std::string run_comb_backend(GlobalContext& ctx, FormulaHandle goal_nnf,
     return "comb_ok";
 }
 
+// The SECOND, parallel back-end: the direct Hughes §11.1 LKR→comb fold (no KS1,
+// no decompose). Same cut-free Deriv input, same CombVerifier oracle. Reported
+// alongside the KS1 track so the two can be compared per-theorem on the corpus.
+std::string run_comb_direct_backend(GlobalContext& ctx, FormulaHandle goal_nnf,
+                                    const lce::Deriv& cutfree) {
+    FormulaBuilder fb(ctx);
+    auto cp = l2c::lkr_to_comb(fb, cutfree);
+    if (!cp.ok()) return "direct_l2c_err: " + cp.error().to_string();
+    comb::CombVerifier v;
+    if (auto r = v.verify_well_formed(cp.value()); !r.ok())
+        return "direct_wf_fail: " + r.error().to_string();
+    if (auto r = v.verify_target_is_formula_graph(ctx, goal_nnf, cp.value()); !r.ok())
+        return "direct_target_fail: " + r.error().to_string();
+    if (auto r = v.verify_fonet(cp.value()); !r.ok())
+        return "direct_fonet_fail: " + r.error().to_string();
+    if (auto r = v.verify_skew_bifibration(cp.value()); !r.ok())
+        return "direct_skew_fail: " + r.error().to_string();
+    return "direct_ok";
+}
+
 std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
                          const Program<lkr::Instr>& lkr_prog,
                          std::optional<SentenceHandle> sh_self,
@@ -241,9 +263,10 @@ std::string run_cut_elim(GlobalContext& ctx, FormulaHandle wrapped_goal,
     // K6.4: cut-free ⇒ run the comb back end (lkr_to_ks1 → comb → CombVerifier)
     // before the Deriv is moved into the cache.
     std::string comb = run_comb_backend(ctx, goal_nnf, *cutfree);
+    std::string comb_direct = run_comb_direct_backend(ctx, goal_nnf, *cutfree);
     if (sh_self.has_value())
         cache[sh_self.value()] = std::move(cutfree);
-    return "cutfree | " + comb;
+    return "cutfree | " + comb + " | " + comb_direct;
 }
 
 std::string load_headers(Runtime& rt,

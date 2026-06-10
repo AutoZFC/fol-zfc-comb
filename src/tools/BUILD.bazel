@@ -48,6 +48,7 @@ cc_binary(
         "//src/proof/translate/lkr_cut_elim:deriv",
         "//src/proof/translate/lkr_cut_elim:reduce",
         "//src/proof/translate/lkr_to_ks1",
+        "//src/proof/translate/lkr_to_comb",
         "//src/proof/translate/nd_internalize:apply",
         "//src/proof/translate/nd_to_lkr",
         "//src/runtime",

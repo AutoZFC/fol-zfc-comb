@@ -1,0 +1,19 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# lkr_to_comb: direct cut-free LKR (Deriv tree) → combinatorial proof.
+# The SECOND, parallel back-end track (alongside lkr_to_ks1 → ks1_to_comb).
+# Folds the §11.1 per-rule table over the Deriv tree, building the fonet +
+# skew bifibration as one comb::CombProof. See lkr_to_comb.h / LKR_TO_COMB_DESIGN.md.
+# Phase 1: switch-free propositional fragment (RAx, ROr, RExchange).
+cc_library(
+    name = "lkr_to_comb",
+    srcs = ["lkr_to_comb.cpp"],
+    hdrs = ["lkr_to_comb.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:formula",
+        "//src/proof/comb:comb_proof",
+        "//src/proof/translate/lkr_cut_elim:deriv",
+        "//src/util:error",
+    ],
+)
