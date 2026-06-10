@@ -49,6 +49,28 @@ FormulaHandle denote(FormulaBuilder& fb, const std::vector<FormulaHandle>& g) {
     return acc;
 }
 
+// `env` = the ancestor eigenvariables that bind this node in the final KS1 term,
+// OUTERMOST first.  `localize` rewrites a formula/term read from the LKR sequent
+// (where eigenvars are FIXED vars) into the De Bruijn gen-form it must take at
+// this node's denotation level: env[L] → gen(|env|-1-L) (innermost eigenvar →
+// gen0).  subst_fixed_impl is depth-aware, so an occurrence under m internal
+// binders of `h` correctly becomes gen(idx+m); distinct eigenvars map to distinct
+// gens, so the substitutions never alias.  This is Option A: steps are born in
+// gen-form, so the RForall [Down]-wrap needs NO post-hoc eigenvar rebind — adding
+// an outer binder leaves inner-binder gen distances unchanged.
+FormulaHandle localize(FormulaBuilder& fb, FormulaHandle h,
+                       const std::vector<var_index>& env) {
+    for (std::size_t L = 0; L < env.size(); ++L)
+        h = fb.subst_fixed_impl(h, env[L], Term::generalized(env.size() - 1 - L), 0);
+    return h;
+}
+Term localize(FormulaBuilder& fb, const Term& t, const std::vector<var_index>& env) {
+    Term r = t;
+    for (std::size_t L = 0; L < env.size(); ++L)
+        r = fb.subst_fixed_in_term(r, env[L], Term::generalized(env.size() - 1 - L), 0);
+    return r;
+}
+
 // A formula is a negative literal iff its top connective is ¬ (NNF). Ai's
 // parameter is the POSITIVE atom; Ai emits the pair a∨ā.
 bool is_negative_literal(FormulaHandle h) {
@@ -159,14 +181,17 @@ util::Result<std::vector<FormulaHandle>> group_pair(
     return entries;
 }
 
-util::Result<Tr> tr(FormulaBuilder& fb, const lce::Deriv& d);   // fwd (recursion)
+util::Result<Tr> tr(FormulaBuilder& fb, const lce::Deriv& d,
+                    const std::vector<var_index>& env);          // fwd (recursion)
 
 // ===== the HSW translation table — one macro per LK rule ====================
 
 // ax ⊢ Γ closing on the dual pair {a,b}: Ai introduces α∨ᾱ, every OTHER entry is
 // weakened in (the axiom closes on the pair alone), giving denote([α,ᾱ,…]).
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAx& ax) {
-    FormulaHandle la = d.conclusion[ax.a], lb = d.conclusion[ax.b];
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAx& ax,
+                       const std::vector<var_index>& env) {
+    FormulaHandle la = localize(fb, d.conclusion[ax.a], env);
+    FormulaHandle lb = localize(fb, d.conclusion[ax.b], env);
     FormulaHandle pos = is_negative_literal(la) ? lb : la;
     FormulaHandle neg = is_negative_literal(la) ? la : lb;
     Seq s(fb);
@@ -175,18 +200,20 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAx& 
     std::vector<FormulaHandle> entries{pos, neg};
     for (std::size_t i = 0; i < d.conclusion.size(); ++i) {
         if (i == ax.a || i == ax.b) continue;
-        ks1::Step w = rule_step(ks1::Rule::W); w.f_param = d.conclusion[i];
+        FormulaHandle e = localize(fb, d.conclusion[i], env);
+        ks1::Step w = rule_step(ks1::Rule::W); w.f_param = e;
         TRY(s.emit(w));                                  // F → F∨entry
-        entries.push_back(d.conclusion[i]);
+        entries.push_back(e);
     }
     return Tr{std::move(s.steps), std::move(entries)};
 }
 
 // ∨R: ⊢ Γ,A,B ⊢ Γ,A∨B. Translate the child, then group its A and B into A∨B.
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv&, const lce::ROr& orr) {
-    FormulaHandle A = orr.child->conclusion[orr.principal];
-    FormulaHandle B = orr.child->conclusion.back();
-    TRY_ASSIGN(child, tr(fb, *orr.child));
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv&, const lce::ROr& orr,
+                       const std::vector<var_index>& env) {
+    FormulaHandle A = localize(fb, orr.child->conclusion[orr.principal], env);
+    FormulaHandle B = localize(fb, orr.child->conclusion.back(), env);
+    TRY_ASSIGN(child, tr(fb, *orr.child, env));
     Seq s(fb);
     TRY(s.emit(std::move(child.steps)));                 // cur = denote(child)
     TRY_ASSIGN(entries, group_pair(s, std::move(child.entries), A, B));
@@ -194,23 +221,25 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv&, const lce::ROr& or
 }
 
 // Exchange is free under ≡ (entries are order-free) — pass the child through.
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv&, const lce::RExchange& ex) {
-    return tr(fb, *ex.child);
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv&, const lce::RExchange& ex,
+                       const std::vector<var_index>& env) {
+    return tr(fb, *ex.child, env);
 }
 
 // ∧R: ⊢ Γ_L,φ and ⊢ Γ_R,ψ ⊢ Γ_L,Γ_R,φ∧ψ. Build (Γ_L∨φ)∧(Γ_R∨ψ) via Tu+splices,
 // then the BINARY switch sequence to ((φ∧ψ)∨Γ_L)∨Γ_R, then reconcile. Each Sw is
 // binary (its ∨ is the right conjunct, B/C opaque) — see ks1::Step `Sw`.
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAnd& andr) {
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAnd& andr,
+                       const std::vector<var_index>& env) {
     const lce::Deriv* L = andr.left.get();
     const lce::Deriv* R = andr.right.get();
     const bool emptyL = L->conclusion.size() == 1;       // Γ_L = ∅ (just φ)
     const bool emptyR = R->conclusion.size() == 1;       // Γ_R = ∅ (just ψ)
-    FormulaHandle phi = L->conclusion.back();
-    FormulaHandle psi = R->conclusion.back();
+    FormulaHandle phi = localize(fb, L->conclusion.back(), env);
+    FormulaHandle psi = localize(fb, R->conclusion.back(), env);
 
-    TRY_ASSIGN(LR, tr(fb, *L));   TRY_ASSIGN(LL, move_to_last(fb, std::move(LR), phi));
-    TRY_ASSIGN(RR, tr(fb, *R));   TRY_ASSIGN(RL, move_to_last(fb, std::move(RR), psi));
+    TRY_ASSIGN(LR, tr(fb, *L, env));  TRY_ASSIGN(LL, move_to_last(fb, std::move(LR), phi));
+    TRY_ASSIGN(RR, tr(fb, *R, env));  TRY_ASSIGN(RL, move_to_last(fb, std::move(RR), psi));
 
     Seq s(fb);
     TRY(s.emit(rule_step(ks1::Rule::Tu)));               // ⊤ → ⊤∧⊤
@@ -243,72 +272,68 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RAnd&
     return Tr{std::move(s.steps), std::move(entries)};
 }
 
-// ∀R: ⊢ Γ,φ[eigen] ⊢ Γ,∀x.φ. ForallUnit gives ∀x.t; the child runs under [Down]
-// with the eigenvariable rebound to the bound var, building ∀x.((Γ)∨φ); a
-// DistForall then pulls (Γ) back out (x∉Γ, eigenvar fresh) and we reconcile.
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RForall& far) {
+// ∀R: ⊢ Γ,φ[eigen] ⊢ Γ,∀x.φ. ForallUnit gives ∀x.t; the child is translated
+// already under the binder (env ++ [eigen], so its steps are born with the
+// eigenvar as gen0 — no post-hoc rebind) and spliced under [Down], building
+// ∀x.((Γ)∨φ); a DistForall then pulls (Γ) back out (x∉Γ — the eigenvar
+// condition), which decrements Γ's free gens, landing them in the PARENT env.
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RForall& far,
+                       const std::vector<var_index>& env) {
     const std::size_t pr = far.principal;
-    FormulaHandle quant = d.conclusion[pr];              // ∀x.φ
+    FormulaHandle quant = localize(fb, d.conclusion[pr], env);   // ∀x.φ (parent env)
     const Formula& qf = quant.get();
     if (!(qf.is_quantified() && qf.as_quantified().op == Op::Forall))
         return MAKE_ERROR << "lkr_to_ks1: RForall principal is not a ∀";
     const lce::Deriv* child = far.child.get();
 
-    std::vector<FormulaHandle> delta;                    // Γ (child entries ≠ pr)
+    std::vector<var_index> cenv = env;                   // child env = env ++ [eigen]
+    cenv.push_back(far.eigen);
+
+    std::vector<FormulaHandle> delta;                    // Γ in CHILD env (for iso)
     for (std::size_t i = 0; i < child->conclusion.size(); ++i)
-        if (i != pr) delta.push_back(child->conclusion[i]);
+        if (i != pr) delta.push_back(localize(fb, child->conclusion[i], cenv));
     const bool emptyG = delta.empty();
 
-    TRY_ASSIGN(childRes, tr(fb, *child));
+    TRY_ASSIGN(childRes, tr(fb, *child, cenv));
     std::vector<ks1::Step> body = std::move(childRes.steps);
     if (!emptyG) {                                       // reshape to (Γ)∨φ
         std::vector<FormulaHandle> iso = delta;
-        iso.push_back(child->conclusion[pr]);
+        iso.push_back(localize(fb, child->conclusion[pr], cenv));
         TRY_ASSIGN(rs, reconcile_to(fb, denote(fb, childRes.entries), iso));
         body.insert(body.end(), rs.begin(), rs.end());
-    }
-    // Wrap every step so far under ∀x: prefix [Down] and rebind the eigenvar to
-    // the binder's De Bruijn level (deeper by the step's own ∀/∃-nesting).
-    for (ks1::Step& s : body) {
-        int depth = 0;
-        for (ks1::Dir dd : s.context) if (dd == ks1::Dir::Down) ++depth;
-        if (s.f_param.valid()) {
-            int fd = depth + (s.rule == ks1::Rule::Ex ? 1 : 0);   // Ex body is deeper
-            s.f_param = fb.subst_fixed_impl(s.f_param, far.eigen,
-                                            Term::generalized(fd), 0);
-        }
-        if (s.rule == ks1::Rule::Ex)
-            s.t_param = fb.subst_fixed_in_term(s.t_param, far.eigen,
-                                               Term::generalized(depth), 0);
-        s.context.insert(s.context.begin(), ks1::Dir::Down);
     }
 
     Seq s(fb);
     TRY(s.emit(rule_step(ks1::Rule::ForallUnit)));       // ⊤ → ∀x.t
-    TRY(s.emit(std::move(body)));                        // → ∀x.((Γ)∨φ)  (or ∀x.φ)
+    TRY(s.splice(std::move(body), {ks1::Dir::Down}));    // → ∀x.((Γ)∨φ)  (or ∀x.φ)
     if (!emptyG) {
         TRY(s.emit(eqv_step(ks1::EqRule::CommOr, ks1::Path{ks1::Dir::Down})));  // → ∀x.(φ∨(Γ))
         ks1::Step dist = rule_step(ks1::Rule::Eqv);
         dist.eq = ks1::EqRule::DistForall; dist.dir = ks1::EqDir::Forward;
         TRY(s.emit(dist));                               // → (∀x.φ)∨(Γ)
     }
+    // Output entries are in the PARENT env: quant is read at parent level; each Γ
+    // entry's free gens were decremented by the DistForall pull-out (cenv→env).
     std::vector<FormulaHandle> entries{quant};
-    entries.insert(entries.end(), delta.begin(), delta.end());
+    for (std::size_t i = 0; i < child->conclusion.size(); ++i)
+        if (i != pr) entries.push_back(localize(fb, child->conclusion[i], env));
     TRY(s.reconcile(entries));
     return Tr{std::move(s.steps), std::move(entries)};
 }
 
 // ∃R: ⊢ Γ,φ[x:=t] ⊢ Γ,∃x.φ. Apply Ex at the instance entry φ[t] (matched mod ≡).
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RExists& exr) {
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RExists& exr,
+                       const std::vector<var_index>& env) {
     const std::size_t pr = exr.principal;
-    FormulaHandle quant = d.conclusion[pr];              // ∃x.φ
+    FormulaHandle quant = localize(fb, d.conclusion[pr], env);    // ∃x.φ
     const Formula& qf = quant.get();
     if (!(qf.is_quantified() && qf.as_quantified().op == Op::Exists))
         return MAKE_ERROR << "lkr_to_ks1: RExists principal is not an ∃";
     FormulaHandle qbody = qf.as_quantified().body;       // φ (gen0 = x)
-    FormulaHandle inst = fb.instantiate_gen(qbody, exr.witness);  // φ[t]
+    Term witness = localize(fb, exr.witness, env);
+    FormulaHandle inst = fb.instantiate_gen(qbody, witness);      // φ[t]
 
-    TRY_ASSIGN(childRes, tr(fb, *exr.child));
+    TRY_ASSIGN(childRes, tr(fb, *exr.child, env));
     Seq s(fb);
     TRY(s.emit(std::move(childRes.steps)));
     std::vector<FormulaHandle> entries = std::move(childRes.entries);
@@ -316,16 +341,17 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RExis
     if (idx == kNone)
         return MAKE_ERROR << "lkr_to_ks1: RExists child lacks the instance φ[t]";
     ks1::Step ex = rule_step(ks1::Rule::Ex, path_to_entry(idx, entries.size()));
-    ex.f_param = qbody; ex.t_param = exr.witness;
+    ex.f_param = qbody; ex.t_param = witness;
     TRY(s.emit(ex));                                     // φ[t] → ∃x.φ
     entries[idx] = quant;
     return Tr{std::move(s.steps), std::move(entries)};
 }
 
 // W: ⊢ Γ ⊢ Γ,φ. Prove the core, then weaken φ in as a fresh entry (order free).
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RWeaken& w) {
-    FormulaHandle weakened = d.conclusion[w.idx];
-    TRY_ASSIGN(childRes, tr(fb, *w.child));
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RWeaken& w,
+                       const std::vector<var_index>& env) {
+    FormulaHandle weakened = localize(fb, d.conclusion[w.idx], env);
+    TRY_ASSIGN(childRes, tr(fb, *w.child, env));
     Seq s(fb);
     TRY(s.emit(std::move(childRes.steps)));
     ks1::Step ws = rule_step(ks1::Rule::W); ws.f_param = weakened;
@@ -337,9 +363,10 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RWeak
 
 // Contraction: ⊢ Γ,φ,φ ⊢ Γ,φ. Prove the doubled core, group the two φ copies as
 // φ∨φ, then contract (medials + Ac) on that subtree.
-util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RDuplicate& dup) {
-    FormulaHandle X = d.conclusion[dup.src];
-    TRY_ASSIGN(childRes, tr(fb, *dup.child));
+util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RDuplicate& dup,
+                       const std::vector<var_index>& env) {
+    FormulaHandle X = localize(fb, d.conclusion[dup.src], env);
+    TRY_ASSIGN(childRes, tr(fb, *dup.child, env));
     Seq s(fb);
     TRY(s.emit(std::move(childRes.steps)));
 
@@ -362,16 +389,20 @@ util::Result<Tr> macro(FormulaBuilder& fb, const lce::Deriv& d, const lce::RDupl
 
 // --- rules that a CUT-FREE goal derivation never contains ------------------
 // std::visit forces an arm for every variant alternative; these reject cleanly.
-util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::ROne&) {
+util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::ROne&,
+                       const std::vector<var_index>&) {
     return MAKE_ERROR << "lkr_to_ks1: ROne (⊤ literal) unsupported";
 }
-util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RLemma&) {
+util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RLemma&,
+                       const std::vector<var_index>&) {
     return MAKE_ERROR << "lkr_to_ks1: RLemma must be internalized before translation";
 }
-util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RContract&) {
+util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RContract&,
+                       const std::vector<var_index>&) {
     return MAKE_ERROR << "lkr_to_ks1: RContract should be RDuplicate after build()";
 }
-util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RCut&) {
+util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RCut&,
+                       const std::vector<var_index>&) {
     return MAKE_ERROR << "lkr_to_ks1: input is not cut-free (RCut present)";
 }
 
@@ -379,8 +410,9 @@ util::Result<Tr> macro(FormulaBuilder&, const lce::Deriv&, const lce::RCut&) {
 struct Budget { long long max = 0; };
 thread_local Budget g_budget;
 
-util::Result<Tr> tr(FormulaBuilder& fb, const lce::Deriv& d) {
-    auto r = std::visit([&](const auto& rule) { return macro(fb, d, rule); }, d.rule);
+util::Result<Tr> tr(FormulaBuilder& fb, const lce::Deriv& d,
+                    const std::vector<var_index>& env) {
+    auto r = std::visit([&](const auto& rule) { return macro(fb, d, rule, env); }, d.rule);
     if (r.ok() && g_budget.max > 0 &&
         static_cast<long long>(r.value().steps.size()) > g_budget.max)
         return MAKE_ERROR << "lkr_to_ks1: step budget exceeded ("
@@ -400,7 +432,7 @@ util::Result<ks1::Derivation> lkr_to_ks1(FormulaBuilder& fb,
 
     g_budget = Budget{};
     if (const char* b = std::getenv("LKR_TO_KS1_MAX_STEPS")) g_budget.max = std::atoll(b);
-    TRY_ASSIGN(result, tr(fb, cutfree));
+    TRY_ASSIGN(result, tr(fb, cutfree, {}));
     if (std::getenv("LKR_TO_KS1_STATS")) {
         long long eqv = 0;
         for (const auto& s : result.steps) if (s.rule == ks1::Rule::Eqv) ++eqv;
