@@ -137,6 +137,40 @@ void test_constructive_decompose() {
     EXPECT(split(f.fb, d).ok());      // split decomposes internally and succeeds
 }
 
+// A W whose weakened disjunct sits INSIDE one operand of a later Sw's split-∨
+// (not the ∨ node itself) decomposes by the generic context-remap: the Sw's ∨
+// survives without B, so moving Sw earlier is a clean transposition (sentinel
+// relocates the W into the post-Sw operand). This is the EASY threading case —
+// contrast the corpus, where a W builds the ∨-CHAIN a Sw splits AND intervening
+// Eqv reshapes depend on the W, which pairwise swaps cannot separate (that needs
+// the splitting construction, not permutation — see DECOMPOSE_DESIGN.md).
+//   (p0∨p̄0)∧(p1∨p̄1) —W(p2)@[R,L]→ (p0∨p̄0)∧((p1∨p2)∨p̄1)
+//                    —Sw@{}→ ((p0∨p̄0)∧(p1∨p2))∨p̄1
+void test_weakening_inside_switch_operand() {
+    Fixture f;
+    Term t0 = Term::fixed(0), t1 = Term::fixed(1), t2 = Term::fixed(2);
+    FormulaHandle A = f.Or(f.p(t0), f.np(t0));     // p0∨p̄0
+    Step tu  = S(Rule::Tu);                                          // ⊤∧⊤
+    Step ai0 = S(Rule::Ai, {Dir::Left});  ai0.f_param = f.p(t0);     // → A∧⊤
+    Step ai1 = S(Rule::Ai, {Dir::Right}); ai1.f_param = f.p(t1);     // → A∧(p1∨p̄1)
+    Step w   = S(Rule::W, {Dir::Right, Dir::Left}); w.f_param = f.p(t2);  // p1→p1∨p2
+    Step sw  = S(Rule::Sw);                                          // switch
+    FormulaHandle bottom =
+        f.Or(f.fb.make_and(A, f.Or(f.p(t1), f.p(t2))), f.np(t1));   // (A∧(p1∨p2))∨p̄1
+    Derivation d{f.top(), bottom, {tu, ai0, ai1, w, sw}};
+
+    EXPECT(check(f.fb, d).ok());          // valid…
+    EXPECT(!is_decomposed(d));            // …W before Sw ⇒ interspersed
+
+    auto dec = decompose(f.fb, d);
+    EXPECT(dec.ok());
+    if (dec.ok()) {
+        EXPECT(is_decomposed(dec.value()));     // sink moved W past Sw
+        EXPECT(check(f.fb, dec.value()).ok());  // same theorem, still valid
+    }
+    EXPECT(split(f.fb, d).ok());
+}
+
 }  // namespace
 
 int main() {
@@ -146,6 +180,7 @@ int main() {
     test_not_decomposed_out_of_order();
     test_split_halves_compose();
     test_constructive_decompose();
+    test_weakening_inside_switch_operand();
     std::cerr << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
 }

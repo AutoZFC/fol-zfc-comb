@@ -84,6 +84,77 @@ No pair is *fundamentally* non-commuting; the apparent one is a rewrite, not a
 wall. This does **not** change the comb proof (same fonet/fibration) — it is
 bridge-enabling, orthogonal to cut-elim/contraction minimality.
 
+## CORPUS REVISION (2026-06-09): pairwise swap is INSUFFICIENT
+
+The verdict above is **wrong for the translation's actual output**. After the
+Option-A front-end fix, all corpus cut-free theorems produce VALID KS1 and reach
+`decompose`, where they get stuck. The constructive bubble (adjacent
+transposition + the self-verifying `try_swap`) provably CANNOT decompose them,
+for a reason the verdict missed:
+
+**Linear steps thread RESOURCE-built material via Eqv reshapes.** Concretely in
+`eq_refl`: a chain of `W`s builds the context `Γ_R` deep in the right conjunct;
+~15 `Eqv` steps then reshape `Γ_R∨ψ → ψ∨Γ_R` (the reconcile/CommOr bureaucracy);
+finally a `Sw` at the shallow `∧` splits `ψ∨Γ_R` (`B=ψ`, `C=Γ_R`). So:
+
+  `Sw` (linear) ──depends-on──▶ `Eqv` reshapes ──depend-on──▶ `W`s (resource).
+
+The `Sw` is BELOW the Eqvs; the `W`s are ABOVE them. To decompose we must move the
+`W`s below the `Sw`. But each reshaping `Eqv` genuinely consumes its `W`'s output
+(`try_swap` correctly fails `y-no-match-before-x`), so the `W` is anchored above
+its Eqvs and can never reach — let alone pass — the `Sw` by transposition.
+
+This is NOT the "resource inside weakened material" obstruction (that's
+resource×resource, intra-Φ2, irrelevant to the boundary). It is a **linear step
+transitively consuming resource output** — which no permutation can fix, because
+permutation preserves each step's redex-dependency edges.
+
+The boundary blockers observed (ordered_pair, all 4 cut-free theorems):
+`W before Sw`, `M before Sw`, `M before Ex` — every one is a linear step whose
+redex (directly or via Eqv) depends on resource-built structure. (The many
+`Ac before M`, `Ac before MExists`, `W before M` "stuck" reports are intra-Φ2 and
+do NOT violate `is_decomposed`.)
+
+### What's actually required: the splitting construction (not permutation)
+
+Decomposed form needs the **weakening-free linear skeleton** `A'` and the deferred
+resource phase:
+  - Φ1 proves `A'` = `d.bottom` with every weakened disjunct (and contracted
+    duplicate) EXCISED — the bare axiom/switch skeleton over the principal
+    formulas only.
+  - Φ2 weakens those disjuncts back in (top-level `W`) and re-contracts, reaching
+    `d.bottom`.
+
+A `Sw` that only threads weakened material has NO counterpart in the skeleton: in
+`A'` the context `Γ_R` is absent, so `ψ∨Γ_R` collapses to `ψ` and the switch
+DISAPPEARS — its effect is replaced by a top-level weakening of `Γ_R` after the
+`∧` is built. This is a step-count-CHANGING rewrite (delete the switch + its
+threading Eqvs, add a top-level `W`), which the fixed-length pairwise-swap bubble
+cannot express.
+
+**Implementation direction (next):** replace/augment the bubble with an excision
+pass. Candidate algorithm: for each resource disjunct `B` introduced by a `W`,
+remove `B` from the goal-side and replay the whole derivation on the `B`-free
+formulas (linear steps that merely threaded `B` now act on the smaller structure;
+the threading `Sw`/Eqvs that become vacuous are dropped), yielding Φ1 over `A'`;
+collect the removed `B`s as the Φ2 weakening list. Soundness oracle unchanged:
+`ks1::check` on the rebuilt Φ1;Φ2 + full `CombVerifier`. This is the genuine
+content of HSW Thm 17 splitting for our rule set; the "permutation + absorption"
+verdict only covers the resource×resource tail.
+
+### Landed this session (2026-06-09, sound but insufficient alone)
+
+- `try_swap` Ex branch only engages on genuine binder-crossing
+  (`is_prefix(y.ctx, x.ctx)`); disjoint-`x` Ex swaps fall through to the generic
+  sentinel path, which handles the now-`gen` witnesses (post-Option-A) instead of
+  bailing `Ex-nonfixed-witness`.
+- `should_precede` also pushes a flexible `Eqv` before a resource-only step, so an
+  Eqv a later linear step depends on does not anchor it behind the boundary
+  (self-verified; an Eqv that truly consumes the resource simply stays).
+- These cut the spurious no-swap failures and are necessary for the construction
+  above, but do NOT by themselves decompose the corpus (the splitting rewrite is
+  the missing piece).
+
 ## Implementation caveats (for step (b))
 
 - **de Bruijn shifts** when transposing across `Ex`/`ForallUnit`/`DistForall`

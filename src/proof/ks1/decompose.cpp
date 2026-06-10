@@ -160,12 +160,15 @@ std::optional<std::pair<Step, Step>> try_swap(FormulaBuilder& fb, FormulaHandle 
     auto end = replay(fb, Fx, {x, y});
     if (end.is_error()) SWAP_BAIL("end-replay-error");
 
-    // Binder-crossing: y = Ex abstracts an instance φ[t] → ∃x.φ. abstract_var
-    // only RENAMES the fixed witness to Gen(0) (no tree restructuring), so the
-    // context remap is exact and analytic. y′ re-abstracts the PRE-x instance;
-    // x′, if it lived inside the instance, moves under the new [Down] with its
-    // params abstracted by the same witness (the deferred K6.2b-style rebind).
-    if (y.rule == Rule::Ex) {
+    // Binder-crossing: y = Ex abstracts an instance φ[t] → ∃x.φ, and x lived
+    // STRICTLY INSIDE that instance. abstract_var only RENAMES the fixed witness
+    // to Gen(0) (no tree restructuring), so the context remap is exact and
+    // analytic. y′ re-abstracts the PRE-x instance; x′ moves under the new [Down]
+    // with its params abstracted by the same witness. When x is DISJOINT from the
+    // instance (x.context not under y.context) the binder is not crossed — the
+    // generic sentinel path below handles it (and any witness shape), so we only
+    // take this branch for the genuine crossing.
+    if (y.rule == Rule::Ex && is_prefix(y.context, x.context)) {
         if (!y.t_param.is_fixed()) SWAP_BAIL("Ex-nonfixed-witness");
         var_index w = y.t_param.as_variable();
         FormulaHandle inst = nav_at(Fx, y.context);
@@ -173,13 +176,11 @@ std::optional<std::pair<Step, Step>> try_swap(FormulaBuilder& fb, FormulaHandle 
         Step yp = y;
         yp.f_param = fb.abstract_var(inst, w);                // body of the pre-x ∃
         Step xp = x;
-        if (is_prefix(y.context, x.context)) {               // x is inside the instance
-            Path c(y.context.begin(), y.context.end());
-            c.push_back(Dir::Down);
-            c.insert(c.end(), x.context.begin() + y.context.size(), x.context.end());
-            xp.context = std::move(c);
-            if (xp.f_param.valid()) xp.f_param = fb.abstract_var(xp.f_param, w);
-        }   // else disjoint / x above the ∃ ⇒ x′ context unchanged.
+        Path c(y.context.begin(), y.context.end());
+        c.push_back(Dir::Down);
+        c.insert(c.end(), x.context.begin() + y.context.size(), x.context.end());
+        xp.context = std::move(c);
+        if (xp.f_param.valid()) xp.f_param = fb.abstract_var(xp.f_param, w);
         auto chk = replay(fb, Fx, {yp, xp});
         if (chk.is_error()) SWAP_BAIL("Ex-verify-replay-error");
         if (chk.value() != end.value()) SWAP_BAIL("Ex-verify-mismatch");
@@ -202,14 +203,22 @@ std::optional<std::pair<Step, Step>> try_swap(FormulaBuilder& fb, FormulaHandle 
 }
 
 // Should the later step b move before the earlier step a? The bridge needs only
-// the linear/resource BOUNDARY, so move a linear (non-≡ MLS1^X) step b before a
-// resource (non-≡) step a — and let it hop a flexible ≡ that would otherwise
-// block the boundary fix.
+// the linear/resource BOUNDARY: every linear (non-≡ MLS1^X) step must precede
+// every resource-only step. We bubble two kinds of pair:
+//   (1) a linear b after a resource/≡ a → move b earlier (the boundary fix), and
+//       let it hop a flexible ≡ that would otherwise block it;
+//   (2) a flexible ≡ b after a resource-only a → move b earlier too. A later
+//       linear step often DEPENDS on an ≡ reshape (e.g. Sw needs a CommOr); if
+//       that ≡ is stuck behind a resource step, it anchors the linear step there
+//       too. ≡ is phase-flexible, so landing it in Φ1 is always legal; try_swap
+//       self-verifies, so an ≡ that genuinely consumes the resource's output
+//       simply fails to move and stays in Φ2 (still decomposed).
 bool should_precede(const Step& b, const Step& a) {
-    bool b_linear = b.rule != Rule::Eqv && is_mls1x(b.rule);
-    if (!b_linear) return false;
+    bool a_resource_only = a.rule != Rule::Eqv && is_resource_only(a.rule);
+    if (b.rule == Rule::Eqv) return a_resource_only;                  // (2)
+    if (!is_mls1x(b.rule)) return false;                              // b not linear
     bool a_resource = a.rule != Rule::Eqv && is_resource(a.rule);
-    return a_resource || a.rule == Rule::Eqv;
+    return a_resource || a.rule == Rule::Eqv;                         // (1)
 }
 
 }  // namespace
@@ -262,6 +271,21 @@ Result<Derivation> decompose(FormulaBuilder& fb, const Derivation& d) {
     if (dbg)
         std::fprintf(stderr, "[decompose] n=%zu passes=%zu swaps=%zu replay_ok=%d decomposed=%d\n",
                      d.steps.size(), npass, nswap, replay_ok ? 1 : 0, is_decomposed(out) ? 1 : 0);
+    if (std::getenv("KS1_DECOMPOSE_DUMP") && !is_decomposed(out)) {
+        auto nm = [](Rule r) { return rule_name(r); };
+        auto ctxs = [](const Path& p) {
+            std::string s = "[";
+            for (Dir d : p) s += (d == Dir::Left ? "L" : d == Dir::Right ? "R" : "D");
+            return s + "]";
+        };
+        for (std::size_t i = 0; i < out.steps.size(); ++i) {
+            const Step& s = out.steps[i];
+            const char* ph = s.rule == Rule::Eqv ? "eqv"
+                           : is_resource_only(s.rule) ? "RES" : "lin";
+            std::fprintf(stderr, "[dump] %3zu %-10s %-3s %s\n", i, nm(s.rule), ph,
+                         ctxs(s.context).c_str());
+        }
+    }
     if (std::getenv("KS1_DECOMPOSE_DEBUG") && !is_decomposed(out)) {
         auto name = [](Rule r) -> const char* {
             switch (r) {
