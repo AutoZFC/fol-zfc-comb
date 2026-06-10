@@ -462,6 +462,13 @@ util::Result<comb::CombProof> lkr_to_comb(FormulaBuilder& fb, const lce::Deriv& 
     // Gated diagnostic: list each source binder vertex, its target var/polarity,
     // and whether it carries a dualizer entry. Surfaced the ROr/RWeaken record-drop
     // bugs (a source ∃-binder with no dualizer entry ⇒ a rule dropped its record).
+    if (std::getenv("LKR_TO_COMB_SIZE"))
+        std::cerr << "[l2c size] fonet_verts=" << cp.source.num_vertex
+                  << " links=" << cp.source.links.size()
+                  << " cograph_edges=" << cp.source.cograph_edges.size()
+                  << " binding_edges=" << cp.source.binding_edges.size()
+                  << " dualizer=" << cp.source.dualizer.size()
+                  << " | target_verts=" << cp.target.labels.size() << "\n";
     if (std::getenv("LKR_TO_COMB_DUMP")) {
         std::cerr << "[l2c dump] verts=" << cp.source.num_vertex
                   << " forall_binders=" << root.forall_binders.size()
