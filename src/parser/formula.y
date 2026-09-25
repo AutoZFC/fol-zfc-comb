@@ -57,6 +57,7 @@ void yyerror(YYLTYPE* loc, yyscan_t scanner, ParseContext* ctx, const char* msg)
 %type <node> schema_binding schema_var_decl
 %type <node_list> term_list statement_list proof_step_list id_list unproved_deps
 %type <node_list> schema_binding_list schema_var_list lambda_params
+%type <str> qualified_name
 
 /* Precedence: lowest to highest */
 %left IFF
@@ -91,15 +92,15 @@ statement_list
     ;
 
 statement
-    : AXIOM IDENTIFIER COLON formula {
+    : AXIOM qualified_name COLON formula {
         $$ = ASTNode::make_statement(ASTNode::AxiomStmt, *$2, $4);
         delete $2;
     }
-    | DEF LPAREN IDENTIFIER RPAREN AXIOM IDENTIFIER COLON formula {
+    | DEF LPAREN qualified_name RPAREN AXIOM qualified_name COLON formula {
         $$ = ASTNode::make_def_statement(*$3, *$6, $8);
         delete $3; delete $6;
     }
-    | CLAIM IDENTIFIER COLON formula {
+    | CLAIM qualified_name COLON formula {
         $$ = ASTNode::make_statement(ASTNode::ClaimStmt, *$2, $4);
         delete $2;
     }
@@ -171,16 +172,24 @@ atom
     | predicate { $$ = $1; }
     ;
 
+/* A claim or predicate name may be qualified (ZF_Base.mem, Univ.rank_rls.4); a variable
+   never is, which is what keeps `forall x.P(x)` unambiguous. */
+qualified_name
+    : IDENTIFIER { $$ = $1; }
+    | qualified_name DOT IDENTIFIER { *$1 += "." + *$3; delete $3; $$ = $1; }
+    | qualified_name DOT NUMBER { *$1 += "." + *$3; delete $3; $$ = $1; }
+    ;
+
 predicate
-    : IDENTIFIER LPAREN term_list RPAREN {
+    : qualified_name LPAREN term_list RPAREN {
         $$ = new ASTNode(ASTNode::Predicate, *$1, $3);
         delete $1;
     }
-    | IDENTIFIER LPAREN RPAREN {
+    | qualified_name LPAREN RPAREN {
         $$ = new ASTNode(ASTNode::Predicate, *$1, new std::vector<ASTNode*>());
         delete $1;
     }
-    | IDENTIFIER {
+    | qualified_name {
         $$ = new ASTNode(ASTNode::Predicate, *$1, new std::vector<ASTNode*>());
         delete $1;
     }
@@ -211,11 +220,11 @@ term
 
 /* Proof blocks */
 proof_block
-    : PROOF IDENTIFIER COLON proof_step_list {
+    : PROOF qualified_name COLON proof_step_list {
         $$ = ASTNode::make_proof_block(*$2, $4);
         delete $2;
     }
-    | PROOF IDENTIFIER COLON UNPROVED unproved_deps {
+    | PROOF qualified_name COLON UNPROVED unproved_deps {
         $$ = ASTNode::make_proof_block(*$2, $5);
         $$->rule_name = "UNPROVED";
         delete $2;
@@ -224,7 +233,7 @@ proof_block
 
 unproved_deps
     : /* empty */ { $$ = new std::vector<ASTNode*>(); }
-    | unproved_deps USE IDENTIFIER {
+    | unproved_deps USE qualified_name {
         $$ = $1;
         $$->push_back(ASTNode::make_proof_step(ASTNode::ProofStepUse, "", *$3, nullptr, nullptr));
         delete $3;
@@ -255,7 +264,7 @@ proof_step
         $$ = ASTNode::make_proof_step(ASTNode::ProofStepLet, *$1, "", $4, nullptr);
         delete $1;
     }
-    | IDENTIFIER EQUALS USE IDENTIFIER {
+    | IDENTIFIER EQUALS USE qualified_name {
         $$ = ASTNode::make_proof_step(ASTNode::ProofStepUse, *$1, *$4, nullptr, nullptr);
         delete $1; delete $4;
     }

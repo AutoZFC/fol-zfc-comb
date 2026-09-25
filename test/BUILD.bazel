@@ -441,3 +441,12 @@ test_suite(
         ":runtime_test",
     ],
 )
+
+cc_test(
+    name = "qualified_names_test",
+    srcs = ["qualified_names_test.cpp"],
+    deps = [
+        "//src/runtime",
+        "//src/parser",
+    ],
+)

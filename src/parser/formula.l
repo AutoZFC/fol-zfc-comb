@@ -102,7 +102,7 @@ static int col = 1;
     return NUMBER;
 }
 
-[a-zA-Z_][a-zA-Z0-9_]*  {
+[a-zA-Z_][a-zA-Z0-9_]*'*  {
     yylval->str = new std::string(yytext);
     return IDENTIFIER;
 }
