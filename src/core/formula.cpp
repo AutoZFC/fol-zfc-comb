@@ -998,6 +998,12 @@ SchemaHandle GlobalContext::add_schema(const std::string& name, SchemaDefinition
     return schemas_.register_item(std::move(def));
 }
 
+std::vector<std::string> GlobalContext::schema_names() const {
+    std::vector<std::string> names;
+    schemas_.for_each([&](size_t /*id*/, const SchemaDefinition& def) { names.push_back(def.name); });
+    return names;
+}
+
 }  // namespace logic
 
 

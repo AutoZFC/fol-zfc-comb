@@ -41,11 +41,12 @@ util::ResultStatus ProofRunner::verify(const Proof& proof) {
 
     const std::string claim_name = claim_name_of(proof);
 
-    // Schema axiomatic mark: if claim_name names a schema, that schema is
-    // taken as proven (its body is an axiom). This fires unconditionally,
-    // matching pre-IR runtime semantics.
-    if (ctx_.find_schema(claim_name).has_value()) {
-        ctx_.mark_schema_proven(claim_name);
+    // A schema is marked proven only after its proof checks (below). Marking it
+    // first let a failed proof, or one citing the schema itself, leave it proven.
+    const bool names_schema = ctx_.find_schema(claim_name).has_value();
+    if (names_schema && (ctx_.find_claim(claim_name) || ctx_.find_known(claim_name))) {
+        return MAKE_ERROR << "verify: '" << claim_name
+                          << "' names both a schema and a claim or axiom";
     }
 
     // Resolve the goal formula. Three cases, in priority order:
@@ -87,12 +88,12 @@ util::ResultStatus ProofRunner::verify(const Proof& proof) {
                           << status.error().to_string();
     }
 
-    // Register on success. Schema proofs were already marked above;
-    // claim/known proofs add the theorem now, against the dispatcher-
-    // resolved SentenceHandle. This is the only theorem-registration
-    // site in the proof flow.
+    // Register on success, against the dispatcher-resolved goal. This is the
+    // only theorem- and schema-registration site in the proof flow.
     if (goal_sentence.valid()) {
         ctx_.add_theorem(claim_name, goal_sentence);
+    } else if (names_schema) {
+        ctx_.mark_schema_proven(claim_name);
     }
 
     last_used_ = v->last_used_names();

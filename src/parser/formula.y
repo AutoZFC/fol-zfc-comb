@@ -104,7 +104,7 @@ statement
         $$ = ASTNode::make_statement(ASTNode::ClaimStmt, *$2, $4);
         delete $2;
     }
-    | SCHEMA IDENTIFIER LBRACKET schema_var_list RBRACKET COLON formula {
+    | SCHEMA qualified_name LBRACKET schema_var_list RBRACKET COLON formula {
         $$ = ASTNode::make_schema_stmt(*$2, $4, $7);
         delete $2;
     }
@@ -379,7 +379,7 @@ rule_call
     | IOTA_ELIM id_list {
         $$ = ASTNode::make_rule_step("iota_elim", $2);
     }
-    | SCHEMA_INST IDENTIFIER LBRACE schema_binding_list RBRACE {
+    | SCHEMA_INST qualified_name LBRACE schema_binding_list RBRACE {
         $$ = ASTNode::make_schema_inst_step(*$2, $4);
         delete $2;
     }

@@ -12,10 +12,9 @@
 //   * On a successful verify, registers the new theorem against the same
 //     SentenceHandle the dispatcher resolved. Verifiers must not (and the
 //     base class contract forbids them to) call ctx.add_theorem directly.
-//   * Handles the schema-proof axiomatic mark (mark_schema_proven) the
-//     same way today's Runtime does: it fires whenever claim_name names a
-//     schema, irrespective of proof success — the schema's body is taken
-//     as an axiom and any "proof" of it is a structural sanity-check.
+//   * Marks a schema proven (mark_schema_proven) only after its proof
+//     checks. It used to mark it first, whatever the outcome, so a failed
+//     proof — or one citing the schema itself — left the schema citable.
 //
 // Threading: a ProofRunner is single-threaded with respect to its
 // GlobalContext (concurrent verify() invocations would race on the

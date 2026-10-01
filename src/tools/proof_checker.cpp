@@ -84,8 +84,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Snapshot claims from dependencies (before loading the main header)
+    // Snapshot claims and schemas from dependencies (before loading the main header)
     auto dep_claims = rt.context().claims();
+    auto dep_schema_list = rt.context().schema_names();
+    std::unordered_set<std::string> dep_schemas(dep_schema_list.begin(), dep_schema_list.end());
 
     // Load the main header (axioms + claims)
     decltype(rt.load_file_recursive(header_path)) header_result = MAKE_ERROR << "not loaded";
@@ -220,7 +222,7 @@ int main(int argc, char* argv[]) {
             if (deps_it == rt.proof_deps().end()) continue;
 
             for (const auto& dep : deps_it->second) {
-                if (rt.context().is_unproved(dep)) {
+                if (rt.context().is_unproved(dep) || rt.context().is_schema_unproved(dep)) {
                     unproved_deps.insert(dep);
                 }
                 if (!visited.count(dep)) {
@@ -263,7 +265,34 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Classify each NEW schema like a claim. A schema is never a theorem, so its
+    // state is read from the schema registry: proven only once its proof checked.
+    std::vector<std::string> schema_proved, schema_conditional, schema_unproved, schema_failed,
+        schema_missing;
+    for (const auto& name : rt.context().schema_names()) {
+        if (dep_schemas.count(name) > 0) continue;
+        if (execution_failed.count(name)) {
+            schema_failed.push_back(name);
+        } else if (!rt.context().is_schema_proven(name)) {
+            schema_missing.push_back(name);
+        } else if (rt.context().is_schema_unproved(name)) {
+            schema_unproved.push_back(name);
+        } else {
+            auto deps = has_unproved_dep(name);
+            if (deps.empty()) {
+                schema_proved.push_back(name);
+            } else {
+                schema_conditional.push_back(name);
+                conditional_deps[name] = std::move(deps);
+            }
+        }
+    }
+
     // Sort all lists for deterministic output
+    for (auto* list : {&schema_proved, &schema_conditional, &schema_unproved, &schema_failed,
+                       &schema_missing}) {
+        std::sort(list->begin(), list->end());
+    }
     std::sort(proved.begin(), proved.end());
     std::sort(conditional.begin(), conditional.end());
     std::sort(unproved_list.begin(), unproved_list.end());
@@ -316,15 +345,54 @@ int main(int argc, char* argv[]) {
         std::cerr << "\n";
     }
 
+    if (!schema_proved.empty()) {
+        std::cout << "Schemas proved (" << schema_proved.size() << "):\n";
+        for (const auto& name : schema_proved) std::cout << "  + " << name << "\n";
+        std::cout << "\n";
+    }
+    if (!schema_conditional.empty()) {
+        std::cout << "Schemas conditional (" << schema_conditional.size() << "):\n";
+        for (const auto& name : schema_conditional) {
+            std::vector<std::string> sorted_deps(conditional_deps[name].begin(),
+                                                 conditional_deps[name].end());
+            std::sort(sorted_deps.begin(), sorted_deps.end());
+            std::cout << "  ~ " << name << " (depends on:";
+            for (const auto& dep : sorted_deps) std::cout << " " << dep;
+            std::cout << ")\n";
+        }
+        std::cout << "\n";
+    }
+    if (!schema_unproved.empty()) {
+        std::cout << "Schemas unproved (" << schema_unproved.size() << "):\n";
+        for (const auto& name : schema_unproved) std::cout << "  - " << name << "\n";
+        std::cout << "\n";
+    }
+    if (!schema_failed.empty()) {
+        std::cerr << "Schemas failed (" << schema_failed.size() << "):\n";
+        for (const auto& name : schema_failed) std::cerr << "  x " << name << "\n";
+        std::cerr << "\n";
+    }
+    if (!schema_missing.empty()) {
+        std::cerr << "Schemas missing (" << schema_missing.size() << "):\n";
+        for (const auto& name : schema_missing) std::cerr << "  ! " << name << "\n";
+        std::cerr << "\n";
+    }
+
     // Fail on MISSING (no proof block) or FAILED (proof ran but errored and
     // was not explicitly marked `unproved`). Only the latter signals a
     // user-visible soundness concern we previously masked as UNPROVED.
-    if (!missing.empty() || !failed_list.empty()) {
+    if (!missing.empty() || !failed_list.empty() || !schema_missing.empty() ||
+        !schema_failed.empty()) {
         if (!missing.empty())
             std::cerr << "ERROR: " << missing.size()
                       << " claim(s) have no proof and are not marked UNPROVED\n";
         if (!failed_list.empty())
             std::cerr << "ERROR: " << failed_list.size() << " proof(s) failed\n";
+        if (!schema_missing.empty())
+            std::cerr << "ERROR: " << schema_missing.size()
+                      << " schema(s) have no proof and are not marked UNPROVED\n";
+        if (!schema_failed.empty())
+            std::cerr << "ERROR: " << schema_failed.size() << " schema proof(s) failed\n";
         PROFILE_REPORT();
         return 1;
     }
@@ -334,6 +402,14 @@ int main(int argc, char* argv[]) {
         std::cout << " (" << proved.size() << " proved";
         if (!conditional.empty()) std::cout << ", " << conditional.size() << " conditional";
         if (!unproved_list.empty()) std::cout << ", " << unproved_list.size() << " unproved";
+        std::cout << ")";
+    }
+    if (!schema_unproved.empty() || !schema_conditional.empty()) {
+        std::cout << " (schemas: " << schema_proved.size() << " proved";
+        if (!schema_conditional.empty())
+            std::cout << ", " << schema_conditional.size() << " conditional";
+        if (!schema_unproved.empty())
+            std::cout << ", " << schema_unproved.size() << " unproved";
         std::cout << ")";
     }
     std::cout << "\n";

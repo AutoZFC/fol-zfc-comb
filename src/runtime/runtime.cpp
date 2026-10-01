@@ -134,16 +134,19 @@ util::ResultStatus Runtime::execute_proof(const ParsedProof& proof) {
     // This path bypasses verification entirely — by definition the proof
     // body is not checked — so it does not go through ProofRunner.
     if (proof.unproved) {
-        if (ctx_.find_schema(proof.claim_name).has_value())
-            ctx_.mark_schema_proven(proof.claim_name);
-
+        const bool schema = ctx_.find_schema(proof.claim_name).has_value();
         auto claim = ctx_.find_claim(proof.claim_name);
         if (!claim.has_value()) claim = ctx_.find_known(proof.claim_name);
-        if (!claim.has_value()) {
-            if (ctx_.is_schema_proven(proof.claim_name)) return util::Ok();
+        if (schema && claim.has_value())
+            return MAKE_ERROR << "UNPROVED: '" << proof.claim_name
+                              << "' names both a schema and a claim or axiom";
+        if (schema) {
+            ctx_.mark_schema_unproved(proof.claim_name);
+        } else if (claim.has_value()) {
+            ctx_.add_unproved_theorem(proof.claim_name, claim.value());
+        } else {
             return MAKE_ERROR << "UNPROVED: unknown claim '" << proof.claim_name << "'";
         }
-        ctx_.add_unproved_theorem(proof.claim_name, claim.value());
         std::unordered_set<std::string> deps;
         for (const auto& step : proof.steps) {
             if (step.kind == ParsedProofStep::Kind::Use) {

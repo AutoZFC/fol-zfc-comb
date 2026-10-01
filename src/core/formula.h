@@ -380,6 +380,7 @@ class GlobalContext {
     // migrates to carry SchemaHandle in R.3 of the IR-tightening refactor).
     SchemaRegistry schemas_;
     std::unordered_set<std::string> proven_schemas_;
+    std::unordered_set<std::string> unproved_schemas_;
 
 public:
     // Access the shared formula registry
@@ -518,6 +519,17 @@ public:
     bool is_schema_proven(SchemaHandle h) const {
         return proven_schemas_.count(h->name) > 0;
     }
+
+    // An UNPROVED schema is citable, and recorded so that its citers classify as
+    // CONDITIONAL rather than PROVED.
+    void mark_schema_unproved(const std::string& name) {
+        proven_schemas_.insert(name);
+        unproved_schemas_.insert(name);
+    }
+    bool is_schema_unproved(const std::string& name) const {
+        return unproved_schemas_.count(name) > 0;
+    }
+    std::vector<std::string> schema_names() const;
 
     // Value-returning lookup (unchanged API for back-compat with existing callers).
     std::optional<SchemaDefinition> find_schema(const std::string& name) const {

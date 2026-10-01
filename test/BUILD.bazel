@@ -450,3 +450,12 @@ cc_test(
         "//src/parser",
     ],
 )
+
+cc_test(
+    name = "schema_status_test",
+    srcs = ["schema_status_test.cpp"],
+    deps = [
+        "//src/runtime",
+        "//src/parser",
+    ],
+)
