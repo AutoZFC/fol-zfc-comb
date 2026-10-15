@@ -3,7 +3,9 @@
 #include "src/util/profiler.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -13,19 +15,28 @@
 using namespace logic;
 
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        std::cerr << "Usage: proof_checker <header.fol.def> <proof.fol.proof> [dep1.fol.def ...] [-- dep1.fol.proof ...]\n";
+    // --lib OUT: after a check that exits 0, save what the header and its proofs add as a library, as fol_compiler
+    // does, so the proofs run once whether or not a later unit links against them.
+    std::string lib_path;
+    int first = 1;
+    if (argc > 2 && std::string(argv[1]) == "--lib") {
+        lib_path = argv[2];
+        first = 3;
+    }
+    if (argc - first < 2) {
+        std::cerr << "Usage: proof_checker [--lib out.fol.lib] <header.fol.def> <proof.fol.proof> "
+                     "[dep1.fol.def|dep1.fol.lib ...] [-- dep1.fol.proof ...]\n";
         return 1;
     }
 
-    std::string header_path = argv[1];
-    std::string proof_path = argv[2];
+    std::string header_path = argv[first];
+    std::string proof_path = argv[first + 1];
 
     // Split args at "--" separator: dep headers before, dep proofs after
     std::vector<std::string> dep_header_paths;
     std::vector<std::string> dep_proof_paths;
     bool after_separator = false;
-    for (int i = 3; i < argc; i++) {
+    for (int i = first + 2; i < argc; i++) {
         if (std::string(argv[i]) == "--") {
             after_separator = true;
             continue;
@@ -88,6 +99,7 @@ int main(int argc, char* argv[]) {
     auto dep_claims = rt.context().claims();
     auto dep_schema_list = rt.context().schema_names();
     std::unordered_set<std::string> dep_schemas(dep_schema_list.begin(), dep_schema_list.end());
+    auto baseline = FolLibrary::snapshot(rt.context());
 
     // Load the main header (axioms + claims)
     decltype(rt.load_file_recursive(header_path)) header_result = MAKE_ERROR << "not loaded";
@@ -117,27 +129,6 @@ int main(int argc, char* argv[]) {
     // Snapshot claims after loading the main header
     auto all_claims = rt.context().claims();
 
-    // Load the proof file
-    ParseResult proof_result;
-    {
-        PROFILE_SCOPE("load_proof_file");
-        std::ifstream proof_file(proof_path);
-        if (!proof_file.is_open()) {
-            std::cerr << "ERROR: Could not open proof file: " << proof_path << "\n";
-            return 1;
-        }
-        std::stringstream buffer;
-        buffer << proof_file.rdbuf();
-
-        std::string error;
-        proof_result = try_parse_with_proofs(buffer.str(), rt.context(), &error);
-        if (!error.empty()) {
-            std::cerr << "ERROR: Parse error in " << proof_path << ": " << error << "\n";
-            PROFILE_REPORT();
-            return 1;
-        }
-    }
-
     // Execute all proofs (continue on error to get full results).
     // Distinguish *explicit* unproved (marker in .fol.proof) from *implicit*
     // unproved (proof failed during execution). The former is legal; the
@@ -156,9 +147,15 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    // The proof file is read and run one proof block at a time (stream_proofs): memory holds one block, never the file.
     {
         PROFILE_SCOPE("execute_proofs");
-        for (const auto& proof : proof_result.proofs) {
+        std::FILE* proof_in = std::fopen(proof_path.c_str(), "r");
+        if (!proof_in) {
+            std::cerr << "ERROR: Could not open proof file: " << proof_path << "\n";
+            return 1;
+        }
+        auto streamed = stream_proofs(proof_in, [&](const ParsedProof& proof) {
             bool failed = false;
             std::string msg;
             try {
@@ -183,6 +180,12 @@ int main(int argc, char* argv[]) {
                 }
                 mark_failed_as_unproved(proof);
             }
+        });
+        std::fclose(proof_in);
+        if (!streamed.ok()) {
+            std::cerr << "ERROR: Parse error in " << proof_path << ": " << streamed.error().to_string() << "\n";
+            PROFILE_REPORT();
+            return 1;
         }
     }
 
@@ -415,6 +418,25 @@ int main(int argc, char* argv[]) {
     std::cout << "\n";
 
     PROFILE_REPORT();
+
+    if (!lib_path.empty()) {
+        std::unordered_map<std::string, std::unordered_set<std::string>> proof_deps_delta;
+        for (const auto& [name, deps] : rt.proof_deps()) {
+            if (baseline.theorems.count(name) == 0 && baseline.claims.count(name) == 0) proof_deps_delta[name] = deps;
+        }
+        std::vector<std::string> source_files = {std::filesystem::canonical(header_path).string(),
+                                                 std::filesystem::canonical(proof_path).string()};
+        try {
+            auto saved = FolLibrary::save(rt.context(), baseline, proof_deps_delta, source_files, lib_path);
+            if (!saved.ok()) {
+                std::cerr << "ERROR: Failed to save library " << lib_path << ": " << saved.error().to_string() << "\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: Library serialization failed for " << lib_path << ": " << e.what() << "\n";
+            return 1;
+        }
+    }
 
     // Write output marker file if FOL_OUTPUT is set (for Bazel).
     // Only reached on success (no MISSING, no FAILED).

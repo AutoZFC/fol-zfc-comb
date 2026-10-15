@@ -559,6 +559,52 @@ ParseResult try_parse_with_proofs(std::string_view input, GlobalContext& ctx,
     }
 }
 
+util::ResultStatus stream_proofs(std::FILE* in, const std::function<void(const ParsedProof&)>& on_proof) {
+    reset_lexer_col();
+    yyscan_t scanner;
+    if (yylex_init(&scanner) != 0) return MAKE_ERROR << "Failed to initialize lexer";
+    yyset_in(in, scanner);
+
+    YYSTYPE yylval;
+    YYLTYPE yylloc = {1, 1, 1, 1};
+    std::string before = "(none)";
+    int token = yylex(&yylval, &yylloc, scanner);
+    while (token != 0) {
+        // PROOF occurs only as proof_block's first token, so it ends the block before it: one parse per block.
+        ParseContext parse_ctx;
+        yypstate* ps = yypstate_new();
+        int status = yypush_parse(ps, token, &yylval, &yylloc, scanner, &parse_ctx);
+        while (status == YYPUSH_MORE) {
+            token = yylex(&yylval, &yylloc, scanner);
+            if (token == PROOF) break;
+            status = yypush_parse(ps, token, &yylval, &yylloc, scanner, &parse_ctx);
+        }
+        if (status == YYPUSH_MORE) status = yypush_parse(ps, 0, &yylval, &yylloc, scanner, &parse_ctx);
+        yypstate_delete(ps);
+        if (status != 0) {
+            yylex_destroy(scanner);
+            return MAKE_ERROR << "Parse error after proof '" << before << "' at column " << parse_ctx.error_col
+                              << ": " << parse_ctx.error;
+        }
+        if (!parse_ctx.statements) {
+            yylex_destroy(scanner);
+            return MAKE_ERROR << "A proof file holds proof blocks only: a formula after proof '" << before << "'";
+        }
+        for (const ASTNode* node : *parse_ctx.statements) {
+            if (node->type != ASTNode::ProofBlock) {
+                yylex_destroy(scanner);
+                return MAKE_ERROR << "A proof file holds proof blocks only: a statement after proof '" << before
+                                  << "' is not one";
+            }
+            ParsedProof proof = convert_proof_block(node);
+            before = proof.claim_name;
+            on_proof(proof);
+        }
+    }
+    yylex_destroy(scanner);
+    return util::Ok();
+}
+
 // ==================== Parse Formula with External Variables ====================
 
 FormulaHandle parse_formula_with_vars(

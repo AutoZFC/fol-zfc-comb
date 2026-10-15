@@ -181,8 +181,22 @@ FolLibrary::DeltaData FolLibrary::collect_delta_data(
         }
     };
 
+    // The sentences a library holds are those its new named axioms, theorems and claims stand for, whatever their
+    // IDs. Never every sentence registered since the baseline: a running proof registers each quantified formula it
+    // builds (QuantifierBuilder → build_sentence), including one over an outer fixed variable, which no library can
+    // store; and a named entry interned to a sentence older than the baseline must still be saved.
+    std::unordered_set<size_t> named_sentence_ids;
+    auto collect_named = [&](const auto& named, const auto& before) {
+        for (const auto& [name, sh] : named) {
+            if (before.find(name) == before.end()) named_sentence_ids.insert(handle_id(sh));
+        }
+    };
+    collect_named(ctx.named_axioms_, baseline.axioms);
+    collect_named(ctx.named_theorems_, baseline.theorems);
+    collect_named(ctx.named_claims_, baseline.claims);
+
     ctx.sentences_.for_each([&](size_t id, const Sentence& s) {
-        if (id >= baseline.sentence_id) {
+        if (named_sentence_ids.count(id)) {
             collect_reachable(s.root());
         }
     });
@@ -222,7 +236,7 @@ FolLibrary::DeltaData FolLibrary::collect_delta_data(
     // New sentences
     std::unordered_map<size_t, uint32_t> sentence_id_map;
     ctx.sentences_.for_each([&](size_t id, const Sentence& s) {
-        if (id >= baseline.sentence_id) {
+        if (named_sentence_ids.count(id)) {
             d.new_sentences.push_back({id, &s});
         }
     });
@@ -465,12 +479,12 @@ std::vector<uint8_t> FolLibrary::assemble_file(
     const std::vector<SectionEntry>& sections,
     const std::vector<uint8_t>& section_data) {
 
-    std::vector<uint8_t> buf;
+    // Header. The magic is the vector's initial contents: inserted after reserve(), GCC 11 at -O2 reports a
+    // false -Wstringop-overflow in vector::_M_range_insert, and -Werror makes it a build failure.
+    std::vector<uint8_t> buf(kMagic, kMagic + sizeof(kMagic));
     size_t dir_size = sections.size() * kSectionEntrySize;
     buf.reserve(kHeaderSize + dir_size + section_data.size());
 
-    // Header
-    buf.insert(buf.end(), kMagic, kMagic + sizeof(kMagic));
     write_u32(buf, kFormatVersion);
     write_u32(buf, static_cast<uint32_t>(sections.size()));
 

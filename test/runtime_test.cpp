@@ -824,6 +824,67 @@ bool test_execute_ordered_pair_proofs() {
     return true;
 }
 
+// A proof file streamed block by block gives the proofs parse_with_proofs gives, in its order, and they prove the same
+// theorems.
+bool test_streamed_proofs_are_the_parsed_proofs() {
+    std::ifstream proof_file("zfc/basics/ordered_pair.fol.proof");
+    if (!proof_file.is_open()) return false;
+    std::stringstream buffer;
+    buffer << proof_file.rdbuf();
+    Runtime parsed_rt;
+    std::string error;
+    auto parsed = try_parse_with_proofs(buffer.str(), parsed_rt.context(), &error);
+    if (!error.empty()) return false;
+
+    Runtime rt;
+    auto header = rt.load_file_recursive("zfc/basics/ordered_pair.fol.def");
+    if (!header.ok()) return false;
+    rt.execute_all_proofs(header.value());
+    std::FILE* in = std::fopen("zfc/basics/ordered_pair.fol.proof", "r");
+    if (!in) return false;
+    std::vector<std::string> names;
+    std::vector<size_t> steps;
+    bool executed = true;
+    auto streamed = stream_proofs(in, [&](const ParsedProof& p) {
+        names.push_back(p.claim_name);
+        steps.push_back(p.steps.size());
+        executed = rt.execute_proof(p).ok() && executed;
+    });
+    std::fclose(in);
+    if (!streamed.ok() || !executed || names.size() != parsed.proofs.size()) return false;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] != parsed.proofs[i].claim_name || steps[i] != parsed.proofs[i].steps.size()) return false;
+        if (!rt.context().find_theorem(names[i]).has_value()) return false;
+    }
+    return true;
+}
+
+// A proof file holds proof blocks only: streamed, any other statement is an error, not a declaration.
+bool test_a_streamed_proof_file_holds_proof_blocks_only() {
+    std::FILE* in = std::tmpfile();
+    if (!in) return false;
+    std::fputs("claim stray: forall x. P(x)\n", in);
+    std::rewind(in);
+    size_t seen = 0;
+    auto streamed = stream_proofs(in, [&](const ParsedProof&) { ++seen; });
+    std::fclose(in);
+    return !streamed.ok() && seen == 0 &&
+           streamed.error().to_string().find("proof blocks only") != std::string::npos;
+}
+
+// A parse error names the proof block read before it; that block was already handed over.
+bool test_a_streamed_parse_error_names_the_proof_before_it() {
+    std::FILE* in = std::tmpfile();
+    if (!in) return false;
+    std::fputs("proof first:\n    h = use a\n    qed h\n\nproof second:\n    qed\n", in);
+    std::rewind(in);
+    std::vector<std::string> names;
+    auto streamed = stream_proofs(in, [&](const ParsedProof& p) { names.push_back(p.claim_name); });
+    std::fclose(in);
+    return !streamed.ok() && names == std::vector<std::string>{"first"} &&
+           streamed.error().to_string().find("'first'") != std::string::npos;
+}
+
 bool test_fol_test_file() {
     Runtime rt;
 
@@ -1995,6 +2056,9 @@ int main() {
     std::cout << "\n── Ordered Pair Proofs ──\n";
     run_test("Load ordered pair axioms and claims", test_ordered_pair_axioms_loaded);
     run_test("Execute ordered pair proofs", test_execute_ordered_pair_proofs);
+    run_test("Streamed proofs are the parsed proofs", test_streamed_proofs_are_the_parsed_proofs);
+    run_test("A streamed proof file holds proof blocks only", test_a_streamed_proof_file_holds_proof_blocks_only);
+    run_test("A streamed parse error names the proof before it", test_a_streamed_parse_error_names_the_proof_before_it);
 
     // Definite description (iota) tests
     std::cout << "\n── Definite Description (Iota) Tests ──\n";

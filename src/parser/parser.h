@@ -4,6 +4,8 @@
 #include "src/util/error.h"
 #include "formula_ast.h"
 
+#include <cstdio>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -120,5 +122,10 @@ ParseResult parse_with_proofs(std::string_view input, GlobalContext& ctx);
 // Try to parse statements and proofs, returning empty result on failure
 ParseResult try_parse_with_proofs(std::string_view input, GlobalContext& ctx,
                                    std::string* error = nullptr);
+
+// Read a proof file one proof block at a time, handing each to on_proof as soon as it is parsed and freeing it after:
+// memory holds one block, never the file. A proof file holds proof blocks only, so any other statement is an error, as
+// is a parse error, which names the block read before it.
+util::ResultStatus stream_proofs(std::FILE* in, const std::function<void(const ParsedProof&)>& on_proof);
 
 }  // namespace logic

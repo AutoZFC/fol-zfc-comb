@@ -30,6 +30,15 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "library_test",
+    srcs = ["library_test.cpp"],
+    deps = [
+        "//src/library",
+        "//src/runtime",
+    ],
+)
+
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 
 cc_binary(
@@ -436,6 +445,7 @@ test_suite(
         ":lkr_to_ks1_test",
         ":lkr_to_comb_test",
         ":lkr_verifier_test",
+        ":library_test",
         ":reconcile_test",
         ":nd_to_lkr_test",
         ":runtime_test",

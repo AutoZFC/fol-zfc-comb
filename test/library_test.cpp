@@ -264,6 +264,80 @@ bool test_unproved_round_trip() {
     return true;
 }
 
+// A running proof registers each quantified formula it builds; `exists_intro h3, w` builds ∃x. P(a, x) over the outer
+// fixed variable a. Such a formula is no sentence of the library: saving stores the named entries only.
+bool test_a_proof_local_quantified_formula_is_not_saved() {
+    Runtime rt;
+    auto baseline = FolLibrary::snapshot(rt.context());
+
+    auto result = rt.load_with_proofs(R"(
+        axiom ex_P: forall a. exists x. P(a, x)
+        claim again: forall a. exists x. P(a, x)
+
+        proof again:
+            h1 = use ex_P
+            fix a
+            h2 = forall_elim h1, a
+            h3 = exists_elim h2, w
+            h4 = exists_intro h3, w
+            h5 = exists_intro h4
+            h6 = forall_intro h5
+            qed h6
+    )");
+    if (!result.ok()) return false;
+    auto exec = rt.execute_all_proofs(result.value());
+    if (!exec.ok()) return false;
+
+    std::string lib_path = "/tmp/test_proof_local.fol.lib";
+    auto s = FolLibrary::save(rt.context(), baseline, rt.proof_deps(), {}, lib_path);
+    if (!s.ok()) return false;
+
+    Runtime rt2;
+    auto l = rt2.load_library(lib_path);
+    if (!l.ok()) return false;
+    if (!rt2.context().find_axiom("ex_P").has_value()) return false;
+    if (!rt2.context().find_theorem("again").has_value()) return false;
+
+    std::remove(lib_path.c_str());
+    return true;
+}
+
+// A claim stated as a dependency's axiom states it interns to the dependency's sentence, older than the baseline; the
+// library still holds the claim and its theorem.
+bool test_a_claim_interned_to_a_dependency_sentence_is_saved() {
+    Runtime rt1;
+    auto baseline1 = FolLibrary::snapshot(rt1.context());
+    rt1.load(R"(
+        axiom all_P: forall x. P(x)
+    )");
+    std::string lib1_path = "/tmp/test_interned1.fol.lib";
+    if (!FolLibrary::save(rt1.context(), baseline1, {}, {}, lib1_path).ok()) return false;
+
+    Runtime rt2;
+    if (!rt2.load_library(lib1_path).ok()) return false;
+    auto baseline2 = FolLibrary::snapshot(rt2.context());
+    auto result = rt2.load_with_proofs(R"(
+        claim same: forall x. P(x)
+
+        proof same:
+            h = use all_P
+            qed h
+    )");
+    if (!result.ok()) return false;
+    if (!rt2.execute_all_proofs(result.value()).ok()) return false;
+    std::string lib2_path = "/tmp/test_interned2.fol.lib";
+    if (!FolLibrary::save(rt2.context(), baseline2, rt2.proof_deps(), {}, lib2_path).ok()) return false;
+
+    Runtime rt3;
+    if (!rt3.load_library(lib1_path).ok()) return false;
+    if (!rt3.load_library(lib2_path).ok()) return false;
+    if (!rt3.context().find_theorem("same").has_value()) return false;
+
+    std::remove(lib1_path.c_str());
+    std::remove(lib2_path.c_str());
+    return true;
+}
+
 // ==================== Main ====================
 
 void print_summary() {
@@ -281,6 +355,9 @@ int main() {
     run_test("@def annotation round-trip", test_def_annotation_round_trip);
     run_test("Two-library chain", test_two_library_chain);
     run_test("UNPROVED round-trip", test_unproved_round_trip);
+    run_test("A proof-local quantified formula is not saved", test_a_proof_local_quantified_formula_is_not_saved);
+    run_test("A claim interned to a dependency's sentence is saved",
+             test_a_claim_interned_to_a_dependency_sentence_is_saved);
 
     print_summary();
     for (const auto& r : test_results) {
