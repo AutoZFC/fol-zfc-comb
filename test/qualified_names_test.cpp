@@ -1,5 +1,6 @@
 // Qualified names: a claim or predicate name may carry dots, a trailing fact index
-// and primes (Isabelle's own names, unchanged); a variable may not.
+// and primes (Isabelle's own names, unchanged); a variable may not. A segment after
+// the first may be quoted, for one the lexer reads as a keyword: Com.evalb."false".
 
 #include "src/runtime/runtime.h"
 
@@ -26,6 +27,9 @@ claim unspaced_qualified: forall x.Th.P(x)
 claim spaced_qualified: forall x. Th.P(x)
 claim unspaced_plain: forall x.P(x)
 claim spaced_plain: forall x. P(x)
+claim Com.evalb."false": forall x. (Th.P(x) -> Th.Q(x))
+claim FOL."excluded_middle".1: forall x. (Bool."not"(x) -> Bool."not"(x))
+claim quoted_use: forall x. (Th.P(x) -> Th.Q(x))
 
 proof Th.c:
     _a = use Th.ax
@@ -46,6 +50,21 @@ proof tight:
     _g = forall_intro _i
     qed _g
 
+proof Com.evalb."false":
+    _a = use Th.c
+    qed _a
+
+proof FOL."excluded_middle".1:
+    fix x
+    _h = assume Bool."not"(x)
+    _i = implies_intro _h
+    _g = forall_intro _i
+    qed _g
+
+proof quoted_use:
+    _a = use Com.evalb."false"
+    qed _a
+
 proof unspaced_qualified: UNPROVED
 proof spaced_qualified: UNPROVED
 proof unspaced_plain: UNPROVED
@@ -60,7 +79,8 @@ proof spaced_plain: UNPROVED
     }
     auto run = rt.execute_all_proofs(parsed.value());
     check(run.ok(), "the proofs execute");
-    for (const char* name : {"Th.c", "Univ.rank_rls.4", "IFOL.allE'", "tight"}) {
+    for (const char* name : {"Th.c", "Univ.rank_rls.4", "IFOL.allE'", "tight", "Com.evalb.false",
+                             "FOL.excluded_middle.1", "quoted_use"}) {
         check(rt.context().find_theorem(name).has_value(), std::string("proved: ") + name);
     }
     auto same = [&](const char* a, const char* b) {
@@ -71,5 +91,8 @@ proof spaced_plain: UNPROVED
           "forall x.Th.P(x) is forall x. Th.P(x): the binder's dot ends the variable");
     check(same("unspaced_plain", "spaced_plain"),
           "forall x.P(x) still means forall x. P(x)");
+    auto quoted = rt.context().find_claim("FOL.excluded_middle.1");
+    check(quoted.has_value() && quoted->get().to_string().find("Bool.not(") != std::string::npos,
+          "Bool.\"not\"(x) is the predicate Bool.not: the quotes are syntax");
     return failures == 0 ? 0 : 1;
 }

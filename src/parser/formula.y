@@ -178,6 +178,9 @@ qualified_name
     : IDENTIFIER { $$ = $1; }
     | qualified_name DOT IDENTIFIER { *$1 += "." + *$3; delete $3; $$ = $1; }
     | qualified_name DOT NUMBER { *$1 += "." + *$3; delete $3; $$ = $1; }
+    /* A quoted segment is a segment the lexer would read as a keyword (`Com.bexp."false"`): the quotes are syntax, the
+       name is `Com.bexp.false`. A keyword token carries no spelling (`false` and `bottom` are both BOTTOM). */
+    | qualified_name DOT STRING_LITERAL { *$1 += "." + *$3; delete $3; $$ = $1; }
     ;
 
 predicate
