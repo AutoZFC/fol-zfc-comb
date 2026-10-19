@@ -3,7 +3,7 @@
 **Goal.** One *complete and sound* translation from our proofs (ND → LKR →
 Comb) into combinatorial proofs. We are NOT committed to a single
 construction — we only need one route that always works. The obstacle is
-**cuts** (NDtoLKR emits them from modus ponens, `eq_subst`, and lemma
+**cuts** (NDtoLKR emits them from modus ponens and lemma
 citations). The cut-free fold (`interpret_tree`, paper-exact Hughes §11.1)
 already works; the open question is purely how to discharge cuts.
 

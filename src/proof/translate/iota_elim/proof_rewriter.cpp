@@ -160,14 +160,6 @@ util::Result<nd::Instr> rewrite_refs(const nd::Instr& instr,
             return nd::Instr{o};
         },
 
-        [&](const nd::EqSubst&) -> util::Result<nd::Instr> {
-            // eq_subst is deprecated in translation. NDtoLKR gates programs
-            // containing it; this arm exists only to keep std::visit
-            // exhaustive.
-            return MAKE_ERROR
-                << "ProofRewriter::rewrite_refs: eq_subst is deprecated "
-                << "(see src/proof/translate/EQ_SUBST_DEPRECATION.md)";
-        },
         [&](const nd::EqSym& op) -> util::Result<nd::Instr> {
             nd::EqSym o = op;
             TRY_ASSIGN(e, S(op.eq_formula, "eq_sym")); o.eq_formula = e;

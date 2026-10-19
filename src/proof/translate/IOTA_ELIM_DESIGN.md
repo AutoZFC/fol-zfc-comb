@@ -438,7 +438,7 @@ in the implementation sequencing in §8.
 
 The corpus gate target rises from 30% (the old Path-1 estimate) to
 ≥80% because the design is now complete — failures should be rare and
-attributable to non-iota issues (e.g., the EqSubst/EqSym
+attributable to non-iota issues (e.g., the EqSym
 `close_flat` gap we already know about).
 
 ## 6. What this design deliberately rejects

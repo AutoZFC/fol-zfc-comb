@@ -5,7 +5,7 @@ Reference: Hughes 2019, *First-order proofs without syntax*, arXiv 1906.11236, �
 This document is the source of truth for the `src/proof/translate/nd_to_lkr/`
 translator. The C++ implementation is correct iff its emitted output is a
 faithful realisation of this spec, in the sense that `LKRVerifier` accepts the
-output for every input that ND-verifies and is iota-free and eq_subst-free.
+output for every input that ND-verifies and is iota-free and eq_sym-free.
 
 ## 0. Status
 
@@ -18,8 +18,8 @@ construction.
 
 **Input.** `Program<nd::Instr>` produced by `nd::lower(...)`. Iota-free
 (no `IotaElim` after the `EliminateIotaInProof` pass, or no iota by
-construction). eq_subst-free (no `EqSubst` or `EqSym`; deprecated per
-`EQ_SUBST_DEPRECATION.md`). ND-verifies under `nd::NDVerifier`.
+construction). eq_sym-free (no `EqSym`; the translator has no rule for
+it). ND-verifies under `nd::NDVerifier`.
 
 **Output.** `Program<lkr::Instr>` over Hughes §11 (`AxiomLit`, `One`,
 `Exchange`, `Weakening`, `Contraction`, `And`, `Or`, `Forall`, `Exists`) +
@@ -115,7 +115,7 @@ continues the proof of `B`.
                           │
                           ▼
                 ┌───────────────────┐
-                │   input gate      │  reject IotaElim, EqSubst, EqSym;
+                │   input gate      │  reject IotaElim, EqSym;
                 │                   │  reject non-ND-verifying input
                 └─────────┬─────────┘
                           │
@@ -629,7 +629,7 @@ entries.
 **Input gate** (before any emission):
 1. Program ND-verifies (run `NDVerifier::verify` against the goal).
 2. Program contains no `IotaElim` (pre-pass invariant violation).
-3. Program contains no `EqSubst` or `EqSym` (deprecation violation).
+3. Program contains no `EqSym` (no translation rule).
 
 Any failure → `Result::error` with the offending nd_idx and a
 clear deprecation pointer where applicable.
@@ -659,7 +659,7 @@ eliminate them:
 
 For every input that:
 - ND-verifies under `nd::NDVerifier`,
-- contains no `IotaElim`, `EqSubst`, `EqSym`,
+- contains no `IotaElim` or `EqSym`,
 
 `NDtoLKR::apply` returns `Ok(program)` such that `LKRVerifier` accepts
 `program` against `NNF(goal)`.
@@ -726,7 +726,5 @@ under `LKRVerifier`. A phase doesn't ship until its tests pass.
   emits into.
 - `src/proof/translate/LAYER2_LEISENRING_DESIGN.md` — the surviving
   iota translator this design composes with.
-- `src/proof/translate/EQ_SUBST_DEPRECATION.md` — eq_subst deprecation
-  policy enforced at the input gate.
 - The deleted SPEC.md from commit `762fb65^` — predecessor design;
   this doc supersedes it.

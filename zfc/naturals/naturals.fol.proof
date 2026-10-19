@@ -99,7 +99,12 @@ proof inductive_set_exists:
     esym1 = forall_elim esym, s0
     esym2 = forall_elim esym1, y0
     h_eq_ys = implies_elim esym2, h_eq_sy
-    h_s0_in = eq_subst h_eq_ys, h_y0_in
+    h_s0_in_ee = use eq_elem_l
+    h_s0_in_ee1 = forall_elim h_s0_in_ee, y0
+    h_s0_in_ee2 = forall_elim h_s0_in_ee1, s0
+    h_s0_in_ee3 = forall_elim h_s0_in_ee2, wI
+    h_s0_in_eec = and_intro h_eq_ys, h_y0_in
+    h_s0_in = implies_elim h_s0_in_ee3, h_s0_in_eec
     # Close scopes: succ assume, s0 fix, y0 exists
     h_succ_impl = implies_intro h_s0_in
     h_forall_s = forall_intro h_succ_impl
@@ -225,12 +230,17 @@ proof zero_in_nat:
     eu2 = forall_elim eu1, e0
     h_both = and_intro h_empty, h_e0_empty
     h_eq = implies_elim eu2, h_both
-    # eq(e0, e) via eq_symmetric, then eq_subst to get elem(e, a0)
+    # eq(e0, e) via eq_symmetric, then eq_elem_l to get elem(e, a0)
     esym = use eq_symmetric
     esym1 = forall_elim esym, e
     esym2 = forall_elim esym1, e0
     h_eq_rev = implies_elim esym2, h_eq
-    h_e_in_a = eq_subst h_eq_rev, h_e0_in
+    h_e_in_a_ee = use eq_elem_l
+    h_e_in_a_ee1 = forall_elim h_e_in_a_ee, e0
+    h_e_in_a_ee2 = forall_elim h_e_in_a_ee1, e
+    h_e_in_a_ee3 = forall_elim h_e_in_a_ee2, a0
+    h_e_in_a_eec = and_intro h_eq_rev, h_e0_in
+    h_e_in_a = implies_elim h_e_in_a_ee3, h_e_in_a_eec
     # Close e0 exists scope
     h_e_in_a_closed = exists_intro h_e_in_a
     h_impl_a = implies_intro h_e_in_a_closed

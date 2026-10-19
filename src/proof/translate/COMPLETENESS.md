@@ -179,7 +179,7 @@ op survives the inliner pre-pass.
 
 ### 4.2 ND → LKR (per-rule, Theorem B)
 
-Input-gate exclusions (rejected, so not in scope): `IotaElim`, `EqSubst`,
+Input-gate exclusions (rejected, so not in scope): `IotaElim` and
 `EqSym` — must be eliminated upstream (`iota_elim` translator).
 
 | ND op                      | Role                                  | Implementation                                   | Status |

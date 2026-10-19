@@ -20,19 +20,13 @@ util::ResultStatus check_iota_free(const Program<nd::Instr>& prog) {
     return util::Ok();
 }
 
-util::ResultStatus check_eq_subst_free(const Program<nd::Instr>& prog) {
+util::ResultStatus check_eq_sym_free(const Program<nd::Instr>& prog) {
     for (uint32_t i = 0; i < prog.instrs.size(); ++i) {
-        if (std::holds_alternative<nd::EqSubst>(prog.instrs[i])) {
-            return MAKE_ERROR
-                << "NDtoLKR InputGate: I-2 violation — nd::EqSubst at "
-                << "instr #" << i << ". eq_subst is deprecated; see "
-                << "src/proof/translate/EQ_SUBST_DEPRECATION.md.";
-        }
         if (std::holds_alternative<nd::EqSym>(prog.instrs[i])) {
             return MAKE_ERROR
                 << "NDtoLKR InputGate: I-2 violation — nd::EqSym at "
-                << "instr #" << i << ". eq_sym is deprecated; see "
-                << "src/proof/translate/EQ_SUBST_DEPRECATION.md.";
+                << "instr #" << i << ". The translator has no rule for "
+                << "eq_sym; derive symmetry from the eq_symmetric lemma.";
         }
     }
     return util::Ok();
@@ -62,7 +56,7 @@ util::ResultStatus InputGate::verify(
     const Program<nd::Instr>& prog)
 {
     TRY(check_iota_free(prog));
-    TRY(check_eq_subst_free(prog));
+    TRY(check_eq_sym_free(prog));
     TRY(check_nd_verifies(ctx, goal_formula, prog));
     return util::Ok();
 }

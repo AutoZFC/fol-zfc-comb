@@ -6,8 +6,8 @@
 # Two sets are equal iff they have the same elements.
 # This says: x = y iff x and y have the same members. Together with
 # `elem_subst` below, it fully axiomatizes equality for the {eq, elem}
-# signature in pure FOL (i.e., without an `eq_subst` rule built into the
-# calculus).
+# signature in pure FOL, with no substitution rule built into the
+# calculus.
 #
 # Substitution coverage. Extensionality lets us substitute into `elem`'s
 # *second* argument — from eq(s, t) and elem(x, s), derive elem(x, t)
@@ -24,8 +24,7 @@ axiom extensionality: forall x. forall y. (eq(x, y) <-> forall z. (elem(z, x) <-
 # Extensionality (axiom 1) handles the *set* position of `elem`; this
 # handles the *element* position. Together with extensionality, the two
 # axioms suffice to prove every concrete instance of equality
-# substitution in the {eq, elem} signature, removing the need for
-# `eq_subst` as a primitive proof rule.
+# substitution in the {eq, elem} signature.
 #
 # Why this can't be derived from extensionality: extensionality says
 # eq(x, y) ⟺ ∀z. (elem(z, x) ↔ elem(z, y)) — it relates equality to what

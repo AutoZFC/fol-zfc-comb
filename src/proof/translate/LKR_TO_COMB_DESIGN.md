@@ -16,7 +16,7 @@ In design. Translator not yet implemented. The receiving infrastructure
 ## 1. Scope
 
 **Input.** `Program<lkr::Instr>` produced by `NDtoLKR` (or any other
-source) and accepted by `LKRVerifier`. Iota-free, eq_subst-free (the
+source) and accepted by `LKRVerifier`. Iota-free and eq_sym-free (the
 LKR rule set already forbids these; the upstream pipeline enforces it).
 
 **Output.** `comb::CombProof` accepted by `comb::CombVerifier` against

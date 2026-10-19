@@ -615,32 +615,6 @@ FormulaResult ProofStack::schema_inst(const SchemaDefinition& schema,
     return result;
 }
 
-FormulaResult ProofStack::eq_subst(FormulaHandle const &eq_formula, FormulaHandle const &target) {
-    if (!is_derived(eq_formula))
-        return MAKE_ERROR << "eq_subst: equality not derived: " << eq_formula.get();
-    if (!is_derived(target))
-        return MAKE_ERROR << "eq_subst: target not derived: " << target.get();
-
-    // Check eq_formula is eq(a, b)
-    const Formula& f = eq_formula.get();
-    if (!f.is_predicate())
-        return MAKE_ERROR << "eq_subst: expected predicate, got: " << f;
-    const PredicateInstance& pred = f.as_predicate();
-    if (pred.predicate().get().get_name() != "eq" || pred.args().size() != 2)
-        return MAKE_ERROR << "eq_subst: expected eq(a, b), got: " << f;
-
-    Term a = pred.args()[0];
-    Term b = pred.args()[1];
-
-    // Accessibility of a and b is guaranteed by is_derived(eq_formula):
-    // derive_with_deps records a dep for every fixed var in the formula,
-    // and cleanup_scope drops entries whose deps include a closed scope —
-    // so a derived formula cannot reference an inaccessible fixed var.
-    auto result = formula_builder_.translate_term(target, a, b);
-    derive_with_deps(result, deps_of(eq_formula) | deps_of(target));
-    return result;
-}
-
 FormulaResult ProofStack::eq_sym(FormulaHandle const &eq_formula) {
     if (!is_derived(eq_formula))
         return MAKE_ERROR << "eq_sym: equality not derived: " << eq_formula.get();

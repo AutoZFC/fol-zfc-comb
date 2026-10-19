@@ -76,7 +76,6 @@ static int col = 1;
 "excluded_middle" { return EXCLUDED_MIDDLE; }
 "peirce"        { return PEIRCE; }
 "classical_absurd" { return CLASSICAL_ABSURD; }
-"eq_subst"      { return EQ_SUBST; }
 "eq_sym"        { return EQ_SYM; }
 "iota_elim"     { return IOTA_ELIM; }
 "iota"          { return IOTA; }

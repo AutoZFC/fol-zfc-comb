@@ -29,7 +29,7 @@ syn keyword folRule not_intro not_elim bottom_elim
 syn keyword folRule iff_intro iff_elim_l iff_elim_r
 syn keyword folRule forall_intro forall_elim
 syn keyword folRule exists_intro exists_elim
-syn keyword folRule eq_subst double_neg_elim excluded_middle
+syn keyword folRule double_neg_elim excluded_middle
 
 " Quantifiers
 syn keyword folQuantifier forall exists

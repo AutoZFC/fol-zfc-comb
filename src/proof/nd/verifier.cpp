@@ -336,8 +336,7 @@ util::ResultStatus exec_op(Session& s, uint32_t idx, const ExistsElim& op) {
     return util::Ok();
 }
 
-BIND_BINARY_STEP(EqSubst, eq_subst, eq_formula, target)
-BIND_UNARY_STEP (EqSym,   eq_sym,   eq_formula)
+BIND_UNARY_STEP (EqSym, eq_sym, eq_formula)
 
 BIND_UNARY_STEP (DoubleNegElim,   double_neg_elim,   of)
 BIND_UNARY_STEP (ExcludedMiddle,  excluded_middle,   formula_let)

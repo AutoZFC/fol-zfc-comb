@@ -760,8 +760,31 @@ proof not_closed_not_subset:
     h_fu_p1 = and_intro h_func, h_rel
     h_fu_prem = and_intro h_fu_p1, h_rel2
     h_eq = implies_elim fu4, h_fu_prem
-    # eq_subst: subset(fc, c) -> subset(fc2, c)
-    h_sub2 = eq_subst h_eq, h_sub
+    # subset(fc, c) -> subset(fc2, c): every element of fc2 is in fc
+    # (eq_elem_r with eq(fc2, fc)), hence in c
+    h_sub_sd = use subset_def
+    h_sub_sd1 = forall_elim h_sub_sd, fc
+    h_sub_sd2 = forall_elim h_sub_sd1, c
+    h_sub_body = iff_elim_l h_sub_sd2, h_sub
+    h_sub_es = use eq_symmetric
+    h_sub_es1 = forall_elim h_sub_es, fc
+    h_sub_es2 = forall_elim h_sub_es1, fc2
+    h_eq_rev = implies_elim h_sub_es2, h_eq
+    fix y
+    h_y_in2 = assume elem(y, fc2)
+    h_y_ee = use eq_elem_r
+    h_y_ee1 = forall_elim h_y_ee, y
+    h_y_ee2 = forall_elim h_y_ee1, fc2
+    h_y_ee3 = forall_elim h_y_ee2, fc
+    h_y_eec = and_intro h_eq_rev, h_y_in2
+    h_y_in1 = implies_elim h_y_ee3, h_y_eec
+    h_y_sb = forall_elim h_sub_body, y
+    h_y_in_c = implies_elim h_y_sb, h_y_in1
+    h_y_impl = implies_intro h_y_in_c
+    h_y_all = forall_intro h_y_impl
+    h_sub_sd3 = forall_elim h_sub_sd, fc2
+    h_sub_sd4 = forall_elim h_sub_sd3, c
+    h_sub2 = iff_elim_r h_sub_sd4, h_y_all
     h_impl2 = implies_intro h_sub2
     h_all2 = forall_intro h_impl2
     h_closed = iff_elim_r cdef2, h_all2

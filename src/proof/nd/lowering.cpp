@@ -174,12 +174,6 @@ util::Result<Instr> lower_rule(const ParsedProofStep& step, LowerCtx& lc) {
     }
 
     // Equality
-    if (rule == "eq_subst") {
-        TRY(need_args(2));
-        TRY_ASSIGN(eq,     lc.resolve_step(args[0], "eq_subst"));
-        TRY_ASSIGN(target, lc.resolve_step(args[1], "eq_subst"));
-        return Instr{EqSubst{{}, eq, target}};
-    }
     if (rule == "eq_sym") {
         TRY(need_args(1));
         TRY_ASSIGN(eq, lc.resolve_step(args[0], "eq_sym"));

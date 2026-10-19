@@ -28,7 +28,7 @@ Common proof patterns:
 - To use a universally quantified axiom/theorem: `use` it, then `forall_elim` for each quantifier
 - To extract from a biconditional definition: `iff_elim_l` (forward) or `iff_elim_r` (backward)
 - To prove equality `eq(a,b)`: use `extensionality` to reduce to membership equivalence
-- To substitute equals: `eq_subst h_eq, h_formula` replaces term `a` with `b` given `eq(a,b)`
+- To substitute equals: there is no substitution rule. Use `eq_elem_l` / `eq_elem_r` (or `pair_eq_a`, `pair_eq_b`, `rel_elem_eq`): `forall_elim` to instantiate, `and_intro` for the premise, `implies_elim` to apply
 - To create a formula handle without deriving it (e.g. for `or_intro`): use `let`
 - To construct a concrete set: use the `pairing` axiom + `exists_elim` to get a witness
 - To get a singleton from `pairing(a,a)`: need OR-idempotency conversion (~15 lines)
@@ -69,7 +69,6 @@ bazel test //test:runtime_test
 
 If it fails, read the test log to find the error, fix the proof, and re-run. Common errors:
 - "formula not derived" - a step references something not yet proven in the current scope
-- "expected eq(a, b)" - eq_subst's first arg isn't an equality
 - "doesn't match" - formula structure mismatch (e.g. wrong side of iff_elim)
 - "not in fix_var scope" / "not in assumption scope" - forall_intro/implies_intro called without proper scope
 
@@ -120,9 +119,6 @@ forall_elim h, term     # forall x. P(x), t => P(t)
 exists_intro h          # P(t) => exists x. P(x) (or closes exists scope if in one)
 exists_elim h           # exists x. P(x) => opens witness scope with P(c)
 exists_elim h, name     # same, but names the witness variable for use in forall_elim
-
-# Equality
-eq_subst h_eq, h_phi    # eq(a,b), phi(a) => phi(b) (replace a with b)
 
 # Classical
 double_neg_elim h       # ~~A => A

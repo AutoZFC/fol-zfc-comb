@@ -315,9 +315,6 @@ FormulaResult ProofContext::exists_elim(FormulaHandle const& f) {
 }
 
 // Equality
-FormulaResult ProofContext::eq_subst(FormulaHandle const& eq, FormulaHandle const& target) {
-    return stack_.eq_subst(eq, target);
-}
 FormulaResult ProofContext::eq_sym(FormulaHandle const& eq) {
     return stack_.eq_sym(eq);
 }

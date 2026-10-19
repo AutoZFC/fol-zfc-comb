@@ -225,7 +225,12 @@ proof succ_of_transitive:
 
     # Case 2: eq(u, x)
     h_case2 = assume eq(u, x)
-    h_v_in_x2 = eq_subst h_case2, h_v_in_u
+    h_v_in_x2_ee = use eq_elem_r
+    h_v_in_x2_ee1 = forall_elim h_v_in_x2_ee, v
+    h_v_in_x2_ee2 = forall_elim h_v_in_x2_ee1, u
+    h_v_in_x2_ee3 = forall_elim h_v_in_x2_ee2, x
+    h_v_in_x2_eec = and_intro h_case2, h_v_in_u
+    h_v_in_x2 = implies_elim h_v_in_x2_ee3, h_v_in_x2_eec
     h_v_disj2 = or_intro_l h_v_in_x2, d_eq_vx
     h_v_in_s2 = iff_elim_r h_v_iff, h_v_disj2
     h_c2_impl = implies_intro h_v_in_s2

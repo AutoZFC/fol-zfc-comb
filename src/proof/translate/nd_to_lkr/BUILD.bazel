@@ -1,6 +1,6 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
-# InputGate — I-1 (no iota) + I-2 (no eq_subst/eq_sym) + I-3 (ND-verifies).
+# InputGate — I-1 (no iota) + I-2 (no eq_sym) + I-3 (ND-verifies).
 cc_library(
     name = "input_gate",
     srcs = ["input_gate.cpp"],

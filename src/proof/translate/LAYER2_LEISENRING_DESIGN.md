@@ -179,8 +179,8 @@ I had constructed.
 
 ```
 NDtoLKR::apply(in):
-    if (in contains eq_subst):
-        error "eq_subst deprecated" (see EQ_SUBST_DEPRECATION.md)
+    if (in contains eq_sym):
+        error "eq_sym not supported"
     if (in contains iota_elim):
         out = EliminateIotaInProof.apply(in)
         return apply(out)              # recurse on iota-free input
@@ -194,7 +194,6 @@ on the goal) are satisfied by construction.
 ## 7. References
 
 - `IOTA_ELIM_DESIGN.md` — Path D's load-time axiom normalization.
-- `EQ_SUBST_DEPRECATION.md` — `eq_subst` deprecation policy.
 - `ELIMINATE_DESCRIPTIONS.md` — spec for `eliminate_descriptions`.
 - Leisenring, *Mathematical Logic and Hilbert's ε-Symbol* (1969) —
   the construction this module realizes.

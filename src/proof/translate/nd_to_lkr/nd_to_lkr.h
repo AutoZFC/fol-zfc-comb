@@ -9,7 +9,7 @@
 //
 // **Input contract** (enforced by InputGate):
 //   - no nd::IotaElim     (run EliminateIotaInProof first if needed)
-//   - no nd::EqSubst/EqSym (deprecated)
+//   - no nd::EqSym         (not translated; use the eq_symmetric lemma)
 //   - ND-verifies under nd::NDVerifier against the goal
 //
 // **Output contract** (enforced by OutputGate):

@@ -11,7 +11,7 @@ A natural deduction theorem prover for first-order logic with ZFC set theory axi
 - **Proof Scripts**: Write and verify proofs in `.fol.def` / `.fol.proof` files
 - **Definition Annotations**: `@def(predicate)` marks axioms as definitions and prevents redefinition
 - **Bazel Proof Verification**: Custom Bazel rules for incremental proof checking with dependency tracking
-- **Equality**: Built-in Leibniz substitution rule (`eq_subst`)
+- **Equality**: Axiomatized in pure FOL by `extensionality` and `elem_subst`; substitution goes through library lemmas such as `eq_elem_l`, `eq_elem_r` and `rel_elem_eq`
 
 ## Building
 
@@ -158,7 +158,6 @@ proof all_Q:
 
 | Rule | Syntax | Description |
 |------|--------|-------------|
-| Eq-Subst | `eq_subst h_eq, h_phi` | Leibniz: `eq(a,b), φ(a) => φ(b)` |
 | Double-Neg-Elim | `double_neg_elim h` | `~~A => A` |
 | Excluded-Middle | `excluded_middle h` | `=> A \| ~A` (h is `let`) |
 
@@ -273,7 +272,7 @@ proof domain_elem:
 
 ### Equality Substitution
 
-`eq_subst` replaces all occurrences of a term given an equality:
+There is no built-in substitution rule. Equality is axiomatized by `extensionality` and `elem_subst` (`zfc/basics/axioms.fol.def`), and substitution goes through derived lemmas: `eq_elem_l` and `eq_elem_r` for the two positions of `elem`, `pair_eq_a` and `pair_eq_b` for ordered pairs, and `rel_elem_eq` for relations. Each use instantiates the lemma with `forall_elim`, builds its premise with `and_intro`, and applies it with `implies_elim`:
 
 ```fol
 # Prove: rel_elem is preserved under equal inputs/outputs
@@ -292,8 +291,15 @@ proof rel_elem_eq:
     h_wit = exists_elim h_ex, w
     h_pair_ab = and_elim_l h_wit
     h_elem_wf = and_elim_r h_wit
-    h_pair_cb = eq_subst h_eq_ac, h_pair_ab   # pair(w, a, b) => pair(w, c, b)
-    h_pair_cd = eq_subst h_eq_bd, h_pair_cb   # pair(w, c, b) => pair(w, c, d)
+    # pair_eq_a: eq(a, c) & pair(w, a, b) -> pair(w, c, b)
+    pea = use pair_eq_a
+    pea1 = forall_elim pea, w
+    pea2 = forall_elim pea1, a
+    pea3 = forall_elim pea2, c
+    pea4 = forall_elim pea3, b
+    h_pea_conj = and_intro h_eq_ac, h_pair_ab
+    h_pair_cb = implies_elim pea4, h_pea_conj
+    # pair_eq_b turns pair(w, c, b) into pair(w, c, d) the same way
     # Fold back to rel_elem(f, c, d)
     # ...
 ```

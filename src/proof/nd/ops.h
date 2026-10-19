@@ -156,8 +156,7 @@ struct ExistsElim {
 // =========================================================================
 // Equality
 // =========================================================================
-struct EqSubst { OpHeader h{}; StepRef eq_formula{}; StepRef target{}; };
-struct EqSym   { OpHeader h{}; StepRef eq_formula{}; };
+struct EqSym { OpHeader h{}; StepRef eq_formula{}; };
 
 // =========================================================================
 // Classical extensions
@@ -195,7 +194,7 @@ using Instr = std::variant<
     NotIntro, NotElim, BottomElim,
     IffIntro, IffElimL, IffElimR,
     ForallIntro, ForallElim, ExistsIntro, ExistsElim,
-    EqSubst, EqSym,
+    EqSym,
     DoubleNegElim, ExcludedMiddle, ClassicalAbsurd, Peirce,
     IotaElim,
     Qed

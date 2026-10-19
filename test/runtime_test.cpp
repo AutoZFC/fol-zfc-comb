@@ -1137,10 +1137,9 @@ bool test_iota_term_to_string() {
     return true;
 }
 
-bool test_iota_in_eq_subst() {
-    // Use iota term with eq_subst
-    // From ∃x.P(x) and eq(a,b) and P(a), derive P(b) via eq_subst
-    // Then from ∃y.Q(y), use iota term in forall_elim on ∀z.(z=z)
+bool test_iota_in_eq_context() {
+    // Use an iota term inside an equality: iota_elim names the witness t,
+    // then forall_elim on ∀x.eq(x,x) at t gives eq(t,t).
     Runtime rt;
 
     auto result = rt.load_with_proofs(R"(
@@ -1943,32 +1942,6 @@ bool test_exists_elim() {
     return true;
 }
 
-// eq_subst: from eq(a,b) and φ(a), derive φ(b).
-bool test_eq_subst_rule() {
-    Runtime rt;
-    auto result = rt.load_with_proofs(R"(
-        axiom all_eq: forall x. forall y. eq(x, y)
-        claim any_to_any: forall x. forall y. (P(x) -> P(y))
-
-        proof any_to_any:
-            fix x
-            fix y
-            h_px = assume P(x)
-            h_eqall = use all_eq
-            h_eq1 = forall_elim h_eqall, x
-            h_eq_xy = forall_elim h_eq1, y
-            h_py = eq_subst h_eq_xy, h_px
-            h_imp = implies_intro h_py
-            h_inner = forall_intro h_imp
-            h_outer = forall_intro h_inner
-            qed h_outer
-    )");
-    if (!result.ok()) { std::cout << "[parse: " << result.error() << "] "; return false; }
-    auto exec = rt.execute_all_proofs(result.value());
-    if (!exec.ok()) { std::cout << "[exec: " << exec.error() << "] "; return false; }
-    return true;
-}
-
 // double_neg_elim: ¬¬A ⊢ A.
 bool test_double_neg_elim_rule() {
     Runtime rt;
@@ -2069,7 +2042,7 @@ int main() {
     run_test("iota_elim nested quantifier", test_iota_elim_nested_quantifier);
     run_test("iota_elim error on non-existential", test_iota_elim_not_exists_error);
     run_test("iota term to_string", test_iota_term_to_string);
-    run_test("iota term in eq context", test_iota_in_eq_subst);
+    run_test("iota term in eq context", test_iota_in_eq_context);
     run_test("iota_elim capture avoidance", test_iota_elim_capture_avoidance);
 
     std::cout << "\n── Path D Load-Time Normalization Tests ──\n";
@@ -2107,7 +2080,6 @@ int main() {
     run_test("and_elim_l / and_elim_r", test_and_elim);
     run_test("or_elim", test_or_elim);
     run_test("exists_elim", test_exists_elim);
-    run_test("eq_subst", test_eq_subst_rule);
     run_test("double_neg_elim", test_double_neg_elim_rule);
     run_test("Proof of unknown claim rejected", test_proof_of_unknown_claim_rejected);
 

@@ -5,13 +5,12 @@
 // Per ND_TO_LKR_DESIGN.md §5, the translator accepts ND programs that:
 //   I-1: contain no nd::IotaElim (Path D + EliminateIotaInProof pre-pass
 //        guarantees ι-freeness; any survival is a composition error).
-//   I-2: contain no nd::EqSubst or nd::EqSym (deprecated, see
-//        EQ_SUBST_DEPRECATION.md).
+//   I-2: contain no nd::EqSym (the translator has no rule for it; proofs
+//        derive symmetry from the eq_symmetric lemma instead).
 //   I-3: ND-verify under nd::NDVerifier against the goal formula
 //        (non-verifying inputs are out of scope by the soundness contract).
 //
-// Any failure → util::Error citing the offending instruction index and
-// the deprecation pointer where applicable.
+// Any failure → util::Error citing the offending instruction index.
 
 #include "src/core/formula.h"
 #include "src/proof/nd/ops.h"

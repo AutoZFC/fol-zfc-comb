@@ -310,16 +310,26 @@ proof binary_union_exists:
     h_wy_iff = forall_elim h_p, wy
     h_wy_disj = iff_elim_l h_wy_iff, h_wy_in_p
 
-    # Case eq(wy, a): elem(x, wy) -> elem(x, a) via eq_subst
+    # Case eq(wy, a): elem(x, wy) -> elem(x, a) via eq_elem_r
     h_eq_wy_a = assume eq(wy, a)
-    h_x_in_a = eq_subst h_eq_wy_a, h_x_in_wy
+    h_x_in_a_ee = use eq_elem_r
+    h_x_in_a_ee1 = forall_elim h_x_in_a_ee, x
+    h_x_in_a_ee2 = forall_elim h_x_in_a_ee1, wy
+    h_x_in_a_ee3 = forall_elim h_x_in_a_ee2, a
+    h_x_in_a_eec = and_intro h_eq_wy_a, h_x_in_wy
+    h_x_in_a = implies_elim h_x_in_a_ee3, h_x_in_a_eec
     d_xb = let elem(x, b)
     h_xa_or = or_intro_l h_x_in_a, d_xb
     h_case_a = implies_intro h_xa_or
 
-    # Case eq(wy, b): elem(x, wy) -> elem(x, b) via eq_subst
+    # Case eq(wy, b): elem(x, wy) -> elem(x, b) via eq_elem_r
     h_eq_wy_b = assume eq(wy, b)
-    h_x_in_b = eq_subst h_eq_wy_b, h_x_in_wy
+    h_x_in_b_ee = use eq_elem_r
+    h_x_in_b_ee1 = forall_elim h_x_in_b_ee, x
+    h_x_in_b_ee2 = forall_elim h_x_in_b_ee1, wy
+    h_x_in_b_ee3 = forall_elim h_x_in_b_ee2, b
+    h_x_in_b_eec = and_intro h_eq_wy_b, h_x_in_wy
+    h_x_in_b = implies_elim h_x_in_b_ee3, h_x_in_b_eec
     d_xa = let elem(x, a)
     h_xb_or = or_intro_r d_xa, h_x_in_b
     h_case_b = implies_intro h_xb_or

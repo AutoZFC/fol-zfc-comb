@@ -68,7 +68,7 @@ proof eq_elem_r:
     qed h1
 
 # Proof of eq_elem_l: from eq(x,y) and elem(x,s), derive elem(y,s) via the
-# `elem_subst` axiom. Pure FOL — no eq_subst rule used.
+# `elem_subst` axiom.
 proof eq_elem_l:
     fix x
     fix y

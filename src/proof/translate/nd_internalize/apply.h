@@ -57,7 +57,7 @@ struct ApplyResult {
 //     the output gate's accept-vs-reject is what surfaces translator
 //     bugs, not input bugs).
 //   - input is iota-free (upstream iota_elim ran).
-//   - input is eq-translation-free (no EqSubst / EqSym; upstream
+//   - input is eq-translation-free (no EqSym; upstream
 //     pass would translate them; absent today's pipeline because no
 //     eq-translation exists, but the boundary check is here).
 //   - every theorem T cited via Use(T) has its SentenceHandle in

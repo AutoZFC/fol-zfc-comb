@@ -323,7 +323,7 @@ proof wf_minimal:
 # If well_founded(r, x) then no element relates to itself.
 # Given singleton(s, a) and set_diff(d, x, s), apply wf_minimal
 # to get a minimal element z of s. Since s = {a}, z = a.
-# Then the universal says ~rel_elem(r, a, a) (via eq_subst).
+# Then the universal says ~rel_elem(r, a, a) (via rel_elem_eq).
 # ============================================================
 proof wf_no_self_loop:
     fix r
@@ -355,7 +355,12 @@ proof wf_no_self_loop:
     sym1 = forall_elim sym, z
     sym2 = forall_elim sym1, a
     h_az = implies_elim sym2, h_za
-    h_zx = eq_subst h_az, h_ax
+    h_zx_ee = use eq_elem_l
+    h_zx_ee1 = forall_elim h_zx_ee, a
+    h_zx_ee2 = forall_elim h_zx_ee1, z
+    h_zx_ee3 = forall_elim h_zx_ee2, x
+    h_zx_eec = and_intro h_az, h_ax
+    h_zx = implies_elim h_zx_ee3, h_zx_eec
     h_impl_z = implies_intro h_zx
     h_all_z = forall_intro h_impl_z
     h_sub_sx = iff_elim_r sub2, h_all_z
@@ -384,11 +389,22 @@ proof wf_no_self_loop:
     # From singleton: eq(z0, a)
     h_z0_iff = forall_elim h_sing_body, z0
     h_z0a = iff_elim_l h_z0_iff, h_z0s
-    # eq_subst: replace z0 with a in h_univ
-    h_univ_a = eq_subst h_z0a, h_univ
-    # h_univ_a: forall y. ((elem(y, x) & rel_elem(r, y, a)) -> ~elem(y, s))
-    h_ua = forall_elim h_univ_a, a
-    h_prem_a = and_intro h_ax, h_raa
+    # Minimality at y := a: (elem(a, x) & rel_elem(r, a, z0)) -> ~elem(a, s)
+    h_ua = forall_elim h_univ, a
+    # rel_elem(r, a, z0) from rel_elem(r, a, a) and eq(a, z0), by rel_elem_eq
+    sym_z0 = forall_elim sym, z0
+    sym_z0a = forall_elim sym_z0, a
+    h_az0 = implies_elim sym_z0a, h_z0a
+    ree = use rel_elem_eq
+    ree1 = forall_elim ree, r
+    ree2 = forall_elim ree1, a
+    ree3 = forall_elim ree2, a
+    ree4 = forall_elim ree3, a
+    ree5 = forall_elim ree4, z0
+    h_ree_p1 = and_intro h_raa, er1
+    h_ree_prem = and_intro h_ree_p1, h_az0
+    h_raz0 = implies_elim ree5, h_ree_prem
+    h_prem_a = and_intro h_ax, h_raz0
     h_not_as = implies_elim h_ua, h_prem_a
     # Contradiction: elem(a, s) and ~elem(a, s)
     h_bot = not_elim h_not_as, h_as

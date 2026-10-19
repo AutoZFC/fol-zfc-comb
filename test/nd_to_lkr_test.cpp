@@ -1,7 +1,7 @@
 // NDtoLKR tests — translator phases brought up one at a time.
 //
 // Phase 1 (skeleton + gates): exercises the InputGate's three rejection
-// modes (I-1 iota, I-2 eq_subst, I-3 non-ND-verify) plus the
+// modes (I-1 iota, I-2 eq_sym, I-3 non-ND-verify) plus the
 // gate-passes-then-stub-error path that confirms the body's call point.
 //
 // Phase 2 (block tree): exercises decompose_blocks on each block kind and
@@ -86,23 +86,19 @@ void test_gate_rejects_iota() {
 }
 
 // -------------------------------------------------------------------------
-// I-2: eq_subst in input is rejected with a pointer to the deprecation.
+// I-2: eq_sym in input is rejected.
 // -------------------------------------------------------------------------
-void test_gate_rejects_eq_subst() {
+void test_gate_rejects_eq_sym() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
-        axiom refl: forall x. eq(x, x)
-        axiom px: forall x. p(x)
-        claim eq_app: forall a. forall b. (eq(a, b) -> p(b))
+        claim eq_app: forall a. forall b. (eq(a, b) -> eq(b, a))
 
         proof eq_app:
             fix a
             fix b
             h_eq = assume eq(a, b)
-            h_px_axiom = use px
-            h_pa = forall_elim h_px_axiom, a
-            h_pb = eq_subst h_eq, h_pa
-            h_impl = implies_intro h_pb
+            h_ba = eq_sym h_eq
+            h_impl = implies_intro h_ba
             h1 = forall_intro h_impl
             h2 = forall_intro h1
             qed h2
@@ -812,7 +808,7 @@ void test_block_rejects_no_qed() {
 
 int main() {
     test_gate_rejects_iota();
-    test_gate_rejects_eq_subst();
+    test_gate_rejects_eq_sym();
     test_gate_rejects_non_verifying();
     test_e2e_use_axiom();
     test_e2e_forall_block();

@@ -253,7 +253,7 @@ Extend `LKRtoCombinatorial` for `Cut` ops:
 
 The following are documented as future work:
 
-- **Equality**. Hughes' paper is FOL without equality. Adding combinatorial-proof support for equality is open research. Our 11 corpus rejections that depend on `EqSubst`/`EqSym` remain unaddressed.
+- **Equality**. Hughes' paper is FOL without equality. Adding combinatorial-proof support for equality is open research. Corpus proofs that use `eq_sym` are still rejected at the translator's input gate.
 - **Cut-elimination at the combinatorial-proof level**. Open per §17. Not required: Theorem 15.1 says cut combinatorial proofs are already sound and complete.
 - **Cut-elimination at the LKR level**. Possible (Gentzen Hauptsatz), but not on this roadmap. We chose Path B above.
 - **Theorem-proof inlining**. Would lose modularity; supplanted by `Cut`-via-§15.

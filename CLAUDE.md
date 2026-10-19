@@ -158,7 +158,8 @@ zfc/
 - **Existential**: `exists_intro`, `exists_elim` (requires eigenvariable)
 
 ### Equality
-- **Substitution**: `eq_subst` (Leibniz substitution: from `eq(a,b)` and `φ(a)`, derive `φ(b)`)
+- **Symmetry**: `eq_sym` (from `eq(a,b)`, derive `eq(b,a)`). The ND→LKR translator rejects it, so library proofs use the `eq_symmetric` lemma instead.
+- **Substitution**: no built-in rule; see [Substituting Equals](#substituting-equals).
 
 ## Parser (Flex/Bison)
 
@@ -393,7 +394,7 @@ exists_elim h           # ∃x.P(x) ⊢ opens witness scope
 exists_elim h, name     # same, but names the witness for use in forall_elim
 
 # Equality
-eq_subst h_eq, h_phi    # eq(a,b), φ(a) ⊢ φ(b) (replaces all a with b)
+eq_sym h_eq             # eq(a,b) ⊢ eq(b,a)
 
 # Classical
 double_neg_elim h       # ¬¬A ⊢ A
@@ -404,19 +405,26 @@ iota_elim h             # ∃x.φ(x) ⊢ φ(ιx.φ(x))
 iota_elim h, t          # same, but names the iota term t for use in forall_elim
 ```
 
-### eq_subst Details
+### Substituting Equals
 
-`eq_subst` implements Leibniz substitution as a built-in rule. Given a derived `eq(a, b)` and a derived formula `φ(a)`, it produces `φ(b)` by replacing **all** occurrences of term `a` with term `b` in the target formula.
+There is no built-in substitution rule. Equality is axiomatized by `extensionality` and `elem_subst` in `zfc/basics/axioms.fol.def`, and substitution goes through derived lemmas:
 
-- The first argument must be a derived formula of the form `eq(a, b)` (the predicate must be named `eq` with exactly 2 arguments)
-- The second argument must be a derived formula containing term `a`
-- For the reverse direction (replace `b` with `a`), use `eq_sym` first to get `eq(b, a)`, then `eq_subst`
+- `eq_elem_l`: `(eq(x, y) & elem(x, s)) -> elem(y, s)` (element position)
+- `eq_elem_r`: `(eq(s, t) & elem(x, s)) -> elem(x, t)` (set position)
+- `pair_eq_a`, `pair_eq_b`: substitute into either component of `pair(p, a, b)`
+- `rel_elem_eq`: `(rel_elem(f, a, b) & eq(a, c) & eq(b, d)) -> rel_elem(f, c, d)`
+- For a defined predicate such as `subset`, unfold its `@def` axiom, substitute inside, and fold back.
 
 ```fol
 # Example: from eq(x,y) and elem(x,s), derive elem(y,s)
 h_eq = ...          # eq(x, y) - derived
 h_elem = ...        # elem(x, s) - derived
-h_result = eq_subst h_eq, h_elem   # elem(y, s)
+ee = use eq_elem_l
+ee1 = forall_elim ee, x
+ee2 = forall_elim ee1, y
+ee3 = forall_elim ee2, s
+h_conj = and_intro h_eq, h_elem
+h_result = implies_elim ee3, h_conj   # elem(y, s)
 ```
 
 ## Writing Tests

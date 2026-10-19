@@ -640,7 +640,8 @@ public:
     FormulaHandle subst_fixed_impl(FormulaHandle h, var_index fixed_var, const Term& replacement, int depth);
 
     // ========== Simple term substitution (no Gen interaction) ==========
-    // Used by eq_subst: replaces one term with another throughout a formula.
+    // Used by exists_intro with a witness: replaces one term with another
+    // throughout a formula.
     Term translate_in_term(const Term& t, const Term& old_term, const Term& new_term);
     FormulaHandle translate_term(FormulaHandle const &h, Term const &old_term, Term const &new_term);
 

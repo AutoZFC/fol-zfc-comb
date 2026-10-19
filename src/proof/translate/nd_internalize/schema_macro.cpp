@@ -137,10 +137,6 @@ nd::Instr remap_refs(const nd::Instr& instr, const std::vector<uint32_t>& remap)
             nd::ExistsElim o = op; o.formula = S(op.formula); return nd::Instr{o};
         },
 
-        [&](const nd::EqSubst& op) -> nd::Instr {
-            nd::EqSubst o = op; o.eq_formula = S(op.eq_formula); o.target = S(op.target);
-            return nd::Instr{o};
-        },
         [&](const nd::EqSym& op) -> nd::Instr {
             nd::EqSym o = op; o.eq_formula = S(op.eq_formula); return nd::Instr{o};
         },

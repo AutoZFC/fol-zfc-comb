@@ -92,7 +92,6 @@ proof nat_is_transitive:
 
     # Case 2: eq(z1, x1) -> elem(z1, n) because x1 in n
     h_c2 = assume eq(z1, x1)
-    h_z1_in_n_c2 = eq_subst h_c2, h_x1_in_n
     esym = use eq_symmetric
     esym1 = forall_elim esym, z1
     esym2 = forall_elim esym1, x1
@@ -402,12 +401,17 @@ proof nat_subset_elem:
     h_z3_in_a2_c1 = implies_elim h_z3_x1_impl, h_z3_in_x1
     h_z3_c1_impl = implies_intro h_z3_in_a2_c1
 
-    # Sub-case: eq(z3, x1) -> elem(z3, a2) via eq_subst
+    # Sub-case: eq(z3, x1) -> elem(z3, a2) via eq_elem_l
     h_z3_eq_x1 = assume eq(z3, x1)
     esym_z3 = forall_elim esym, z3
     esym_z3x1 = forall_elim esym_z3, x1
     h_eq_x1_z3 = implies_elim esym_z3x1, h_z3_eq_x1
-    h_z3_in_a2_c2 = eq_subst h_eq_x1_z3, h_x1_in_a2
+    h_z3_in_a2_c2_ee = use eq_elem_l
+    h_z3_in_a2_c2_ee1 = forall_elim h_z3_in_a2_c2_ee, x1
+    h_z3_in_a2_c2_ee2 = forall_elim h_z3_in_a2_c2_ee1, z3
+    h_z3_in_a2_c2_ee3 = forall_elim h_z3_in_a2_c2_ee2, a2
+    h_z3_in_a2_c2_eec = and_intro h_eq_x1_z3, h_x1_in_a2
+    h_z3_in_a2_c2 = implies_elim h_z3_in_a2_c2_ee3, h_z3_in_a2_c2_eec
     h_z3_c2_impl = implies_intro h_z3_in_a2_c2
 
     h_z3_in_a2 = or_elim h_z3_disj, h_z3_c1_impl, h_z3_c2_impl
@@ -433,7 +437,7 @@ proof nat_subset_elem:
     h_not_x1_a2 = assume ~elem(x1, a2)
 
     # Show subset(a2, x1): for z in a2, z in s1 -> z in x1 | eq(z, x1)
-    # If eq(z, x1), then elem(x1, a2) via eq_subst, contradicting ~elem(x1, a2)
+    # If eq(z, x1), then elem(x1, a2) via eq_elem_l, contradicting ~elem(x1, a2)
     fix z2
     h_z2_in_a2 = assume elem(z2, a2)
     h_z2_impl_s = forall_elim h_sub_a2_body, z2
@@ -447,7 +451,12 @@ proof nat_subset_elem:
 
     # Sub-case: eq(z2, x1) — contradiction
     h_z2_eq_x1 = assume eq(z2, x1)
-    h_x1_in_a2_contra = eq_subst h_z2_eq_x1, h_z2_in_a2
+    h_x1_in_a2_contra_ee = use eq_elem_l
+    h_x1_in_a2_contra_ee1 = forall_elim h_x1_in_a2_contra_ee, z2
+    h_x1_in_a2_contra_ee2 = forall_elim h_x1_in_a2_contra_ee1, x1
+    h_x1_in_a2_contra_ee3 = forall_elim h_x1_in_a2_contra_ee2, a2
+    h_x1_in_a2_contra_eec = and_intro h_z2_eq_x1, h_z2_in_a2
+    h_x1_in_a2_contra = implies_elim h_x1_in_a2_contra_ee3, h_x1_in_a2_contra_eec
     h_bot_c2 = not_elim h_not_x1_a2, h_x1_in_a2_contra
     d_z2_in_x1 = let elem(z2, x1)
     h_z2_x1_bot = bottom_elim h_bot_c2, d_z2_in_x1
@@ -481,7 +490,12 @@ proof nat_subset_elem:
     esym_a2 = forall_elim esym, a2
     esym_a2x1 = forall_elim esym_a2, x1
     h_eq_x1_a2 = implies_elim esym_a2x1, h_a2_eq_x1
-    h_a2_in_s1_ih2 = eq_subst h_eq_x1_a2, h_x1_in_s1
+    h_a2_in_s1_ih2_ee = use eq_elem_l
+    h_a2_in_s1_ih2_ee1 = forall_elim h_a2_in_s1_ih2_ee, x1
+    h_a2_in_s1_ih2_ee2 = forall_elim h_a2_in_s1_ih2_ee1, a2
+    h_a2_in_s1_ih2_ee3 = forall_elim h_a2_in_s1_ih2_ee2, s1
+    h_a2_in_s1_ih2_eec = and_intro h_eq_x1_a2, h_x1_in_s1
+    h_a2_in_s1_ih2 = implies_elim h_a2_in_s1_ih2_ee3, h_a2_in_s1_ih2_eec
     d_eq_a2_s1c = let eq(a2, s1)
     h_ih2_result = or_intro_l h_a2_in_s1_ih2, d_eq_a2_s1c
     h_ih2_impl = implies_intro h_ih2_result
@@ -524,7 +538,12 @@ proof nat_subset_elem:
     esym_wS = forall_elim esym, wS
     esym_wSn = forall_elim esym_wS, n
     h_eq_nS = implies_elim esym_wSn, h_eq_Sn
-    h_b_in_S = eq_subst h_eq_nS, h_b_in_n
+    h_b_in_S_ee = use eq_elem_r
+    h_b_in_S_ee1 = forall_elim h_b_in_S_ee, b
+    h_b_in_S_ee2 = forall_elim h_b_in_S_ee1, n
+    h_b_in_S_ee3 = forall_elim h_b_in_S_ee2, wS
+    h_b_in_S_eec = and_intro h_eq_nS, h_b_in_n
+    h_b_in_S = implies_elim h_b_in_S_ee3, h_b_in_S_eec
 
     # Extract property for our specific b
     h_b_sep = forall_elim h_S, b
@@ -700,12 +719,17 @@ proof nat_trichotomy:
     h_tri_D1 = or_intro_l h_left_D1, d_s1a2_D1
     h_D1_impl = implies_intro h_tri_D1
 
-    # Sub-case: eq(a2, x1) → elem(a2, s1) via elem_in_succ + eq_subst
+    # Sub-case: eq(a2, x1) → elem(a2, s1) via elem_in_succ + eq_elem_l
     h_a2_eq_x1_D = assume eq(a2, x1)
     esym_a2x = forall_elim esym, a2
     esym_a2x1 = forall_elim esym_a2x, x1
     h_eq_x1_a2_D = implies_elim esym_a2x1, h_a2_eq_x1_D
-    h_a2_in_s1_D2 = eq_subst h_eq_x1_a2_D, h_x1_in_s1
+    h_a2_in_s1_D2_ee = use eq_elem_l
+    h_a2_in_s1_D2_ee1 = forall_elim h_a2_in_s1_D2_ee, x1
+    h_a2_in_s1_D2_ee2 = forall_elim h_a2_in_s1_D2_ee1, a2
+    h_a2_in_s1_D2_ee3 = forall_elim h_a2_in_s1_D2_ee2, s1
+    h_a2_in_s1_D2_eec = and_intro h_eq_x1_a2_D, h_x1_in_s1
+    h_a2_in_s1_D2 = implies_elim h_a2_in_s1_D2_ee3, h_a2_in_s1_D2_eec
     d_eq_a2s1_D2 = let eq(a2, s1)
     h_left_D2 = or_intro_l h_a2_in_s1_D2, d_eq_a2s1_D2
     d_s1a2_D2 = let elem(s1, a2)
@@ -749,7 +773,12 @@ proof nat_trichotomy:
     esym_z3x = forall_elim esym, z3
     esym_z3x1 = forall_elim esym_z3x, x1
     h_eq_x1_z3 = implies_elim esym_z3x1, h_z3_eq_x1
-    h_z3_in_a2_c2 = eq_subst h_eq_x1_z3, h_x1_in_a2
+    h_z3_in_a2_c2_ee = use eq_elem_l
+    h_z3_in_a2_c2_ee1 = forall_elim h_z3_in_a2_c2_ee, x1
+    h_z3_in_a2_c2_ee2 = forall_elim h_z3_in_a2_c2_ee1, z3
+    h_z3_in_a2_c2_ee3 = forall_elim h_z3_in_a2_c2_ee2, a2
+    h_z3_in_a2_c2_eec = and_intro h_eq_x1_z3, h_x1_in_a2
+    h_z3_in_a2_c2 = implies_elim h_z3_in_a2_c2_ee3, h_z3_in_a2_c2_eec
     h_z3_c2_impl = implies_intro h_z3_in_a2_c2
 
     h_z3_in_a2 = or_elim h_z3_disj, h_z3_c1_impl, h_z3_c2_impl
@@ -823,7 +852,12 @@ proof nat_trichotomy:
     esym_wS = forall_elim esym, wS
     esym_wSn = forall_elim esym_wS, n
     h_eq_nS = implies_elim esym_wSn, h_eq_Sn
-    h_b_in_S = eq_subst h_eq_nS, h_b_in_n
+    h_b_in_S_ee = use eq_elem_r
+    h_b_in_S_ee1 = forall_elim h_b_in_S_ee, b
+    h_b_in_S_ee2 = forall_elim h_b_in_S_ee1, n
+    h_b_in_S_ee3 = forall_elim h_b_in_S_ee2, wS
+    h_b_in_S_eec = and_intro h_eq_nS, h_b_in_n
+    h_b_in_S = implies_elim h_b_in_S_ee3, h_b_in_S_eec
 
     # Extract trichotomy for our a, b
     h_b_sep = forall_elim h_S, b

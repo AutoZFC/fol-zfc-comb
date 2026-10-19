@@ -63,7 +63,7 @@ Everything else emits cut-free LKR. The boundary contract that justifies
 this stronger guarantee:
 
 - **Stage 1 (already landed)** delivers a Program<nd::Instr> with no
-  `Use`, no `SchemaInst`, no `IotaElim`, no `EqSubst/EqSym`. So no
+  `Use`, no `SchemaInst`, no `IotaElim`, no `EqSym`. So no
   citation cuts and no equality cuts reach Stage 2. The only ops that
   remain are the structural, intro, projection-elim, combining-elim, and
   classical families.
@@ -155,7 +155,7 @@ The recursion bottoms out at:
   intro) via AxiomLit / `emit_close`.
 - **`Fix`**: not a derivation step; referenced only as a TermRef. The
   enclosing ForallIntro emitter binds `shadow.lkr_term_for[fix_idx]`.
-- **`Use` / `SchemaInst` / `IotaElim` / `EqSubst` / `EqSym`**: cannot
+- **`Use` / `SchemaInst` / `IotaElim` / `EqSym`**: cannot
   occur — Stage 1's input gate guarantees their absence.
 
 **Per-op emitter contract** (Phases 1–3): each emitter handles ONE op,
@@ -175,7 +175,7 @@ which IMPLIES block").
 ### 1.5 Soundness/completeness contracts (boundary discipline)
 
 - **Input contract** (enforced by InputGate, reused as-is): no
-  IotaElim, no EqSubst/EqSym, NDVerifier accepts the input against the
+  IotaElim, no EqSym, NDVerifier accepts the input against the
   caller-supplied goal.
 - **Output contract** (enforced by OutputGate, reused as-is): the
   emitted Program<lkr::Instr> verifies under LKRVerifier against
@@ -205,7 +205,7 @@ chain; …` and the body proves φ. Either way:
 
 - **no `Use` ops** anywhere in the body
 - **no `SchemaInst` ops**
-- **no `IotaElim`, `EqSubst`, `EqSym`** (Stage 1's output gate enforces)
+- **no `IotaElim`, `EqSym`** (Stage 1's output gate enforces)
 
 This is the proof Stage 2's `apply` consumes.
 

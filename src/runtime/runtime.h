@@ -153,7 +153,6 @@ public:
     std::optional<Term> last_witness() const { return stack_.last_witness_var(); }
 
     // ========== Equality ==========
-    FormulaResult eq_subst(FormulaHandle const& eq_formula, FormulaHandle const& target);
     FormulaResult eq_sym(FormulaHandle const& eq_formula);
 
     // ========== Schema Instantiation ==========
