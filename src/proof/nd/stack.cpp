@@ -598,7 +598,7 @@ FormulaResult ProofStack::exists_elim(FormulaHandle const &formula) {
     return f;
 }
 
-// ========== Equality Substitution ==========
+// ========== Schema Instantiation ==========
 
 FormulaResult ProofStack::schema_inst(const SchemaDefinition& schema,
                                        const std::vector<SchemaBind>& bindings) {
