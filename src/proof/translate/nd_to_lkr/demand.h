@@ -1,99 +1,134 @@
 #pragma once
 
-// Demand variant: the cut-free projection-elim mechanism.
-//
-// Per CUT_MINIMAL_DESIGN.md §1.4 + §6.1, Prawitz' correspondence makes
-// projection elims cut-free by "absorption into the producer's
-// translation." A projection elim like `and_elim_l(h_ab)` does NOT emit
-// LKR ops itself — it issues a Demand to the recursion, which then
-// drives the producer's translation to expose the demanded sub-formula
-// directly.
-//
-// Demand values are produced by Phase 2 (projection emitters) and
-// consumed by Phase 5 (dispatcher) + demand-aware Phase 1 emitters.
+// Demands, targets, hypothesis ids (ELIMINATION_DEMANDS_DESIGN.md §1.3–§1.5).
 
 #include "src/core/formula.h"
 #include "src/proof/ir.h"
+#include "src/proof/lkr_build/sequent.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <optional>
 #include <variant>
 #include <vector>
 
 namespace logic::proof::translate::nd_to_lkr {
 
-// =========================================================================
-// Demand
-// =========================================================================
-//
-// Default behavior: NONE (produce the full F_k). Other variants
-// short-circuit the producer's emission to extract just the demanded
-// sub-formula.
+using lkr_build::TermBinding;
 
-struct DemandNone {};                               // default; full F_k.
-struct DemandAndLeft {};                            // ↞ and_elim_l: F_k's ⋀-left.
-struct DemandAndRight {};                           // ↞ and_elim_r: F_k's ⋀-right.
-struct DemandIffLeft {};                            // ↞ iff_elim_l: forward A→B.
-struct DemandIffRight {};                           // ↞ iff_elim_r: reverse B→A.
-struct DemandDoubleNeg {};                          // ↞ double_neg_elim: strip ¬¬.
+// An ND step's hypothesis, or a local one the translator introduces.
+class HypId {
+public:
+    static HypId of_step(StepRef s) { return HypId(Kind::Step, s.idx); }
+    static HypId local(uint32_t n) { return HypId(Kind::Local, n); }
 
-// INSTANCE(t, lkr_ref): ↞ forall_elim. The producer's ∀x.φ is
-// instantiated at the term `t`. Phase 1's demand-aware ForallIntro
-// substitutes eigen→t in the body when it sees this demand;
-// shadow.lkr_term_for[fix_idx] is updated to {lkr_ref, t} so body-
-// side LKR-TermRef references (e.g. nested Exists witness) resolve
-// to the original LKR binding instr for t.
-struct DemandInstance {
-    Term    t{};
-    TermRef lkr_ref{};
+    bool operator==(const HypId&) const = default;
+
+    size_t hash_value() const {
+        return std::hash<uint64_t>{}(
+            (static_cast<uint64_t>(kind_) << 32) | index_);
+    }
+
+private:
+    enum class Kind : uint8_t { Step, Local };
+    HypId(Kind kind, uint32_t index) : kind_(kind), index_(index) {}
+
+    Kind     kind_;
+    uint32_t index_;
 };
 
+struct HypIdHash {
+    size_t operator()(const HypId& h) const { return h.hash_value(); }
+};
+
+using Minor = std::variant<StepRef, HypId>;
+
+enum class Side : uint8_t { Left, Right };
+
+struct DemandInstance { TermBinding term; };
+struct DemandAndLeft {};
+struct DemandAndRight {};
+struct DemandModus { Minor antecedent; };
+struct DemandIffModus { StepRef operand; Side side; };
+struct DemandRefute { StepRef refuter; };
+struct DemandCases { StepRef if_left; StepRef if_right; };
+struct DemandWitness { StepRef closer; };
+
 using Demand = std::variant<
-    DemandNone,
+    DemandInstance,
     DemandAndLeft, DemandAndRight,
-    DemandIffLeft, DemandIffRight,
-    DemandDoubleNeg,
-    DemandInstance
->;
+    DemandModus, DemandIffModus, DemandRefute,
+    DemandCases, DemandWitness>;
 
-// =========================================================================
-// DemandPath — ordered chain of projection demands.
-// =========================================================================
-//
-// Projection elims compose. For a consumer chain like
-//   forall_elim(h_ax: ∀x.(p∧q), t) → (p∧q)(t)
-//   and_elim_l(_)                  → p(t)
-// the demand at the lemma h_ax must encode BOTH projections in order:
-// "INSTANCE(t) first (peels ∀), then AND_LEFT (peels ∧)."
-//
-// Chain semantics:
-//   path[0]   = first projection to apply (= lemma's outermost shape)
-//   path[N-1] = last projection (= deepest nested shape)
-//
-// Composition rule: each projection elim PREPENDS its demand to the
-// incoming chain. The dispatcher's recursion at a projection elim
-// step transforms the incoming chain into {its_demand} ++ incoming.
-//
-// At leaves (Use, SchemaInst, Assume, ExistsElim), the chain is
-// applied in order: Cut(lemma_full) + structural decomposition (Exists
-// for INSTANCE, Or for AND_LEFT/RIGHT, ...) + emit_close.
-//
-// Empty path == DemandNone (no projection applied).
+// The eliminations still to apply to a step's result, head first.
+class DemandPath {
+public:
+    bool   empty() const { return reversed_.empty(); }
+    size_t size() const { return reversed_.size(); }
 
-using DemandPath = std::vector<Demand>;
+    const Demand& head() const { return reversed_.back(); }
 
-// =========================================================================
-// RecurseDescriptor — Phase 2 emitter output.
-// =========================================================================
-//
-// A projection elim's emitter returns one of these. The dispatcher
-// (Phase 5) follows the descriptor: it visits `producer_step_idx`,
-// passing the composed chain (PREPEND descriptor's demand to incoming
-// chain) to the producer's recursion, with `target_pos` as where the
-// result should land.
+    void push(Demand d) { reversed_.push_back(std::move(d)); }
 
-struct RecurseDescriptor {
-    StepRef producer{};                 // the ND step to recurse into
-    size_t  target_pos{0};               // sequent position where result lands
-    Demand  demand{DemandNone{}};        // the projection's own demand
+    Demand pop() {
+        Demand d = std::move(reversed_.back());
+        reversed_.pop_back();
+        return d;
+    }
+
+    template <typename F>
+    void for_each(F&& f) const {
+        for (auto it = reversed_.rbegin(); it != reversed_.rend(); ++it) f(*it);
+    }
+
+    // No Step minor, Cases or Witness, so copying it copies no translation.
+    bool step_free() const;
+
+    bool projection_only() const;
+
+private:
+    std::vector<Demand> reversed_;
+};
+
+inline bool DemandPath::step_free() const {
+    bool free = true;
+    for_each([&](const Demand& d) {
+        if (auto* m = std::get_if<DemandModus>(&d)) {
+            if (std::holds_alternative<StepRef>(m->antecedent)) free = false;
+        } else if (!std::holds_alternative<DemandInstance>(d) &&
+                   !std::holds_alternative<DemandAndLeft>(d) &&
+                   !std::holds_alternative<DemandAndRight>(d)) {
+            free = false;
+        }
+    });
+    return free;
+}
+
+inline bool DemandPath::projection_only() const {
+    bool only = true;
+    for_each([&](const Demand& d) {
+        if (!std::holds_alternative<DemandInstance>(d) &&
+            !std::holds_alternative<DemandAndLeft>(d) &&
+            !std::holds_alternative<DemandAndRight>(d)) {
+            only = false;
+        }
+    });
+    return only;
+}
+
+// A sequent position, or none when the demanded result is ⊥ (§1.3).
+class Target {
+public:
+    static Target at(size_t pos) { return Target(pos); }
+    static Target none() { return Target(std::nullopt); }
+
+    bool   is_none() const { return !pos_.has_value(); }
+    size_t pos() const { return *pos_; }
+
+private:
+    explicit Target(std::optional<size_t> pos) : pos_(pos) {}
+    std::optional<size_t> pos_;
 };
 
 }  // namespace logic::proof::translate::nd_to_lkr

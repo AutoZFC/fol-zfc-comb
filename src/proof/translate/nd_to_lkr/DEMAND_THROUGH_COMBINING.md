@@ -1,5 +1,10 @@
 # Stage 2 Phase 6: demand propagation through combining elims
 
+> **2026-10-27:** superseded by [ELIMINATION_DEMANDS_DESIGN.md] (Phase 7):
+> the combining eliminations are themselves demands, so a projection demand
+> reaches the major premise directly. §1.1's contract carries over
+> unchanged (Phase 7 §1.4).
+
 > **Status.** Draft 2026-05-26. Refines [CUT_MINIMAL_DESIGN.md] §5d / §5e.
 > Math-first per [[math-first-discipline]]: spec here, tests in
 > `test/cut_minimal_demand_through_combining_test.cpp`, then impl, then

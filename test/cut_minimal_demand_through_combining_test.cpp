@@ -16,14 +16,7 @@
 //     → implies_intro chain
 //     → forall_intro
 //
-// At ImpliesElim/IffElim/OrElim dispatch, target_pos's content is
-// NNF(φ(?, z)) (atomic after pre-substitution by the outer Forall);
-// the emitter's psi-side carries the un-instantiated NNF(¬∀y.φ) =
-// ∃y.¬φ. The fix (apply_path_and_close on psi-vs-target with
-// norm_path) closes the gap.
-//
-// LKRVerifier acceptance is the soundness witness. All tests should
-// be RED before the fix lands and GREEN after.
+// Since Phase 7 the combining elims are demands; these are regressions.
 
 #include "src/core/formula.h"
 #include "src/parser/parser.h"
@@ -35,10 +28,7 @@
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
 #include "src/proof/runner.h"
-#include "src/proof/translate/nd_to_lkr/block_tree.h"
-#include "src/proof/translate/nd_to_lkr/demand.h"
-#include "src/proof/translate/nd_to_lkr/dispatcher.h"
-#include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
+#include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/runtime/runtime.h"
 
 #include <cassert>
@@ -47,13 +37,7 @@
 
 using namespace logic;
 using namespace logic::proof;
-using logic::proof::translate::nd_to_lkr::DemandPath;
-using logic::proof::translate::nd_to_lkr::SequentShadow;
-using logic::proof::translate::nd_to_lkr::decompose_blocks;
-using logic::proof::translate::nd_to_lkr::dispatcher::CloserToOpener;
-using logic::proof::translate::nd_to_lkr::dispatcher::Ctx;
-using logic::proof::translate::nd_to_lkr::dispatcher::build_closer_to_opener;
-using logic::proof::translate::nd_to_lkr::dispatcher::translate_step;
+using logic::proof::translate::nd_to_lkr::NDtoLKR;
 
 namespace {
 
@@ -81,59 +65,15 @@ Program<nd::Instr> lower_or_die(const ParsedProof& parsed,
     return std::move(r).unwrap();
 }
 
-StepRef find_qed_derived(const Program<nd::Instr>& prog) {
-    for (const auto& instr : prog.instrs) {
-        if (auto* qed = std::get_if<nd::Qed>(&instr)) {
-            return qed->derived;
-        }
-    }
-    std::cerr << "no Qed found\n";
-    std::abort();
-}
-
 util::ResultStatus translate_and_verify(
     Runtime&                    rt,
     const Program<nd::Instr>&   prog,
-    FormulaHandle               goal,
-    const std::string&          claim_name)
+    FormulaHandle               goal)
 {
-    nd::NDVerifier verifier;
-    auto trace_r = verifier.trace_full(rt.context(), prog);
-    if (!trace_r.ok()) return trace_r.error();
-    auto trace = std::move(trace_r).unwrap();
-
-    FormulaBuilder builder(rt.context());
-    // Seed builder depth above the ND trace's eigen high-water mark so
-    // emit_close's enter_scope() returns indices disjoint from trace-
-    // side eigens. (Mirrors nd_to_lkr.cpp:46 — the production path
-    // already does this; without it, an inner emit_close Forall can
-    // collide with an outer fix-var eigen.)
-    while (builder.depth() < trace.next_free_var) builder.enter_scope();
-    FormulaHandle goal_nnf = builder.to_nnf(goal);
-
-    SequentShadow shadow;
-    shadow.entries.push_back(goal_nnf);
-
-    auto blocks_r = decompose_blocks(prog);
-    if (!blocks_r.ok()) return blocks_r.error();
-    CloserToOpener c2o = build_closer_to_opener(*blocks_r.value());
-
-    Ctx dcc{rt.context(), builder, prog, trace, c2o};
-    StepRef qed_derived = find_qed_derived(prog);
-
-    std::vector<lkr::Instr> emitted;
-    auto disp_r = translate_step(
-        dcc, std::move(shadow), qed_derived,
-        /*target_pos=*/0, DemandPath{}, emitted);
-    if (!disp_r.ok()) return disp_r.error();
-
-    LKRProgram lkr_prog;
-    lkr_prog.claim_name = claim_name;
-    lkr_prog.instrs = std::move(emitted);
-
-    Proof p{System::LKR, std::move(lkr_prog)};
-    lkr::LKRVerifier v;
-    return v.verify(rt.context(), goal, p);
+    NDtoLKR pass(rt.context(), goal);
+    auto out = pass.apply(prog);
+    if (!out.ok()) return out.error();
+    return util::Ok();
 }
 
 void run_proof_test(const char* claim_name,
@@ -152,7 +92,7 @@ void run_proof_test(const char* claim_name,
         ++g_failed; return;
     }
     FormulaHandle goal = sh->get().root();
-    CHECK_OK(translate_and_verify(rt, prog, goal, claim_name));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================

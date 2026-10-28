@@ -1,15 +1,4 @@
-// Stage 2 Phase 5b tests: dispatcher.{h,cpp} — recursive descent over
-// the ND derivation tree.
-//
-// Phase 5b's dispatcher handles the intro family + ExcludedMiddle/
-// Peirce ZeroPremise closures. Other op families (projection/
-// combining/structural/closer) return "not yet supported" — those
-// land in Phases 5c-5e.
-//
-// End-to-end: parse a small intro-only ND proof, lower it, run the
-// dispatcher against the goal NNF, and verify the resulting LKR
-// program with LKRVerifier. LKRVerifier acceptance is the soundness
-// witness.
+// Stage 2 dispatcher regressions; NDtoLKR's OutputGate verifies each output.
 
 #include "src/core/formula.h"
 #include "src/parser/parser.h"
@@ -21,10 +10,7 @@
 #include "src/proof/nd/verifier.h"
 #include "src/proof/proof.h"
 #include "src/proof/runner.h"
-#include "src/proof/translate/nd_to_lkr/block_tree.h"
-#include "src/proof/translate/nd_to_lkr/demand.h"
-#include "src/proof/translate/nd_to_lkr/dispatcher.h"
-#include "src/proof/translate/nd_to_lkr/sequent_shadow.h"
+#include "src/proof/translate/nd_to_lkr/nd_to_lkr.h"
 #include "src/runtime/runtime.h"
 
 #include <cassert>
@@ -33,15 +19,7 @@
 
 using namespace logic;
 using namespace logic::proof;
-using logic::proof::translate::nd_to_lkr::Demand;
-using logic::proof::translate::nd_to_lkr::DemandPath;
-using logic::proof::translate::nd_to_lkr::DemandNone;
-using logic::proof::translate::nd_to_lkr::SequentShadow;
-using logic::proof::translate::nd_to_lkr::decompose_blocks;
-using logic::proof::translate::nd_to_lkr::dispatcher::CloserToOpener;
-using logic::proof::translate::nd_to_lkr::dispatcher::Ctx;
-using logic::proof::translate::nd_to_lkr::dispatcher::build_closer_to_opener;
-using logic::proof::translate::nd_to_lkr::dispatcher::translate_step;
+using logic::proof::translate::nd_to_lkr::NDtoLKR;
 
 namespace {
 
@@ -76,59 +54,15 @@ Program<nd::Instr> lower_or_die(const ParsedProof& parsed,
     return std::move(r).unwrap();
 }
 
-// Find the Qed step's derived StepRef in a Program.
-StepRef find_qed_derived(const Program<nd::Instr>& prog) {
-    for (const auto& instr : prog.instrs) {
-        if (auto* qed = std::get_if<nd::Qed>(&instr)) {
-            return qed->derived;
-        }
-    }
-    std::cerr << "no Qed found\n";
-    std::abort();
-}
-
-// Drive the dispatcher end-to-end and verify with LKRVerifier.
 util::ResultStatus translate_and_verify(
     Runtime&                    rt,
     const Program<nd::Instr>&   prog,
-    FormulaHandle               goal,
-    const std::string&          claim_name)
+    FormulaHandle               goal)
 {
-    // Trace the ND program.
-    nd::NDVerifier verifier;
-    auto trace_r = verifier.trace_full(rt.context(), prog);
-    if (!trace_r.ok()) return trace_r.error();
-    auto trace = std::move(trace_r).unwrap();
-
-    // Build a FormulaBuilder for the dispatcher.
-    FormulaBuilder builder(rt.context());
-    FormulaHandle goal_nnf = builder.to_nnf(goal);
-
-    // Initial shadow with NNF(goal) at index 0.
-    SequentShadow shadow;
-    shadow.entries.push_back(goal_nnf);
-
-    auto blocks_r = decompose_blocks(prog);
-    if (!blocks_r.ok()) return blocks_r.error();
-    CloserToOpener c2o = build_closer_to_opener(*blocks_r.value());
-
-    Ctx dcc{rt.context(), builder, prog, trace, c2o};
-    StepRef qed_derived = find_qed_derived(prog);
-
-    std::vector<lkr::Instr> emitted;
-    auto disp_r = translate_step(
-        dcc, std::move(shadow), qed_derived,
-        /*target_pos=*/0, DemandPath{}, emitted);
-    if (!disp_r.ok()) return disp_r.error();
-
-    // Wrap in an LKR program and verify.
-    LKRProgram lkr_prog;
-    lkr_prog.claim_name = claim_name;
-    lkr_prog.instrs = std::move(emitted);
-
-    Proof p{System::LKR, std::move(lkr_prog)};
-    lkr::LKRVerifier v;
-    return v.verify(rt.context(), goal, p);
+    NDtoLKR pass(rt.context(), goal);
+    auto out = pass.apply(prog);
+    if (!out.ok()) return out.error();
+    return util::Ok();
 }
 
 // =========================================================================
@@ -152,7 +86,7 @@ void test_excluded_middle_e2e() {
     if (!sh.has_value()) { std::cerr << "no em_test claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "em_test"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================
@@ -177,7 +111,7 @@ void test_peirce_e2e() {
     if (!sh.has_value()) { std::cerr << "no peirce_test claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "peirce_test"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================
@@ -205,7 +139,7 @@ void test_and_of_em_e2e() {
     if (!sh.has_value()) { std::cerr << "no and_em claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "and_em"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================
@@ -238,7 +172,7 @@ void test_and_elim_l_of_em_e2e() {
     if (!sh.has_value()) { std::cerr << "no a_or_na claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "a_or_na"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================
@@ -266,13 +200,13 @@ void test_and_elim_r_of_em_e2e() {
     if (!sh.has_value()) { std::cerr << "no b_or_nb claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "b_or_nb"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 // =========================================================================
-// Test 6: ForallElim returns "Phase 5e" — negative test.
+// Test 6: a proof that leaves its `fix` scope open is rejected.
 // =========================================================================
-void test_forall_elim_not_yet_supported() {
+void test_open_fix_scope_rejected() {
     Runtime rt;
     auto parsed = rt.load_with_proofs(R"(
         axiom all_p: forall x. P(x)
@@ -293,7 +227,7 @@ void test_forall_elim_not_yet_supported() {
     if (!sh.has_value()) { return; }
     FormulaHandle goal = sh->get().root();
 
-    auto r = translate_and_verify(rt, prog, goal, "need_inst");
+    auto r = translate_and_verify(rt, prog, goal);
     CHECK(!r.ok());
 }
 
@@ -350,7 +284,7 @@ void test_forall_elim_e2e() {
     if (!sh.has_value()) { std::cerr << "no fa_inst claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "fa_inst"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 void test_exists_elim_e2e() {
@@ -374,7 +308,7 @@ void test_exists_elim_e2e() {
     if (!sh.has_value()) { std::cerr << "no ex_self claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "ex_self"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 void test_or_elim_e2e() {
@@ -400,7 +334,7 @@ void test_or_elim_e2e() {
     if (!sh.has_value()) { std::cerr << "no or_self claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "or_self"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 void test_forall_intro_e2e() {
@@ -423,7 +357,7 @@ void test_forall_intro_e2e() {
     if (!sh.has_value()) { std::cerr << "no fa_self claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "fa_self"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 void test_not_intro_e2e() {
@@ -447,7 +381,7 @@ void test_not_intro_e2e() {
     if (!sh.has_value()) { std::cerr << "no nn_em claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "nn_em"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 void test_implies_intro_of_assume_e2e() {
@@ -468,7 +402,7 @@ void test_implies_intro_of_assume_e2e() {
     if (!sh.has_value()) { std::cerr << "no p_self claim\n"; ++g_failed; return; }
     FormulaHandle goal = sh->get().root();
 
-    CHECK_OK(translate_and_verify(rt, prog, goal, "p_self"));
+    CHECK_OK(translate_and_verify(rt, prog, goal));
 }
 
 }  // namespace
@@ -479,7 +413,7 @@ int main() {
     test_and_of_em_e2e();
     test_and_elim_l_of_em_e2e();
     test_and_elim_r_of_em_e2e();
-    test_forall_elim_not_yet_supported();
+    test_open_fix_scope_rejected();
     test_implies_intro_of_assume_e2e();
     test_not_intro_e2e();
     test_forall_intro_e2e();

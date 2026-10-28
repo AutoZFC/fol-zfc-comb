@@ -1,0 +1,49 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# nnf_shapes — shape predicates on NNF formulas.
+cc_library(
+    name = "nnf_shapes",
+    hdrs = ["nnf_shapes.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//src/core:formula"],
+)
+
+# lkr_build — Sequent, the sinks and the identity (COMPACT_LKR_DESIGN.md).
+cc_library(
+    name = "lkr_build",
+    srcs = [
+        "identity.cpp",
+        "op_sink.cpp",
+        "sequent.cpp",
+    ],
+    hdrs = [
+        "compact.h",
+        "identity.h",
+        "op_sink.h",
+        "sequent.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":nnf_shapes",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof/lkr:ops",
+        "//src/util:error",
+    ],
+)
+
+# expand — compact LKR to LKR.
+cc_library(
+    name = "expand",
+    srcs = ["expand.cpp"],
+    hdrs = ["expand.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lkr_build",
+        "//src/core:formula",
+        "//src/proof:ir",
+        "//src/proof/lkr:ops",
+        "//src/proof/translate:pass",
+        "//src/util:error",
+    ],
+)

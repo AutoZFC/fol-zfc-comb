@@ -1,608 +1,207 @@
-#include "intros.h"
+// Introductions: right rules and redexes (ELIMINATION_DEMANDS_DESIGN.md §2.2).
 
-#include "emit_close.h"
+#include "dispatcher.h"
 
-#include "src/proof/ir.h"
+#include "src/proof/lkr_build/nnf_shapes.h"
 
 #include <utility>
+#include <variant>
 
-namespace logic::proof::translate::nd_to_lkr::intros {
+namespace logic::proof::translate::nd_to_lkr {
 
 namespace {
 
-// Helper: extract the left/right children of a binary Compound entry.
-// Returns Error with `op_label` in the message if the principal isn't
-// a Compound of `expected_op`.
-struct BinChildren {
-    FormulaHandle left;
-    FormulaHandle right;
-};
-
-util::Result<BinChildren> require_compound(
-    FormulaHandle h, Op expected_op, const char* op_label)
-{
-    if (!h.get().is_compound() ||
-        h.get().as_compound().op != expected_op) {
-        return MAKE_ERROR
-            << op_label << ": principal is not the expected compound";
-    }
-    return BinChildren{h.get().as_compound().left,
-                       h.get().as_compound().right};
-}
-
-util::Result<FormulaHandle> require_quantified(
-    FormulaHandle h, Op expected_op, const char* op_label)
-{
-    if (!h.get().is_quantified() ||
-        h.get().as_quantified().op != expected_op) {
-        return MAKE_ERROR
-            << op_label << ": principal is not the expected quantifier";
-    }
-    return h.get().as_quantified().body;
-}
-
-// Helper: a path is "trivial" if empty or all entries are DemandNone.
-// Trivial paths behave as no demand (= the intro emitter emits the
-// normal right rule).
-bool path_is_trivial(const DemandPath& path) {
-    for (const auto& d : path) {
-        if (!std::holds_alternative<DemandNone>(d)) return false;
-    }
-    return true;
-}
-
-// Helper: assert path is trivial — for emitters that don't accept any
-// demand-aware short-circuit.
-util::ResultStatus require_trivial_path(const DemandPath& path, const char* op_label) {
-    if (!path_is_trivial(path)) {
-        return MAKE_ERROR
-            << op_label << ": unsupported non-trivial demand path "
-            << "(head variant index " << path[0].index() << ")"
-            << " — translator routing bug";
+util::ResultStatus require_target(const Target& target, StepRef step) {
+    if (target.is_none()) {
+        return MAKE_ERROR << "translate: introduction #" << step.idx
+                          << " has no target (its result is never ⊥)";
     }
     return util::Ok();
 }
 
-// Helper: produce path[1:] (the chain tail after popping the head).
-DemandPath path_tail(const DemandPath& path) {
-    if (path.empty()) return {};
-    return DemandPath(path.begin() + 1, path.end());
-}
-
 }  // namespace
 
-// =========================================================================
-// OrIntroL — single Or rule. Premise position = f_k_idx (the left disjunct
-// after Or replaces principal in place).
-// =========================================================================
-util::Result<IntroResult> emit_or_intro_l(
-    Ctx&                     /*cc*/,
-    const nd::OrIntroL&      op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    TRY(require_trivial_path(path, "emit_or_intro_l"));
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_or_intro_l: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::AndIntro& op, Task t) {
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        std::vector<size_t> left_needs, right_needs;
+        need(t.seq, op.a, left_needs);
+        need(t.seq, op.b, right_needs);
+        TRY_ASSIGN(split, std::move(t.seq).and_rule(
+            t.target.pos(), left_needs, right_needs, sink_));
+        return next(TranslateWork{Task{std::move(split.left.shadow), op.a,
+                                       Target::at(split.left.added), {}}},
+                    TranslateWork{Task{std::move(split.right.shadow), op.b,
+                                       Target::at(split.right.added), {}}});
     }
-    auto kids = require_compound(shadow.entries[f_k_idx], Op::Or,
-                                 "emit_or_intro_l");
-    if (!kids.ok()) return kids.error();
-
-    out.emplace_back(lkr::Or{{}, f_k_idx});
-
-    SequentShadow post = shadow;  // copy
-    post.entries[f_k_idx] = kids.value().left;
-    post.entries.push_back(kids.value().right);
-    return IntroResult{OnePremise{std::move(post), f_k_idx, op.a, {}}};
+    if (std::holds_alternative<DemandAndLeft>(t.path.head())) {
+        t.step = op.a;
+    } else if (std::holds_alternative<DemandAndRight>(t.path.head())) {
+        t.step = op.b;
+    } else {
+        return impossible_head(t);
+    }
+    t.path.pop();
+    return next(std::move(t));
 }
 
-// =========================================================================
-// OrIntroR — single Or rule. Premise position = end (the right disjunct
-// after Or appends it).
-// =========================================================================
-util::Result<IntroResult> emit_or_intro_r(
-    Ctx&                     /*cc*/,
-    const nd::OrIntroR&      op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    TRY(require_trivial_path(path, "emit_or_intro_r"));
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_or_intro_r: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::OrIntroL& op, Task t) {
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY(t.seq.or_rule(t.target.pos(), sink_));
+        t.step = op.a;
+        return next(std::move(t));
     }
-    auto kids = require_compound(shadow.entries[f_k_idx], Op::Or,
-                                 "emit_or_intro_r");
-    if (!kids.ok()) return kids.error();
-
-    out.emplace_back(lkr::Or{{}, f_k_idx});
-
-    SequentShadow post = shadow;
-    post.entries[f_k_idx] = kids.value().left;
-    post.entries.push_back(kids.value().right);
-    size_t end_idx = post.entries.size() - 1;
-    return IntroResult{OnePremise{std::move(post), end_idx, op.b, {}}};
+    auto* cases = std::get_if<DemandCases>(&t.path.head());
+    if (!cases) return impossible_head(t);
+    StepRef if_left = cases->if_left;
+    t.path.pop();
+    t.path.push(DemandModus{Minor{op.a}});
+    t.step = if_left;
+    return next(std::move(t));
 }
 
-// =========================================================================
-// ImpliesIntro — NNF(A→B) = NNF(¬A) ∨ NNF(B). Same Or rule as OrIntroR;
-// premise position = the B (at end). The NNF(¬A) at f_k_idx is the
-// assumption's dual — references to the assumption close against it.
-// =========================================================================
-util::Result<IntroResult> emit_implies_intro(
-    Ctx&                     /*cc*/,
-    const nd::ImpliesIntro&  op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    TRY(require_trivial_path(path, "emit_implies_intro"));
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_implies_intro: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::OrIntroR& op, Task t) {
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY_ASSIGN(right, t.seq.or_rule(t.target.pos(), sink_));
+        t.target = Target::at(right);
+        t.step = op.b;
+        return next(std::move(t));
     }
-    auto kids = require_compound(shadow.entries[f_k_idx], Op::Or,
-                                 "emit_implies_intro");
-    if (!kids.ok()) return kids.error();
-
-    out.emplace_back(lkr::Or{{}, f_k_idx});
-
-    SequentShadow post = shadow;
-    post.entries[f_k_idx] = kids.value().left;   // NNF(¬A)
-    post.entries.push_back(kids.value().right);  // NNF(B)
-    size_t end_idx = post.entries.size() - 1;
-    return IntroResult{OnePremise{std::move(post), end_idx, op.conclusion, {}}};
+    auto* cases = std::get_if<DemandCases>(&t.path.head());
+    if (!cases) return impossible_head(t);
+    StepRef if_right = cases->if_right;
+    t.path.pop();
+    t.path.push(DemandModus{Minor{op.b}});
+    t.step = if_right;
+    return next(std::move(t));
 }
 
-// =========================================================================
-// ForallIntro — single Forall rule. Premise position = f_k_idx
-// (body[x:=Term::fixed(eigen)] in place).
-// =========================================================================
-util::Result<IntroResult> emit_forall_intro(
-    Ctx&                     cc,
-    const nd::ForallIntro&   op,
-    var_index                eigen,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_forall_intro: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::ImpliesIntro& op, Task t) {
+    BlockId b = index_.closed_by(t.step);
+    StepRef assumption = index_.opener(b);
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY_ASSIGN(consequent, t.seq.or_rule(t.target.pos(), sink_));
+        t.seq.bind_dual(HypId::of_step(assumption), t.target.pos());
+        return next(EnterWork{b, 0, TranslateWork{Task{
+            std::move(t.seq), op.conclusion, Target::at(consequent), {}}}});
     }
-
-    // Demand-aware INSTANCE(t): pop the INSTANCE head, return
-    // OnePremise routing to op.body. No LKR ops emitted; the
-    // dispatcher pre-substitutes shadow.entries[f_k_idx] and binds
-    // lkr_term_for. remaining_path = path[1:].
-    if (!path.empty() && std::holds_alternative<DemandInstance>(path[0])) {
-        return IntroResult{OnePremise{shadow, f_k_idx, op.body, path_tail(path)}};
-    }
-    TRY(require_trivial_path(path, "emit_forall_intro"));
-
-    auto body = require_quantified(shadow.entries[f_k_idx], Op::Forall,
-                                   "emit_forall_intro");
-    if (!body.ok()) return body.error();
-
-    out.emplace_back(lkr::Forall{{}, f_k_idx, eigen});
-
-    SequentShadow post = shadow;
-    Term fixed_term = Term::fixed(eigen);
-    post.entries[f_k_idx] =
-        cc.builder.instantiate_quantifier_body(body.value(), fixed_term);
-    return IntroResult{OnePremise{std::move(post), f_k_idx, op.body, {}}};
+    auto* modus = std::get_if<DemandModus>(&t.path.head());
+    if (!modus) return impossible_head(t);
+    Minor antecedent = modus->antecedent;
+    t.path.pop();
+    TRY_ASSIGN(bound, bind(std::move(t.seq), assumption, antecedent));
+    return next(std::move(bound.first),
+                EnterWork{b, 0, TranslateWork{Task{std::move(bound.seq),
+                                                   op.conclusion, t.target,
+                                                   std::move(t.path)}}});
 }
 
-// =========================================================================
-// ExistsIntro (witness form) — single Exists rule. The witness's LKR
-// TermRef comes from shadow.lkr_term_for[t.idx].
-// =========================================================================
-util::Result<IntroResult> emit_exists_intro(
-    Ctx&                     cc,
-    const nd::ExistsIntro&   op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    TRY(require_trivial_path(path, "emit_exists_intro"));
-    if (!op.witness.has_value()) {
-        return MAKE_ERROR
-            << "emit_exists_intro: no-witness form is Phase 4 (EXISTS_ELIM closer)";
+util::ResultStatus Dispatcher::on(const nd::IffIntro& op, Task t) {
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        std::vector<size_t> left_needs, right_needs;
+        need(t.seq, op.ab, left_needs);
+        need(t.seq, op.ba, right_needs);
+        TRY_ASSIGN(split, std::move(t.seq).and_rule(
+            t.target.pos(), left_needs, right_needs, sink_));
+        return next(TranslateWork{Task{std::move(split.left.shadow), op.ab,
+                                       Target::at(split.left.added), {}}},
+                    TranslateWork{Task{std::move(split.right.shadow), op.ba,
+                                       Target::at(split.right.added), {}}});
     }
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_exists_intro: f_k_idx out of range";
-    }
-    auto body = require_quantified(shadow.entries[f_k_idx], Op::Exists,
-                                   "emit_exists_intro");
-    if (!body.ok()) return body.error();
-
-    auto t_it = shadow.lkr_term_for.find(op.witness->idx);
-    if (t_it == shadow.lkr_term_for.end()) {
-        return MAKE_ERROR
-            << "emit_exists_intro: ND TermRef #" << op.witness->idx
-            << " has no LKR mapping in shadow";
-    }
-    const auto& binding = t_it->second;
-
-    out.emplace_back(lkr::Exists{{}, f_k_idx, binding.lkr_ref});
-
-    SequentShadow post = shadow;
-    post.entries[f_k_idx] =
-        cc.builder.instantiate_quantifier_body(body.value(), binding.value);
-    return IntroResult{OnePremise{std::move(post), f_k_idx, op.body, {}}};
+    auto* iff = std::get_if<DemandIffModus>(&t.path.head());
+    if (!iff) return impossible_head(t);
+    StepRef operand = iff->operand;
+    t.step = iff->side == Side::Left ? op.ab : op.ba;
+    t.path.pop();
+    t.path.push(DemandModus{Minor{operand}});
+    return next(std::move(t));
 }
 
-// =========================================================================
-// AndIntro — multiplicative ∧R with full-context duplication.
-//
-//   Initial shadow: [γ_0, ..., γ_{n-1}, A∧B at f_k_idx, γ_n, ...].
-//   Step 1: for each non-principal entry γ_i, emit Weakening{γ_i}.
-//           After: |Γ|-many entries appended (duplicate copies of Γ).
-//   Step 2: emit And{principal=f_k_idx, right_needs=[dup indices]}.
-//           LEFT  = original non-principal entries + A.
-//           RIGHT = duplicated non-principal entries + B.
-//
-// Returns TwoPremise with each subgoal's shadow + per-premise position
-// (= the A or B position at the end of each subgoal).
-// =========================================================================
-util::Result<IntroResult> emit_and_intro(
-    Ctx&                     /*cc*/,
-    const nd::AndIntro&      op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_and_intro: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::ForallIntro& op, Task t) {
+    BlockId b = index_.closed_by(t.step);
+    StepRef fix = index_.opener(b);
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY_ASSIGN(eigen, t.seq.forall_rule(t.target.pos(), builder_, sink_));
+        t.seq.terms().bind(fix, eigen);
+    } else if (auto* inst = std::get_if<DemandInstance>(&t.path.head())) {
+        t.seq.terms().bind(fix, inst->term);
+        t.path.pop();
+    } else {
+        return impossible_head(t);
     }
-
-    // Demand-aware short-circuits: AND_LEFT or AND_RIGHT route the
-    // recursion to op.a or op.b respectively, with no LKR emission.
-    // remaining_path = path[1:].
-    if (!path.empty() && std::holds_alternative<DemandAndLeft>(path[0])) {
-        return IntroResult{OnePremise{shadow, f_k_idx, op.a, path_tail(path)}};
-    }
-    if (!path.empty() && std::holds_alternative<DemandAndRight>(path[0])) {
-        return IntroResult{OnePremise{shadow, f_k_idx, op.b, path_tail(path)}};
-    }
-    TRY(require_trivial_path(path, "emit_and_intro"));
-
-    auto kids = require_compound(shadow.entries[f_k_idx], Op::And,
-                                 "emit_and_intro");
-    if (!kids.ok()) return kids.error();
-    FormulaHandle phi   = kids.value().left;   // A
-    FormulaHandle theta = kids.value().right;  // B
-
-    // Build the "post-Weakening" shadow representing the parent after
-    // emit-time. The Weakenings append duplicate copies of every
-    // non-principal entry.
-    SequentShadow weakened = shadow;
-    const size_t original_size = shadow.entries.size();
-    std::vector<size_t> right_needs;
-    right_needs.reserve(original_size - 1);
-    for (size_t i = 0; i < original_size; ++i) {
-        if (i == f_k_idx) continue;
-        const FormulaHandle dup = shadow.entries[i];
-        out.emplace_back(lkr::Duplicate{{}, i});   // append a copy of entry i
-        right_needs.push_back(weakened.entries.size());
-        weakened.entries.push_back(dup);
-    }
-
-    // Emit the And. right_needs go to RIGHT; everything else
-    // (non-principal, non-right_needs) goes to LEFT.
-    out.emplace_back(lkr::And{{}, f_k_idx, right_needs});
-
-    // Compute LEFT and RIGHT shadows by mirroring emit_and_split's
-    // semantics (sorted left partition; principal consumed).
-    SequentShadow left_post;
-    left_post.lkr_term_for    = shadow.lkr_term_for;
-    SequentShadow right_post;
-    right_post.lkr_term_for    = shadow.lkr_term_for;
-
-    // Build a quick lookup for right_needs.
-    std::vector<bool> in_right(weakened.entries.size(), false);
-    for (size_t i : right_needs) in_right[i] = true;
-
-    // LEFT: indices that are non-principal and NOT in right_needs.
-    // emit_and_split sorts left_partition; we iterate in index order.
-    for (size_t i = 0; i < weakened.entries.size(); ++i) {
-        if (i == f_k_idx) continue;
-        if (in_right[i]) continue;
-        left_post.entries.push_back(weakened.entries[i]);
-    }
-    size_t left_pos = left_post.entries.size();
-    left_post.entries.push_back(phi);
-
-    // RIGHT: indices in right_needs.
-    for (size_t i : right_needs) {
-        right_post.entries.push_back(weakened.entries[i]);
-    }
-    size_t right_pos = right_post.entries.size();
-    right_post.entries.push_back(theta);
-
-    // Remap step_to_neg_idx: parent f_k_idx is consumed (no remap);
-    // parent p < f_k_idx → p; parent p > f_k_idx → p - 1. LEFT and
-    // RIGHT have identical remaps because Weakening preserves the
-    // relative order of non-f_k_idx entries in both branches.
-    for (const auto& [step_idx, parent_pos] : shadow.step_to_neg_idx) {
-        if (parent_pos == f_k_idx) continue;
-        size_t mapped = parent_pos < f_k_idx ? parent_pos : parent_pos - 1;
-        left_post.step_to_neg_idx[step_idx]  = mapped;
-        right_post.step_to_neg_idx[step_idx] = mapped;
-    }
-
-    return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
-                                   left_pos, right_pos, op.a, op.b}};
-}  // emit_and_intro
-
-// =========================================================================
-// IffIntro — NNF(A↔B) = (NNF(¬A)∨NNF(B)) ∧ (NNF(A)∨NNF(¬B)). Structurally
-// identical to AndIntro at the LKR level — both decompose a top-level And
-// via multiplicative ∧R with full-context duplication. Returns TwoPremise
-// with each branch's premise_pos pointing at the Or-shaped conjunct (the
-// dispatcher's recursion on ab/ba — typically ImpliesIntro emitters — then
-// emits Or on each side).
-//
-// LEFT subgoal: [Γ_left..., NNF(A→B)]. Premise position = the Or-shaped
-//               first conjunct.
-// RIGHT subgoal: [Γ_right..., NNF(B→A)]. Premise position = the Or-shaped
-//               second conjunct.
-//
-// Type-check: validates the principal is And and both conjuncts are Or
-// (the canonical NNF(A↔B) shape). Other shapes indicate the caller passed
-// a non-Iff principal — a translator bug.
-// =========================================================================
-util::Result<IntroResult> emit_iff_intro(
-    Ctx&                     /*cc*/,
-    const nd::IffIntro&      op,
-    const SequentShadow&     shadow,
-    size_t                   f_k_idx,
-    std::vector<lkr::Instr>& out,
-    DemandPath               path)
-{
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_iff_intro: f_k_idx out of range";
-    }
-
-    // Demand-aware short-circuits: IFF_LEFT → recurse on op.ab (forward
-    // direction A→B); IFF_RIGHT → recurse on op.ba (reverse B→A).
-    if (!path.empty() && std::holds_alternative<DemandIffLeft>(path[0])) {
-        return IntroResult{OnePremise{shadow, f_k_idx, op.ab, path_tail(path)}};
-    }
-    if (!path.empty() && std::holds_alternative<DemandIffRight>(path[0])) {
-        return IntroResult{OnePremise{shadow, f_k_idx, op.ba, path_tail(path)}};
-    }
-    TRY(require_trivial_path(path, "emit_iff_intro"));
-
-    auto outer = require_compound(shadow.entries[f_k_idx], Op::And,
-                                  "emit_iff_intro");
-    if (!outer.ok()) return outer.error();
-    auto left_or  = require_compound(outer.value().left,  Op::Or,
-                                     "emit_iff_intro (left conjunct)");
-    if (!left_or.ok()) return left_or.error();
-    auto right_or = require_compound(outer.value().right, Op::Or,
-                                     "emit_iff_intro (right conjunct)");
-    if (!right_or.ok()) return right_or.error();
-
-    const FormulaHandle phi   = outer.value().left;   // NNF(A→B) = ¬A ∨ B
-    const FormulaHandle theta = outer.value().right;  // NNF(B→A) = A ∨ ¬B
-
-    // Step 1: Weakening duplication, identical to AndIntro.
-    SequentShadow weakened = shadow;
-    const size_t original_size = shadow.entries.size();
-    std::vector<size_t> right_needs;
-    right_needs.reserve(original_size - 1);
-    for (size_t i = 0; i < original_size; ++i) {
-        if (i == f_k_idx) continue;
-        const FormulaHandle dup = shadow.entries[i];
-        out.emplace_back(lkr::Duplicate{{}, i});   // append a copy of entry i
-        right_needs.push_back(weakened.entries.size());
-        weakened.entries.push_back(dup);
-    }
-
-    // Step 2: And split.
-    out.emplace_back(lkr::And{{}, f_k_idx, right_needs});
-
-    // Step 3: per-branch shadows. Each branch's premise position points
-    // at the Or-shaped conjunct; the dispatcher's recursion emits Or
-    // there.
-    SequentShadow left_post;
-    left_post.lkr_term_for    = shadow.lkr_term_for;
-    SequentShadow right_post;
-    right_post.lkr_term_for    = shadow.lkr_term_for;
-
-    std::vector<bool> in_right(weakened.entries.size(), false);
-    for (size_t i : right_needs) in_right[i] = true;
-
-    for (size_t i = 0; i < weakened.entries.size(); ++i) {
-        if (i == f_k_idx) continue;
-        if (in_right[i]) continue;
-        left_post.entries.push_back(weakened.entries[i]);
-    }
-    size_t left_phi_idx = left_post.entries.size();
-    left_post.entries.push_back(phi);
-
-    for (size_t i : right_needs) {
-        right_post.entries.push_back(weakened.entries[i]);
-    }
-    size_t right_theta_idx = right_post.entries.size();
-    right_post.entries.push_back(theta);
-
-    // Remap step_to_neg_idx: f_k_idx is consumed; other parent indices
-    // shift down by 1 if > f_k_idx. LEFT and RIGHT remap identically
-    // because Weakening preserves the relative order of non-f_k_idx
-    // entries in both branches. See emit_and_intro for the same
-    // pattern.
-    for (const auto& [step_idx, parent_pos] : shadow.step_to_neg_idx) {
-        if (parent_pos == f_k_idx) continue;
-        size_t mapped = parent_pos < f_k_idx ? parent_pos : parent_pos - 1;
-        left_post.step_to_neg_idx[step_idx]  = mapped;
-        right_post.step_to_neg_idx[step_idx] = mapped;
-    }
-
-    return IntroResult{TwoPremise{std::move(left_post), std::move(right_post),
-                                   left_phi_idx, right_theta_idx,
-                                   op.ab, op.ba}};
+    t.step = op.body;
+    return next(EnterWork{b, 0, TranslateWork{std::move(t)}});
 }
 
-// =========================================================================
-// ExcludedMiddle — Or + emit_close.
-//   Initial: shadow.entries[f_k_idx] = NNF(A) ∨ NNF(¬A).
-//   After Or: NNF(A) at f_k_idx, NNF(¬A) at end. They're NNF-dual by
-//   construction, so emit_close discharges via AxiomLit (atomic) or
-//   structural recursion (compound). Returns ZeroPremise.
-// =========================================================================
-util::Result<IntroResult> emit_excluded_middle(
-    Ctx&                       cc,
-    const nd::ExcludedMiddle&  /*op*/,
-    const SequentShadow&       shadow,
-    size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out,
-    DemandPath                 path)
-{
-    TRY(require_trivial_path(path, "emit_excluded_middle"));
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_excluded_middle: f_k_idx out of range";
+util::ResultStatus Dispatcher::run(ExistsIntroWork w) {
+    Task& t = w.task;
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY(t.seq.exists_rule(t.target.pos(), w.witness, builder_, sink_));
+        t.step = w.body;
+        return next(std::move(t));
     }
-    auto kids = require_compound(shadow.entries[f_k_idx], Op::Or,
-                                 "emit_excluded_middle");
-    if (!kids.ok()) return kids.error();
-
-    out.emplace_back(lkr::Or{{}, f_k_idx});
-
-    SequentShadow work = shadow;
-    work.entries[f_k_idx] = kids.value().left;
-    size_t neg_idx = work.entries.size();
-    work.entries.push_back(kids.value().right);
-
-    EmitCloseContext ecc{cc.builder};
-    auto cr = emit_close(ecc, work, f_k_idx, neg_idx, out);
-    if (!cr.ok()) {
-        return MAKE_ERROR
-            << "emit_excluded_middle: emit_close failed: "
-            << cr.error().to_string();
-    }
-    return IntroResult{ZeroPremise{}};
+    auto* elim = std::get_if<DemandWitness>(&t.path.head());
+    if (!elim) return impossible_head(t);
+    StepRef closer = elim->closer;
+    t.path.pop();
+    BlockId b = index_.closed_by(closer);
+    t.seq.terms().bind(index_.opener(b), w.witness);
+    TRY_ASSIGN(bound, bind(std::move(t.seq), index_.opener(b), Minor{w.body}));
+    TRY_ASSIGN(body, exists_elim_body(
+        Task{std::move(bound.seq), closer, t.target, std::move(t.path)}, closer));
+    return next(std::move(bound.first), EnterWork{b, 0, std::move(body)});
 }
 
-// =========================================================================
-// Peirce — fixed cut-free skeleton.
-//   NNF(((A→B)→A)→A) = ((NNF(¬A) ∨ NNF(B)) ∧ NNF(¬A)) ∨ NNF(A).
-//   Skeleton:
-//     Or{f_k_idx}        : conjunct at f_k_idx, A appended.
-//     Weakening{A}       : another A appended.
-//     And{f_k_idx, ...}  : split conjunct; LEFT gets first A, RIGHT gets
-//                          second A.
-//     LEFT:  [A, NNF(¬A)∨NNF(B)]. Or → [A, NNF(¬A), NNF(B)].
-//            emit_close on (0, 1).
-//     RIGHT: [A, NNF(¬A)]. emit_close on (0, 1).
-//   Returns ZeroPremise.
-//
-// Precondition: shadow.entries has ONLY the principal at f_k_idx
-// (no surrounding context — Peirce is a closed tautology). This holds
-// when Peirce is the root of a sub-derivation; the dispatcher arranges
-// the call site appropriately.
-// =========================================================================
-util::Result<IntroResult> emit_peirce(
-    Ctx&                       cc,
-    const nd::Peirce&          /*op*/,
-    const SequentShadow&       shadow,
-    size_t                     f_k_idx,
-    std::vector<lkr::Instr>&   out,
-    DemandPath                 path)
-{
-    TRY(require_trivial_path(path, "emit_peirce"));
-    if (f_k_idx >= shadow.entries.size()) {
-        return MAKE_ERROR << "emit_peirce: f_k_idx out of range";
+util::ResultStatus Dispatcher::on(const nd::ExcludedMiddle&, Task t) {
+    if (t.path.empty()) {
+        TRY(require_target(t.target, t.step));
+        TRY_ASSIGN(negated, t.seq.or_rule(t.target.pos(), sink_));
+        return std::move(t.seq).identity(t.target.pos(), negated, builder_,
+                                         sink_);
     }
-    if (shadow.entries.size() != 1 || f_k_idx != 0) {
-        return MAKE_ERROR
-            << "emit_peirce: requires isolated sequent with single principal "
-               "at index 0 (got "
-            << shadow.entries.size() << " entries, principal at "
-            << f_k_idx << ")";
+    auto* cases = std::get_if<DemandCases>(&t.path.head());
+    if (!cases) return impossible_head(t);
+    DemandCases c = *cases;
+    t.path.pop();
+    TRY_ASSIGN(em, reader_.read(t.step, t.seq.terms()));
+    if (!lkr_build::has_op(em, Op::Or)) {
+        return MAKE_ERROR << "excluded_middle #" << t.step.idx
+                          << ": result is not A ∨ ¬A";
     }
-
-    // outer = ((¬A ∨ B) ∧ ¬A) ∨ A
-    auto outer = require_compound(shadow.entries[f_k_idx], Op::Or,
-                                  "emit_peirce");
-    if (!outer.ok()) return outer.error();
-    // outer.left = (¬A ∨ B) ∧ ¬A;  outer.right = A
-    auto conj = require_compound(outer.value().left, Op::And,
-                                 "emit_peirce (left disjunct)");
-    if (!conj.ok()) return conj.error();
-    auto disj = require_compound(conj.value().left, Op::Or,
-                                 "emit_peirce (left conjunct)");
-    if (!disj.ok()) return disj.error();
-
-    const FormulaHandle a_nnf      = outer.value().right;   // NNF(A)
-    const FormulaHandle conj_left  = conj.value().left;     // ¬A ∨ B
-    const FormulaHandle conj_right = conj.value().right;    // ¬A
-    const FormulaHandle disj_left  = disj.value().left;     // ¬A
-    const FormulaHandle disj_right = disj.value().right;    // B
-    (void)disj_right;  // unused — B vanishes after the Or under LEFT
-
-    // Step 1: Or on the outer disjunction.
-    out.emplace_back(lkr::Or{{}, f_k_idx});
-    SequentShadow work = shadow;
-    work.entries[f_k_idx] = outer.value().left;     // conjunct
-    size_t a1_idx = work.entries.size();
-    work.entries.push_back(a_nnf);                  // A (first copy) at a1_idx
-
-    // Step 2: duplicate A (multiplicative fan-out feeds both And branches).
-    out.emplace_back(lkr::Duplicate{{}, a1_idx});
-    size_t a2_idx = work.entries.size();
-    work.entries.push_back(a_nnf);                  // A (second copy)
-
-    // Step 3: And on the conjunct. right_needs = [a2_idx].
-    std::vector<size_t> right_needs = {a2_idx};
-    out.emplace_back(lkr::And{{}, f_k_idx, right_needs});
-
-    // LEFT subgoal: [a1_idx's value, conj_left] = [A, ¬A ∨ B].
-    SequentShadow left_work;
-    left_work.entries.push_back(a_nnf);             // A
-    size_t left_or_idx = left_work.entries.size();
-    left_work.entries.push_back(conj_left);         // ¬A ∨ B
-
-    // LEFT step 4: Or on (¬A ∨ B).
-    out.emplace_back(lkr::Or{{}, left_or_idx});
-    left_work.entries[left_or_idx] = disj_left;     // ¬A
-    left_work.entries.push_back(disj_right);        // B
-
-    // LEFT step 5: emit_close on (0, left_or_idx) — A vs ¬A.
-    {
-        EmitCloseContext ecc{cc.builder};
-        auto cr = emit_close(ecc, left_work, 0, left_or_idx, out);
-        if (!cr.ok()) {
-            return MAKE_ERROR
-                << "emit_peirce: LEFT emit_close failed: "
-                << cr.error().to_string();
-        }
-    }
-
-    // RIGHT subgoal: [a2_idx's value, conj_right] = [A, ¬A].
-    SequentShadow right_work;
-    right_work.entries.push_back(a_nnf);            // A
-    right_work.entries.push_back(conj_right);       // ¬A
-
-    // RIGHT step 6: emit_close on (0, 1).
-    {
-        EmitCloseContext ecc{cc.builder};
-        auto cr = emit_close(ecc, right_work, 0, 1, out);
-        if (!cr.ok()) {
-            return MAKE_ERROR
-                << "emit_peirce: RIGHT emit_close failed: "
-                << cr.error().to_string();
-        }
-    }
-
-    return IntroResult{ZeroPremise{}};
+    FormulaHandle a_nnf = builder_.to_nnf(em.get().as_compound().left);
+    Split split = std::move(t.seq).cut_rule(a_nnf, builder_, sink_);
+    HypId not_a = fresh_local();
+    split.left.shadow.bind_dual(not_a, split.left.added);
+    DemandPath if_not_a = t.path;
+    if_not_a.push(DemandModus{Minor{not_a}});
+    HypId a = fresh_local();
+    split.right.shadow.bind_dual(a, split.right.added);
+    t.path.push(DemandModus{Minor{a}});
+    return next(TranslateWork{Task{std::move(split.left.shadow), c.if_right,
+                                   t.target, std::move(if_not_a)}},
+                TranslateWork{Task{std::move(split.right.shadow), c.if_left,
+                                   t.target, std::move(t.path)}});
 }
 
-}  // namespace logic::proof::translate::nd_to_lkr::intros
+util::ResultStatus Dispatcher::on(const nd::Peirce&, Task t) {
+    if (!t.path.empty()) return let_cut(std::move(t));
+    TRY(require_target(t.target, t.step));
+    size_t goal = t.target.pos();
+    TRY_ASSIGN(a1, t.seq.or_rule(goal, sink_));
+    TRY_ASSIGN(a2, t.seq.duplicate(a1, sink_));
+    TRY_ASSIGN(split, std::move(t.seq).and_rule(goal, {a1}, {a2}, sink_));
+    size_t left_a = *split.left.moved[a1];
+    TRY(split.left.shadow.or_rule(split.left.added, sink_));
+    TRY(std::move(split.left.shadow).identity(left_a, split.left.added,
+                                              builder_, sink_));
+    return std::move(split.right.shadow).identity(
+        *split.right.moved[a2], split.right.added, builder_, sink_);
+}
+
+}  // namespace logic::proof::translate::nd_to_lkr

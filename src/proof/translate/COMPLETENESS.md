@@ -84,18 +84,18 @@ For every formula φ and every iota-free `P : Program<nd::Instr>` with
 NDtoLKR(φ, P) = Ok(Q)   with   LKRVerifier(φ, Q) = Ok.
 ```
 
-**Proof method.** Structural induction on the block tree built by
-`block_tree.cpp::decompose_blocks`. Each block kind is closed by a
-dispatch handler emitting the cut-spine pattern:
+The input must also satisfy I-4 (every reference's derivation needs only
+hypotheses and binders in scope at the reference); see
+`nd_to_lkr/ELIMINATION_DEMANDS_DESIGN.md` §4.
 
-- `FORALL` block — Cut + Forall + body translation.
-- `IMPLIES` block — Cut + Or + body translation.
-- `NOT` block — Cut + Exists/Forall + body translation (analogous).
-- `EXISTS_ELIM` block — Forall on the witness binder + body.
-- `OUTER` block — body translation + final `emit_close` between qed
-  slot and step_to_neg_idx[target].
-
-Flat ND ops are translated by `dispatch_close` (one per ND rule).
+**Proof method.** Recursive descent from `Qed.derived`
+(`nd_to_lkr/ELIMINATION_DEMANDS_DESIGN.md` §2), by induction on the
+unfolded derivation tree. Every elimination is a demand on its major
+premise. An introduction applies its right rule under an empty path, or
+reduces when it meets its own elimination. A hypothesis applies the left
+rules of the path to its dual, then closes against the target with
+`emit_close`. The coverage matrix of the design's §3 assigns every
+(rule, demand) pair a rule or excludes it by ND typing.
 
 ### Composition (ND → Comb)
 
@@ -180,35 +180,37 @@ op survives the inliner pre-pass.
 ### 4.2 ND → LKR (per-rule, Theorem B)
 
 Input-gate exclusions (rejected, so not in scope): `IotaElim` and
-`EqSym` — must be eliminated upstream (`iota_elim` translator).
+`EqSym` (eliminated upstream), and inputs violating I-4.
 
-| ND op                      | Role                                  | Implementation                                   | Status |
-|----------------------------|---------------------------------------|--------------------------------------------------|--------|
-| Fix                        | opener of FORALL block                | block_tree.cpp / translate_block_forall          | ✓ done |
-| Assume                     | opener of IMPLIES or NOT_ block       | block_tree.cpp / translate_block_implies, _not   | ✓ done |
-| Let                        | no-emit (inert)                       | classifier in cut_spine.cpp                      | ✓ done |
-| Use                        | dispatch_close → CloseByLemma         | cut_spine.cpp::close_use                         | ✓ done |
-| SchemaInst                 | dispatch_close → CloseByLemma         | cut_spine.cpp::close_schema_inst                 | ✓ done |
-| ForallElim                 | dispatch_close → Exists + emit_close  | cut_spine.cpp::close_forall_elim                 | ✓ done |
-| AndIntro / AndElimL / R    | dispatch_close → And + emit_close     | cut_spine.cpp::(anonymous)                       | ✓ done |
-| OrIntroL / R / OrElim      | dispatch_close → Or + emit_close      | cut_spine.cpp::(anonymous)                       | ✓ done |
-| ImpliesIntro               | closer of IMPLIES block               | cut_spine.cpp::translate_block_implies           | ✓ done |
-| ImpliesElim                | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
-| NotIntro                   | closer of NOT_ block                  | cut_spine.cpp::translate_block_not               | ✓ done |
-| NotElim                    | no-emit (consumed by NotIntro / BottomElim) | classifier                                  | ✓ done |
-| BottomElim                 | dispatch_close (via ghost-⊥ pairing)  | cut_spine.cpp::(anonymous)                       | ✓ done |
-| IffIntro / IffElimL / R    | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
-| ForallIntro                | closer of FORALL block                | cut_spine.cpp::translate_block_forall            | ✓ done |
-| ExistsIntro (flat)         | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
-| ExistsIntro (block-closer) | closer of EXISTS_ELIM block           | cut_spine.cpp::translate_block_exists_elim       | ✓ done |
-| ExistsElim                 | opener of EXISTS_ELIM block           | block_tree.cpp / translate_block_exists_elim     | ✓ done |
-| DoubleNegElim              | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
-| ExcludedMiddle             | dispatch_close                        | cut_spine.cpp::(anonymous)                       | ✓ done |
-| Qed                        | closer of OUTER block                 | cut_spine.cpp::translate_outer                   | ✓ done |
-| Peirce                     | dispatch_close → Cut + Or + And + emit_close | cut_spine.cpp::(Peirce branch) + parser keyword | ✓ done |
-| ClassicalAbsurd            | closer of CLASSICAL_ABSURD block      | cut_spine.cpp::translate_block_classical_absurd  | ✓ done |
+Spec: `nd_to_lkr/ELIMINATION_DEMANDS_DESIGN.md` (§ in the table). Tests:
+`nd_to_lkr_demands_test` (per gap and per redex, both share modes),
+`nd_to_lkr_test`, `cut_minimal_dispatcher_test`,
+`cut_minimal_demand_through_combining_test`.
 
-Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
+| ND op                      | Translation                                             | Spec      | Implementation                    | Status |
+|----------------------------|---------------------------------------------------------|-----------|-----------------------------------|--------|
+| Assume, ExistsElim         | hypothesis: left rules of the path on its dual          | §2.4      | leaves.cpp                        | ✓ done |
+| Fix, Let, Qed              | not translated (binder, payload, entry point)           | §2.1      | dispatcher.cpp                    | ✓ done |
+| Use, SchemaInst            | Cut + CloseByLemma; left rules on the lemma's dual      | §2.1      | dispatcher.cpp::lemma             | ✓ done |
+| AndElimL / R, ForallElim   | push AndL / AndR / Instance                             | §1.4      | dispatcher.cpp                    | ✓ done |
+| DoubleNegElim              | nothing to push (NNF)                                   | §1.4      | dispatcher.cpp                    | ✓ done |
+| ImpliesElim, IffElimL / R  | push Modus / IffModus                                   | §1.4      | dispatcher.cpp                    | ✓ done |
+| NotElim                    | push Refute (result ⊥: target none)                     | §1.4      | dispatcher.cpp                    | ✓ done |
+| OrElim                     | push Cases, or let-cut under a step-carrying tail       | §2.1, §2.5| dispatcher.cpp                    | ✓ done |
+| AndIntro, IffIntro         | routed And split; select / forward under their elims    | §2.2, §2.6| intros.cpp                        | ✓ done |
+| OrIntroL / R               | Or; select the case under Cases                         | §2.2      | intros.cpp                        | ✓ done |
+| ImpliesIntro               | Or + slot; bind under Modus                             | §2.2      | intros.cpp                        | ✓ done |
+| ForallIntro                | Forall (fresh eigenvariable); σ under Instance          | §2.2      | intros.cpp                        | ✓ done |
+| ExistsIntro (witness)      | Exists; σ + bind under Witness                          | §2.2      | intros.cpp::exists_intro          | ✓ done |
+| ExistsIntro (∃E closer)    | push Witness on the opener's formula; re-quantifying form | §1.4, §2.2 | dispatcher.cpp, intros.cpp     | ✓ done |
+| ExcludedMiddle             | Or + identity; Cut(A') under Cases                      | §2.2      | intros.cpp                        | ✓ done |
+| Peirce                     | fixed skeleton in any context; let-cut under Modus      | §2.2      | intros.cpp                        | ✓ done |
+| NotIntro                   | slot; bind under Refute; pending or let-cut otherwise   | §2.3      | dispatcher.cpp::closer            | ✓ done |
+| ClassicalAbsurd            | slot; pending or let-cut under a path                   | §2.3      | dispatcher.cpp::closer            | ✓ done |
+| BottomElim                 | translate the ⊥ step with target none                   | §2.3      | dispatcher.cpp                    | ✓ done |
+
+Re-audit this table whenever the dispatcher (`dispatcher.cpp`,
+`intros.cpp`, `leaves.cpp`) changes.
 
 ### 4.3 Cross-cutting
 
@@ -216,12 +218,7 @@ Re-audit this table whenever `cut_spine.cpp` / `block_tree.cpp` change.
 |-------------------------------|-----------------------------------|--------|
 | Axiom CombProofs (deduction)  | AXIOM_REWRAP_DESIGN.md            | spec + Phases 1–5 done; Phase 6 (pipeline integration) partial — axiom_rewrap integrates cleanly into ND → NDtoLKR → LKRtoComb for inputs where the wrapped goal stays within current downstream capability (single-level quantifier nesting); deeper ZFC theorems (eq_refl, anything wrapping a 2-level-nested-forall axiom) block on a pre-existing LKRtoComb cotree limitation surfaced by the C.2 singleton-binder check. See LKR_TO_COMB_DESIGN.md §8 "Modular decomposition during translation". |
 | Corpus measurement (isa2fol)  | n/a                               | open   |
-| NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | open   |
-
-The "NDtoLKR emission for `One`" row tracks an enhancement to
-`translate_block_not` (or Fograph) so that ND proofs producing the
-truth literal `¬⊥` flow end-to-end. The LKR→Comb side is done;
-NDtoLKR currently never emits `lkr::One` ops.
+| NDtoLKR emission for `One`    | LKR_TO_COMB_DESIGN.md §4.2 (end)  | done: NDtoLKR closes ¬⊥ targets and ⊥ results with `One` (ELIMINATION_DEMANDS_DESIGN.md §1.3) |
 
 
 The earlier "Cut-free lemma export" row was dissolved by Strategy A
@@ -234,6 +231,10 @@ which completeness is **not** claimed):
 
 - ND proofs containing iota terms (iota-elim is a separate translator;
   apply it first).
+- ND proofs violating I-4: a reference into a closed block whose
+  derivation uses that block's assumption or variable (the ND verifier
+  tracks derivability per formula). Normalizing them is a separate ND→ND
+  pass (`nd_to_lkr/ELIMINATION_DEMANDS_DESIGN.md` §4).
 - (Contraction and One are both supported now; the prior version of
   this list excluded them.)
 - LKR programs with `CloseByLemma` referencing a lemma whose CombProof

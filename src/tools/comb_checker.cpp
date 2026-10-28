@@ -376,7 +376,11 @@ void process_proof_file(
 
         FormulaHandle wrapped_goal = ni_r.value().wrapped_goal.get().root();
 
-        ntl::NDtoLKR ndl(rt.context(), wrapped_goal);
+        // NDLKR_SHARE (non-empty): share mode (ELIMINATION_DEMANDS_DESIGN.md §5.2).
+        ntl::Options ndl_options;
+        const char* share = std::getenv("NDLKR_SHARE");
+        ndl_options.share = share != nullptr && *share != '\0';
+        ntl::NDtoLKR ndl(rt.context(), wrapped_goal, ndl_options);
         auto lkr_r = ndl.apply(ni_r.value().proof);
         if (!lkr_r.ok()) {
             fail("nd_to_lkr", lkr_r.error().to_string());

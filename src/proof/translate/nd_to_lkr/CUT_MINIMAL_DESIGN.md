@@ -7,6 +7,12 @@
 > (4) result-visibility invariant binds across Phases 1–3 (see §1.4).
 > Phase 1 (introductions) detail inline; Phases 2–5 stubbed and filled
 > in as we reach them.
+>
+> **2026-10-27:** Phase 7 ([ELIMINATION_DEMANDS_DESIGN.md]) supersedes the
+> combining-elim, closer and ForallIntro-under-INSTANCE parts of §1.2–§1.4,
+> §5.1.7, §6.2–§6.3 and §7.1: every elimination is a demand, cuts are
+> emitted only at non-normal points, and eigenvariables are fresh per
+> Forall.
 
 ## 1. Theorem and obligation
 

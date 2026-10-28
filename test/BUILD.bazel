@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 
 cc_test(
@@ -104,10 +105,7 @@ cc_test(
         "//src/proof/nd:lowering",
         "//src/proof/nd:ops",
         "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:block_tree",
-        "//src/proof/translate/nd_to_lkr:demand",
-        "//src/proof/translate/nd_to_lkr:dispatcher",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/proof/translate/nd_to_lkr",
         "//src/runtime",
     ],
 )
@@ -126,79 +124,51 @@ cc_test(
         "//src/proof/nd:lowering",
         "//src/proof/nd:ops",
         "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:block_tree",
-        "//src/proof/translate/nd_to_lkr:demand",
-        "//src/proof/translate/nd_to_lkr:dispatcher",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/proof/translate/nd_to_lkr",
         "//src/runtime",
     ],
 )
 
 cc_test(
-    name = "cut_minimal_structural_test",
-    srcs = ["cut_minimal_structural_test.cpp"],
+    name = "nd_to_lkr_demands_test",
+    srcs = ["nd_to_lkr_demands_test.cpp"],
     deps = [
+        ":lkr_ops_equal",
         "//src/core:formula",
+        "//src/proof:proof_value",
+        "//src/proof/lkr:ops",
+        "//src/proof/lkr_build:expand",
+        "//src/proof/nd:lowering",
+        "//src/proof/translate/nd_to_lkr",
+        "//src/runtime",
+    ],
+)
+
+cc_library(
+    name = "lkr_ops_equal",
+    testonly = True,
+    hdrs = ["lkr_ops_equal.h"],
+    deps = [
         "//src/parser",
         "//src/proof:ir",
-        "//src/proof:proof_value",
-        "//src/proof/nd:ops",
-        "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
-        "//src/proof/translate/nd_to_lkr:structural",
-        "//src/runtime",
+        "//src/proof/lkr:ops",
     ],
 )
 
 cc_test(
-    name = "cut_minimal_combining_test",
-    srcs = ["cut_minimal_combining_test.cpp"],
+    name = "lkr_build_test",
+    srcs = ["lkr_build_test.cpp"],
     deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:ir",
-        "//src/proof:proof_value",
-        "//src/proof/nd:ops",
-        "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:combining",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "cut_minimal_projections_test",
-    srcs = ["cut_minimal_projections_test.cpp"],
-    deps = [
+        ":lkr_ops_equal",
         "//src/core:formula",
         "//src/parser",
         "//src/proof:proof_value",
-        "//src/proof/nd:ops",
-        "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:demand",
-        "//src/proof/translate/nd_to_lkr:projections",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
-        "//src/runtime",
-    ],
-)
-
-cc_test(
-    name = "cut_minimal_intros_test",
-    srcs = ["cut_minimal_intros_test.cpp"],
-    deps = [
-        "//src/core:formula",
-        "//src/parser",
-        "//src/proof:ir",
-        "//src/proof:proof_value",
-        "//src/proof:runner",
         "//src/proof/lkr:ops",
         "//src/proof/lkr:verifier",
-        "//src/proof/nd:ops",
-        "//src/proof/nd:verifier",
-        "//src/proof/translate/nd_to_lkr:demand",
-        "//src/proof/translate/nd_to_lkr:intros",
-        "//src/proof/translate/nd_to_lkr:sequent_shadow",
+        "//src/proof/lkr_build",
+        "//src/proof/lkr_build:expand",
         "//src/runtime",
+        "//src/util:error",
     ],
 )
 
@@ -424,12 +394,8 @@ test_suite(
         ":nd_internalize_test",
         ":comb_test",
         ":core_test",
-        ":cut_minimal_combining_test",
         ":cut_minimal_demand_through_combining_test",
         ":cut_minimal_dispatcher_test",
-        ":cut_minimal_intros_test",
-        ":cut_minimal_projections_test",
-        ":cut_minimal_structural_test",
         ":deriv_test",
         ":deriv_invariants_test",
         ":b0_test",
@@ -444,9 +410,11 @@ test_suite(
         ":ks1_validation_test",
         ":lkr_to_ks1_test",
         ":lkr_to_comb_test",
+        ":lkr_build_test",
         ":lkr_verifier_test",
         ":library_test",
         ":reconcile_test",
+        ":nd_to_lkr_demands_test",
         ":nd_to_lkr_test",
         ":runtime_test",
     ],
